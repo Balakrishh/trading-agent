@@ -103,6 +103,66 @@ class KnowledgeBase:
             doc_id=doc_id, text=note, category="strategy_note",
             metadata=meta)
 
+    def update_trade_outcome(self, trade_id: str, outcome_label: str,
+                             realized_pl: float, exit_signal: str,
+                             exit_reason: str, updated_text: str = "") -> bool:
+        """
+        Back-fill the outcome into an existing trade KB document when the
+        trade closes.  Without this, all trade documents look identical
+        (no win/loss label) and the model can't learn what distinguishes
+        a winning setup from a losing one.
+
+        Parameters
+        ----------
+        trade_id      : matches the trade_id used in add_trade()
+        outcome_label : "win" | "loss" | "breakeven" | "expired_worthless"
+        realized_pl   : final P&L in dollars
+        exit_signal   : "profit_target" | "stop_loss" | "regime_shift" etc.
+        exit_reason   : human-readable reason string
+        updated_text  : if provided, replace the document text entirely
+                        (pass trade.to_embedding_text() for canonical format)
+
+        Returns True if the document was found and updated.
+        """
+        doc_id = f"trade_{trade_id}"
+        path = os.path.join(self.docs_dir, f"{doc_id}.json")
+        if not os.path.exists(path):
+            logger.warning("KB update_trade_outcome: doc %s not found", doc_id)
+            return False
+
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+
+            data["metadata"]["outcome_label"] = outcome_label
+            data["metadata"]["realized_pl"] = realized_pl
+            data["metadata"]["exit_signal"] = exit_signal
+            data["metadata"]["exit_reason"] = exit_reason
+            data["metadata"]["closed_at"] = datetime.utcnow().isoformat()
+
+            if updated_text:
+                data["text"] = updated_text
+                # Re-generate embedding for the richer post-outcome text
+                if self.embed_fn:
+                    try:
+                        embs = self.embed_fn([updated_text])
+                        if embs:
+                            data["embedding"] = embs[0]
+                            self._embedding_cache[doc_id] = embs[0]
+                    except Exception as exc:
+                        logger.warning("Re-embed after outcome update failed: %s", exc)
+
+            with open(path, "w") as fh:
+                json.dump(data, fh, indent=2)
+
+            logger.info("KB: outcome back-filled for %s → %s (P&L=$%.2f)",
+                        doc_id, outcome_label, realized_pl)
+            return True
+
+        except Exception as exc:
+            logger.error("KB update_trade_outcome failed for %s: %s", doc_id, exc)
+            return False
+
     def add_market_condition(self, text: str,
                              metadata: Dict = None) -> str:
         """Add a market condition observation."""
@@ -227,6 +287,64 @@ class KnowledgeBase:
         """Find notes relevant to a specific strategy."""
         return self.search_similar(
             f"Strategy: {strategy}", top_k, category="strategy_note")
+
+    def query_by_metadata(self, filters: Dict,
+                          top_k: int = 20) -> List[KBDocument]:
+        """
+        Return documents whose metadata matches ALL key-value pairs in
+        *filters*.  Useful for targeted fine-tuning queries such as:
+
+            # All losing Bear Call Spreads
+            kb.query_by_metadata({"outcome_label": "loss",
+                                  "strategy": "Bear Call Spread"})
+
+            # All wins in a bearish regime
+            kb.query_by_metadata({"outcome_label": "win",
+                                  "regime": "bearish"})
+
+        Metadata keys set by the agent: outcome_label, realized_pl,
+        exit_signal, strategy, regime, ticker.
+        """
+        index = self._load_index()
+        results = []
+        for entry in index.get("documents", []):
+            doc = self._load_document(entry["doc_id"])
+            if doc is None:
+                continue
+            if all(doc.metadata.get(k) == v for k, v in filters.items()):
+                results.append(doc)
+            if len(results) >= top_k:
+                break
+        return results
+
+    def outcome_stats(self) -> Dict:
+        """
+        Aggregate win/loss counts by strategy and regime.
+        Useful for surfacing which setups have the best historical edge.
+
+            {
+              "Bull Put Spread": {"bullish": {"win": 12, "loss": 3}},
+              "Bear Call Spread": {"bearish": {"win": 8,  "loss": 5}},
+              ...
+            }
+        """
+        index = self._load_index()
+        stats: Dict = {}
+        for entry in index.get("documents", []):
+            if entry.get("category") != "trade":
+                continue
+            doc = self._load_document(entry["doc_id"])
+            if not doc:
+                continue
+            outcome = doc.metadata.get("outcome_label")
+            if not outcome:
+                continue
+            strategy = doc.metadata.get("strategy", "unknown")
+            regime = doc.metadata.get("regime", "unknown")
+            stats.setdefault(strategy, {}).setdefault(regime, {"win": 0, "loss": 0, "other": 0})
+            bucket = outcome if outcome in ("win", "loss") else "other"
+            stats[strategy][regime][bucket] += 1
+        return stats
 
     # ------------------------------------------------------------------
     # Keyword fallback search

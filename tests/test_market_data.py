@@ -58,6 +58,147 @@ class TestSMASlope:
         assert slope < 0
 
 
+class TestTTLCaching:
+    def test_snapshot_cache_hit_within_ttl(self, monkeypatch):
+        """A cached price within TTL is returned without hitting the network."""
+        import time
+        provider = MarketDataProvider("k", "s")
+        provider._snapshot_cache["SPY"] = (500.0, time.monotonic() - 5)
+
+        # Any network call should raise — a cache hit must not reach requests
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("network must not be called on cache hit")),
+        )
+        price = provider._fetch_alpaca_snapshot_price("SPY")
+        assert price == pytest.approx(500.0)
+
+    def test_snapshot_cache_miss_after_ttl(self, monkeypatch):
+        import time
+        from unittest.mock import MagicMock
+        provider = MarketDataProvider("k", "s")
+        # Cache entry older than SNAPSHOT_TTL
+        from trading_agent.market_data import SNAPSHOT_TTL
+        provider._snapshot_cache["SPY"] = (400.0, time.monotonic() - SNAPSHOT_TTL - 10)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "SPY": {"latestTrade": {"p": 505.0}, "dailyBar": {}}}
+        monkeypatch.setattr("requests.get", lambda *a, **kw: mock_resp)
+
+        price = provider._fetch_alpaca_snapshot_price("SPY")
+        assert price == pytest.approx(505.0)
+
+    def test_option_chain_cache_hit(self, monkeypatch):
+        import time
+        provider = MarketDataProvider("k", "s")
+        fake_chain = [{"symbol": "SPY250425P00480000", "bid": 1.2}]
+        provider._option_cache["SPY_2025-04-25_put"] = (fake_chain, time.monotonic() - 30)
+
+        # If cache is hit, requests.get should never be called
+        monkeypatch.setattr("requests.get",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                AssertionError("network should not be called")))
+        result = provider.fetch_option_chain("SPY", "2025-04-25", "put")
+        assert result == fake_chain
+
+    def test_empty_option_chain_not_cached(self, monkeypatch):
+        """An empty result must not be cached so a fresh retry is possible."""
+        import time
+        provider = MarketDataProvider("k", "s")
+        from unittest.mock import MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"snapshots": {}}   # zero contracts
+        monkeypatch.setattr("requests.get", lambda *a, **kw: mock_resp)
+
+        provider.fetch_option_chain("SPY", "2025-04-25", "put")
+        # Cache should NOT contain this key
+        assert "SPY_2025-04-25_put" not in provider._option_cache
+
+    def test_price_history_cache_hit_within_ttl(self, bullish_prices):
+        import time
+        provider = MarketDataProvider("k", "s")
+        provider._price_cache["SPY"] = bullish_prices
+        provider._price_cache_ts["SPY"] = time.monotonic() - 60   # 1 min old
+
+        # fetch_historical_prices should return cache without calling yfinance
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("yfinance.Ticker",
+                       lambda *a: (_ for _ in ()).throw(
+                           AssertionError("yfinance should not be called")))
+            result = provider.fetch_historical_prices("SPY")
+        assert result is bullish_prices
+
+
+class TestBatchSnapshots:
+    def test_batch_populates_snapshot_cache(self, monkeypatch):
+        from unittest.mock import MagicMock
+        provider = MarketDataProvider("k", "s")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "SPY": {"latestTrade": {"p": 555.0}, "dailyBar": {}},
+            "QQQ": {"latestTrade": {"p": 440.0}, "dailyBar": {}},
+        }
+        monkeypatch.setattr("requests.get", lambda *a, **kw: mock_resp)
+
+        prices = provider.fetch_batch_snapshots(["SPY", "QQQ"])
+
+        assert prices["SPY"] == pytest.approx(555.0)
+        assert prices["QQQ"] == pytest.approx(440.0)
+        assert "SPY" in provider._snapshot_cache
+        assert "QQQ" in provider._snapshot_cache
+
+    def test_batch_returns_empty_on_api_failure(self, monkeypatch):
+        import requests as req
+        provider = MarketDataProvider("k", "s")
+        monkeypatch.setattr("requests.get",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                req.RequestException("timeout")))
+        result = provider.fetch_batch_snapshots(["SPY"])
+        assert result == {}
+
+    def test_batch_empty_ticker_list(self):
+        provider = MarketDataProvider("k", "s")
+        assert provider.fetch_batch_snapshots([]) == {}
+
+
+class TestOptionQuotes:
+    def test_fetch_option_quotes_no_cache(self, monkeypatch):
+        """fetch_option_quotes always hits the network — results are not cached."""
+        from unittest.mock import MagicMock
+        provider = MarketDataProvider("k", "s")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "snapshots": {
+                "SPY250425P00480000": {"latestQuote": {"bp": 1.30, "ap": 1.50}},
+                "SPY250425P00475000": {"latestQuote": {"bp": 0.85, "ap": 1.05}},
+            }
+        }
+        monkeypatch.setattr("requests.get", lambda *a, **kw: mock_resp)
+
+        quotes = provider.fetch_option_quotes(
+            ["SPY250425P00480000", "SPY250425P00475000"])
+
+        assert quotes["SPY250425P00480000"]["bid"] == pytest.approx(1.30)
+        assert quotes["SPY250425P00480000"]["ask"] == pytest.approx(1.50)
+        assert quotes["SPY250425P00475000"]["mid"] == pytest.approx(0.95)
+
+    def test_fetch_option_quotes_returns_empty_on_failure(self, monkeypatch):
+        import requests as req
+        provider = MarketDataProvider("k", "s")
+        monkeypatch.setattr("requests.get",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                req.RequestException("timeout")))
+        result = provider.fetch_option_quotes(["SPY250425P00480000"])
+        assert result == {}
+
+
 class TestStrikeExtraction:
     def test_standard_occ_symbol(self):
         assert MarketDataProvider._extract_strike("SPY250404P00550000") == 550.0

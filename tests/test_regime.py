@@ -14,6 +14,11 @@ class TestRegimeClassification:
         """Helper: build a classifier with mocked data provider."""
         provider = MagicMock(spec=MarketDataProvider)
         provider.fetch_historical_prices.return_value = price_data
+        # get_current_price must return a float — MagicMock causes TypeError
+        # in comparisons inside the classifier
+        provider.get_current_price.return_value = float(
+            price_data["Close"].iloc[-1])
+        # Static methods must be assigned directly so they behave as callables
         provider.compute_sma = MarketDataProvider.compute_sma
         provider.compute_rsi = MarketDataProvider.compute_rsi
         provider.compute_bollinger_bands = MarketDataProvider.compute_bollinger_bands

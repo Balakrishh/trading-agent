@@ -68,6 +68,67 @@ class TestStrategySelection:
                "no" in plan.rejection_reason.lower()
 
 
+class TestPickExpiration:
+    """Verify _pick_expiration always returns a Friday within DTE_RANGE."""
+
+    def _planner(self):
+        return StrategyPlanner(MagicMock(), max_delta=0.20, min_credit_ratio=0.33)
+
+    def _dte(self, expiry_str, from_date):
+        from datetime import datetime
+        exp = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+        return (exp - from_date).days
+
+    def test_result_is_always_friday(self):
+        from datetime import datetime
+        planner = self._planner()
+        exp = planner._pick_expiration()
+        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+        assert exp_date.weekday() == 4, f"{exp} is not a Friday"
+
+    def test_result_within_dte_range(self):
+        from datetime import datetime
+        planner = self._planner()
+        exp = planner._pick_expiration()
+        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+        from datetime import date
+        dte = (exp_date - date.today()).days
+        lo, hi = planner.DTE_RANGE
+        assert lo <= dte <= hi, f"DTE={dte} is outside range {lo}-{hi}"
+
+    def test_saturday_target_picks_previous_friday(self):
+        """When target date is Saturday, nearest Friday is the day before."""
+        from datetime import datetime, date, timedelta
+        from unittest.mock import patch
+
+        planner = self._planner()
+        # Force today to a date where today + 44 lands on a Saturday
+        # April 2 + 44 = May 16 (Saturday)
+        fake_today = date(2026, 4, 2)
+        with patch("trading_agent.strategy.datetime") as mock_dt:
+            mock_dt.now.return_value.date.return_value = fake_today
+            exp = planner._pick_expiration()
+
+        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+        # Previous Friday = May 15
+        assert exp_date == date(2026, 5, 15)
+        assert exp_date.weekday() == 4
+        # DTE = 43 — inside (21, 45)
+        dte = (exp_date - fake_today).days
+        assert planner.DTE_RANGE[0] <= dte <= planner.DTE_RANGE[1]
+
+    def test_old_utcnow_bug_would_have_returned_outside_range(self):
+        """Regression: old utcnow roll-forward logic returned May 22 (51 DTE)."""
+        from datetime import date, timedelta
+        fake_today = date(2026, 4, 2)   # UTC date that caused the failure
+        target = fake_today + timedelta(days=44)   # May 16 (Saturday)
+        days_until_friday = (4 - target.weekday()) % 7
+        broken_expiry = target + timedelta(days=days_until_friday)
+        broken_dte = (broken_expiry - fake_today).days
+        # Confirm the old code would have been outside range
+        assert broken_dte > 45
+
+
 class TestPlanSerialization:
     def test_to_dict_roundtrip(self, valid_spread_plan):
         d = valid_spread_plan.to_dict()

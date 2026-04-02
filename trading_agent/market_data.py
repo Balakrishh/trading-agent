@@ -2,11 +2,28 @@
 Phase I — PERCEIVE
 Fetches historical price data from Yahoo Finance and real-time
 option snapshots from the Alpaca Market Data API.
+
+5-minute cycle optimisations
+------------------------------
+1. TTL-based caches prevent redundant network calls within the same
+   session or across close-spaced runs:
+     • Historical prices  — 4-hour TTL   (PRICE_HISTORY_TTL)
+     • Stock snapshots    — 60-second TTL (SNAPSHOT_TTL)
+     • Option chains      — 3-minute TTL  (OPTION_CHAIN_TTL)
+
+2. prefetch_historical_parallel(tickers) fetches all tickers'
+   price history concurrently using a ThreadPoolExecutor, so the
+   cache is warm before the per-ticker processing loop starts.
+
+3. fetch_batch_snapshots(tickers) retrieves current prices for all
+   tickers in a single Alpaca API call instead of N separate calls.
 """
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,6 +36,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Cache TTLs (seconds)
+PRICE_HISTORY_TTL = 14_400   # 4 hours — historical bars don't change intraday
+SNAPSHOT_TTL = 60            # 1 minute — real-time price
+OPTION_CHAIN_TTL = 180       # 3 minutes — Greeks move but not millisecond-fast
+
+# Max workers for parallel historical fetches
+_MAX_PREFETCH_WORKERS = 5
+
 
 class MarketDataProvider:
     """Fetches and caches market data from Yahoo Finance and Alpaca."""
@@ -28,19 +53,38 @@ class MarketDataProvider:
         self.alpaca_api_key = alpaca_api_key
         self.alpaca_secret_key = alpaca_secret_key
         self.alpaca_data_url = alpaca_data_url
+
+        # price cache: ticker → DataFrame
         self._price_cache: Dict[str, pd.DataFrame] = {}
+        # price cache timestamps: ticker → epoch float
+        self._price_cache_ts: Dict[str, float] = {}
+
+        # snapshot cache: ticker → (price, epoch float)
+        self._snapshot_cache: Dict[str, Tuple[float, float]] = {}
+
+        # option chain cache: "{underlying}_{expiry}_{type}" → (contracts, epoch)
+        self._option_cache: Dict[str, Tuple[list, float]] = {}
 
     # ------------------------------------------------------------------
     # Yahoo Finance — historical OHLCV
     # ------------------------------------------------------------------
 
-    def fetch_historical_prices(self, ticker: str, period_days: int = 200) -> pd.DataFrame:
+    def fetch_historical_prices(self, ticker: str,
+                                period_days: int = 200) -> pd.DataFrame:
         """
         Download daily OHLCV for *ticker* covering at least *period_days*
         trading days.  Returns a DataFrame indexed by date.
+
+        Results are cached for PRICE_HISTORY_TTL seconds.
         """
+        now = time.monotonic()
+        cached_ts = self._price_cache_ts.get(ticker, 0.0)
+        if ticker in self._price_cache and (now - cached_ts) < PRICE_HISTORY_TTL:
+            logger.debug("[%s] Price history cache HIT (age=%.0fs)",
+                         ticker, now - cached_ts)
+            return self._price_cache[ticker]
+
         logger.info("Fetching %d days of price history for %s", period_days, ticker)
-        # Request extra calendar days to guarantee enough trading days
         cal_days = int(period_days * 1.6)
         end = datetime.now()
         start = end - timedelta(days=cal_days)
@@ -56,34 +100,107 @@ class MarketDataProvider:
         if df.empty:
             raise ValueError(f"No price data returned for {ticker}")
 
-        # Keep only the last *period_days* rows
         df = df.tail(period_days).copy()
         self._price_cache[ticker] = df
-        logger.info("Received %d rows for %s", len(df), ticker)
+        self._price_cache_ts[ticker] = time.monotonic()
+        logger.info("Received %d rows for %s (cached)", len(df), ticker)
         return df
+
+    def prefetch_historical_parallel(self, tickers: List[str],
+                                     period_days: int = 200) -> None:
+        """
+        Pre-populate the price-history cache for *tickers* concurrently.
+
+        Call this once before the per-ticker processing loop so that
+        regime classification reads from memory, not the network.
+        """
+        if not tickers:
+            return
+        workers = min(len(tickers), _MAX_PREFETCH_WORKERS)
+        logger.info("Pre-fetching price history for %d tickers (workers=%d)",
+                    len(tickers), workers)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(self.fetch_historical_prices, t, period_days): t
+                for t in tickers
+            }
+            for fut in as_completed(futures):
+                ticker = futures[fut]
+                try:
+                    fut.result()
+                    logger.debug("[%s] Historical pre-fetch done", ticker)
+                except Exception as exc:
+                    logger.warning("[%s] Historical pre-fetch failed: %s",
+                                   ticker, exc)
 
     def get_current_price(self, ticker: str) -> float:
         """
-        Return the real-time price for *ticker* using Alpaca's snapshot API.
-        Falls back to the most recent cached closing price if the API call fails.
+        Return the real-time price for *ticker* (cached SNAPSHOT_TTL s).
+        Falls back to the most recent cached closing price.
         """
         realtime = self._fetch_alpaca_snapshot_price(ticker)
         if realtime is not None:
             return realtime
 
-        # Fallback: use cached historical close
-        logger.warning("[%s] Alpaca snapshot unavailable, using cached close", ticker)
+        logger.warning("[%s] Alpaca snapshot unavailable, using cached close",
+                       ticker)
         if ticker not in self._price_cache:
             self.fetch_historical_prices(ticker)
         return float(self._price_cache[ticker]["Close"].iloc[-1])
 
+    def fetch_batch_snapshots(self, tickers: List[str]) -> Dict[str, float]:
+        """
+        Retrieve current prices for all *tickers* in a **single** Alpaca
+        API call and populate the snapshot cache.
+
+        Returns a dict of {ticker: price}.
+        """
+        if not tickers:
+            return {}
+
+        url = f"{self.alpaca_data_url}/stocks/snapshots"
+        params = {"symbols": ",".join(tickers)}
+        now = time.monotonic()
+
+        try:
+            resp = requests.get(url, headers=self._alpaca_headers(),
+                                params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+        except requests.RequestException as exc:
+            logger.warning("Batch snapshot request failed: %s", exc)
+            return {}
+
+        prices: Dict[str, float] = {}
+        for ticker, snap in data.items():
+            price = None
+            latest_trade = snap.get("latestTrade", {})
+            if latest_trade and latest_trade.get("p"):
+                price = float(latest_trade["p"])
+            else:
+                daily_bar = snap.get("dailyBar", {})
+                if daily_bar and daily_bar.get("c"):
+                    price = float(daily_bar["c"])
+            if price is not None:
+                prices[ticker] = price
+                self._snapshot_cache[ticker] = (price, now)
+
+        logger.info("Batch snapshot: fetched prices for %d/%d tickers",
+                    len(prices), len(tickers))
+        return prices
+
     def _fetch_alpaca_snapshot_price(self, ticker: str) -> Optional[float]:
         """
-        Fetch real-time price from Alpaca's stock snapshot endpoint.
-        GET https://data.alpaca.markets/v2/stocks/snapshots?symbols={ticker}
-
-        Returns the latest trade price, or None on failure.
+        Fetch real-time price from Alpaca snapshot endpoint (with cache).
+        Returns cached value if fresher than SNAPSHOT_TTL seconds.
         """
+        now = time.monotonic()
+        if ticker in self._snapshot_cache:
+            cached_price, cached_at = self._snapshot_cache[ticker]
+            if (now - cached_at) < SNAPSHOT_TTL:
+                logger.debug("[%s] Snapshot cache HIT ($%.2f)", ticker, cached_price)
+                return cached_price
+
         url = f"{self.alpaca_data_url}/stocks/snapshots"
         params = {"symbols": ticker}
         try:
@@ -92,18 +209,19 @@ class MarketDataProvider:
             resp.raise_for_status()
             data = resp.json()
             snap = data.get(ticker, {})
-            # Prefer latest trade price, fall back to daily bar close
             latest_trade = snap.get("latestTrade", {})
             if latest_trade and latest_trade.get("p"):
                 price = float(latest_trade["p"])
                 logger.info("[%s] Alpaca real-time price: $%.2f (latest trade)",
                             ticker, price)
+                self._snapshot_cache[ticker] = (price, time.monotonic())
                 return price
             daily_bar = snap.get("dailyBar", {})
             if daily_bar and daily_bar.get("c"):
                 price = float(daily_bar["c"])
                 logger.info("[%s] Alpaca real-time price: $%.2f (daily bar close)",
                             ticker, price)
+                self._snapshot_cache[ticker] = (price, time.monotonic())
                 return price
             logger.warning("[%s] Snapshot returned but no price data found", ticker)
             return None
@@ -112,7 +230,7 @@ class MarketDataProvider:
             return None
 
     # ------------------------------------------------------------------
-    # Technical indicators
+    # Technical indicators (stateless — no caching needed)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -129,8 +247,7 @@ class MarketDataProvider:
         avg_gain = gain.rolling(window=window).mean()
         avg_loss = loss.rolling(window=window).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+        return 100 - (100 / (1 + rs))
 
     @staticmethod
     def compute_bollinger_bands(prices: pd.Series, window: int = 20,
@@ -144,10 +261,7 @@ class MarketDataProvider:
 
     @staticmethod
     def sma_slope(sma_series: pd.Series, lookback: int = 5) -> float:
-        """
-        Average daily slope of an SMA over the last *lookback* periods.
-        Positive → upward, negative → downward.
-        """
+        """Average daily slope of an SMA over the last *lookback* periods."""
         recent = sma_series.dropna().tail(lookback)
         if len(recent) < 2:
             return 0.0
@@ -168,13 +282,21 @@ class MarketDataProvider:
                            expiration_date: str,
                            option_type: str = "put") -> Optional[list]:
         """
-        Fetch option chain snapshot from Alpaca for a given underlying,
-        expiration, and type ('put' or 'call').
+        Fetch option chain snapshot from Alpaca (cached OPTION_CHAIN_TTL s).
         Returns a list of option contract dicts with Greeks.
         """
-        url = f"https://data.alpaca.markets/v1beta1/options/snapshots/{underlying}"
-        params = {
+        cache_key = f"{underlying}_{expiration_date}_{option_type}"
+        now = time.monotonic()
+        if cache_key in self._option_cache:
+            contracts, cached_at = self._option_cache[cache_key]
+            if (now - cached_at) < OPTION_CHAIN_TTL:
+                logger.debug("[%s] Option chain cache HIT (%s %s)",
+                             underlying, option_type, expiration_date)
+                return contracts
 
+        url = (f"https://data.alpaca.markets/v1beta1"
+               f"/options/snapshots/{underlying}")
+        params = {
             "type": option_type,
             "expiration_date": expiration_date,
             "limit": 100,
@@ -182,8 +304,8 @@ class MarketDataProvider:
         logger.info("Fetching %s option chain for %s exp %s",
                      option_type, underlying, expiration_date)
         try:
-            resp = requests.get(url, headers=self._alpaca_headers(), params=params,
-                                timeout=15)
+            resp = requests.get(url, headers=self._alpaca_headers(),
+                                params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
             snapshots = data.get("snapshots", {})
@@ -195,7 +317,8 @@ class MarketDataProvider:
                     "symbol": symbol,
                     "bid": quote.get("bp", 0),
                     "ask": quote.get("ap", 0),
-                    "mid": round((quote.get("bp", 0) + quote.get("ap", 0)) / 2, 2),
+                    "mid": round(
+                        (quote.get("bp", 0) + quote.get("ap", 0)) / 2, 2),
                     "delta": greeks.get("delta", 0),
                     "theta": greeks.get("theta", 0),
                     "vega": greeks.get("vega", 0),
@@ -207,6 +330,8 @@ class MarketDataProvider:
                 })
             logger.info("Received %d %s contracts for %s",
                         len(contracts), option_type, underlying)
+            if contracts:   # never cache empty results — allow a fresh retry
+                self._option_cache[cache_key] = (contracts, time.monotonic())
             return contracts
         except requests.RequestException as exc:
             logger.error("Alpaca option chain request failed: %s", exc)
@@ -214,16 +339,52 @@ class MarketDataProvider:
 
     @staticmethod
     def _extract_strike(option_symbol: str) -> float:
-        """
-        Extract the strike price from an OCC option symbol.
-        Example: SPY250404P00550000 → 550.00
-        """
+        """Extract the strike price from an OCC option symbol."""
         try:
-            # Last 8 digits represent the strike × 1000
-            strike_raw = option_symbol[-8:]
-            return int(strike_raw) / 1000.0
+            return int(option_symbol[-8:]) / 1000.0
         except (ValueError, IndexError):
             return 0.0
+
+    def fetch_option_quotes(self, symbols: List[str]) -> Dict[str, Dict]:
+        """
+        Fetch a fresh bid/ask quote for specific option symbols — no cache.
+
+        Called right before order submission so the limit_price reflects
+        the current market, not the snapshot taken during Phase III planning.
+
+        Returns a dict keyed by OCC symbol::
+
+            {
+              "SPY260515P00550000": {"bid": 1.45, "ask": 1.55, "mid": 1.50},
+              ...
+            }
+        """
+        if not symbols:
+            return {}
+
+        url = "https://data.alpaca.markets/v1beta1/options/snapshots"
+        params = {"symbols": ",".join(symbols)}
+        try:
+            resp = requests.get(url, headers=self._alpaca_headers(),
+                                params=params, timeout=10)
+            resp.raise_for_status()
+            snapshots = resp.json().get("snapshots", {})
+            quotes = {}
+            for sym, snap in snapshots.items():
+                q = snap.get("latestQuote", {})
+                bid = float(q.get("bp", 0))
+                ask = float(q.get("ap", 0))
+                quotes[sym] = {
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": round((bid + ask) / 2, 2),
+                }
+            logger.info("Live quotes fetched for %d/%d symbols",
+                        len(quotes), len(symbols))
+            return quotes
+        except requests.RequestException as exc:
+            logger.warning("Live option quote fetch failed: %s", exc)
+            return {}
 
     def get_account_info(self, base_url: str) -> Optional[Dict]:
         """Fetch paper trading account information from Alpaca."""

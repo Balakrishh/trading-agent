@@ -14,16 +14,35 @@ Runs a two-stage cycle:
     II.  CLASSIFY   — determine regime
     III. PLAN       — select strategy and strikes
     IV.  ACT        — validate risk, execute or log
+
+5-minute cycle design notes
+------------------------------
+• run_cycle() is wrapped in a 270-second (4.5 min) hard-timeout guard.
+  If the cycle has not completed by then, a TIMEOUT event is logged to
+  JournalKB and the guard fires os._exit(1) so the cron scheduler can
+  cleanly launch the next run without a zombie process.
+
+• All historical price data is pre-fetched in parallel via
+  prefetch_historical_parallel() before the per-ticker loop begins.
+
+• All current prices are fetched in a single batch API call via
+  fetch_batch_snapshots() before the per-ticker loop.
+
+• JournalKB.log_signal() is called for EVERY ticker on EVERY cycle
+  regardless of LLM enablement, execution mode, or failure type.
 """
 
 import glob
 import json
 import logging
 import os
-from datetime import datetime
-from typing import Dict, List
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 from trading_agent.config import AppConfig, load_config
+from trading_agent.journal_kb import JournalKB
 from trading_agent.logger_setup import setup_logging
 from trading_agent.market_data import MarketDataProvider
 from trading_agent.regime import Regime, RegimeClassifier, RegimeAnalysis
@@ -41,12 +60,16 @@ from trading_agent.llm_analyst import LLMAnalyst, AnalystDecision
 
 logger = logging.getLogger(__name__)
 
+# Kill the process if a cycle takes longer than this (seconds).
+# The external scheduler (cron / APScheduler) will start the next run cleanly.
+CYCLE_TIMEOUT_SECONDS = 270  # 4 min 30 sec
+
 
 class TradingAgent:
     """
     Autonomous credit-spread trading agent.
 
-    Lifecycle:
+    Lifecycle::
         agent = TradingAgent.from_env()
         results = agent.run_cycle()
     """
@@ -54,7 +77,6 @@ class TradingAgent:
     def __init__(self, config: AppConfig):
         self.config = config
 
-        # Wire up components
         self.data_provider = MarketDataProvider(
             alpaca_api_key=config.alpaca.api_key,
             alpaca_secret_key=config.alpaca.secret_key,
@@ -77,6 +99,7 @@ class TradingAgent:
             base_url=config.alpaca.base_url,
             trade_plan_dir=config.logging.trade_plan_dir,
             dry_run=config.trading.dry_run,
+            data_provider=self.data_provider,   # for live quote refresh on execution
         )
         self.position_monitor = PositionMonitor(
             api_key=config.alpaca.api_key,
@@ -89,7 +112,14 @@ class TradingAgent:
             base_url=config.alpaca.base_url,
         )
 
-        # Intelligence layer (LLM + RAG + Journal)
+        # JournalKB writes signals.jsonl + signals.md into the same
+        # trade_journal/ directory — no extra folder needed.
+        journal_dir = (config.intelligence.journal_dir
+                       if config.intelligence and config.intelligence.journal_dir
+                       else "trade_journal")
+        self.journal_kb = JournalKB(journal_dir)
+
+        # Intelligence layer (LLM + RAG + Journal) — optional
         self.llm_analyst = self._init_intelligence(config)
 
     def _init_intelligence(self, config: AppConfig):
@@ -109,20 +139,17 @@ class TradingAgent:
                 temperature=intel_cfg.llm_temperature,
             )
             llm_client = LLMClient(llm_config)
-
             journal = TradeJournal(journal_dir=intel_cfg.journal_dir)
             kb = KnowledgeBase(
                 kb_dir=intel_cfg.knowledge_base_dir,
                 embed_fn=llm_client.embed,
             )
-
             analyst = LLMAnalyst(
                 llm_client=llm_client,
                 journal=journal,
                 knowledge_base=kb,
                 enabled=True,
             )
-
             logger.info("Intelligence layer ENABLED — model=%s, provider=%s",
                          intel_cfg.llm_model, intel_cfg.llm_provider)
             return analyst
@@ -140,17 +167,67 @@ class TradingAgent:
         return cls(config)
 
     # ==================================================================
-    # Main cycle
+    # Main cycle — public entry point
     # ==================================================================
 
-    def run_cycle(self) -> List[Dict]:
+    def run_cycle(self) -> Dict:
         """
-        Execute one full cycle:
-          Stage 1 — Monitor & manage existing positions
-          Stage 2 — Open new positions for tickers without open spreads
+        Execute one full cycle with a hard timeout guard.
+
+        If the cycle exceeds CYCLE_TIMEOUT_SECONDS the guard logs a
+        TIMEOUT event to JournalKB and terminates the process so the
+        scheduler can launch the next run cleanly.
         """
+        # --- Timeout guard -----------------------------------------------
+        def _on_timeout():
+            msg = (f"Cycle TIMEOUT after {CYCLE_TIMEOUT_SECONDS}s "
+                   "— killing process to unblock scheduler")
+            logger.error(msg)
+            self.journal_kb.log_cycle_error(
+                "cycle_timeout",
+                {"timeout_seconds": CYCLE_TIMEOUT_SECONDS},
+            )
+            os._exit(1)   # noqa: SLF001  intentional hard kill
+
+        timer = threading.Timer(CYCLE_TIMEOUT_SECONDS, _on_timeout)
+        timer.daemon = True
+        timer.start()
+        # -----------------------------------------------------------------
+
+        cycle_start = time.monotonic()
+        try:
+            result = self._run_cycle_impl()
+        except Exception as exc:
+            logger.exception("CYCLE FAILED with unhandled exception: %s", exc)
+            self.journal_kb.log_cycle_error(
+                str(exc), {"tickers": self.config.trading.tickers}
+            )
+            result = {
+                "status": "error",
+                "reason": str(exc),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        finally:
+            timer.cancel()
+
+        elapsed = time.monotonic() - cycle_start
+        logger.info("Cycle completed in %.1fs / %ds budget",
+                    elapsed, CYCLE_TIMEOUT_SECONDS)
+        if elapsed > CYCLE_TIMEOUT_SECONDS * 0.8:
+            logger.warning("Cycle used %.0f%% of time budget — consider "
+                           "reducing ticker count or increasing interval",
+                           100 * elapsed / CYCLE_TIMEOUT_SECONDS)
+        return result
+
+    # ==================================================================
+    # Cycle implementation
+    # ==================================================================
+
+    def _run_cycle_impl(self) -> Dict:
+        """Core cycle logic — called inside run_cycle()'s timeout guard."""
         logger.info("=" * 70)
-        logger.info("TRADING CYCLE START — %s", datetime.utcnow().isoformat())
+        logger.info("TRADING CYCLE START — %s",
+                    datetime.now(timezone.utc).isoformat())
         logger.info("Tickers: %s | Mode: %s | Dry-run: %s",
                      self.config.trading.tickers,
                      self.config.trading.mode,
@@ -160,15 +237,28 @@ class TradingAgent:
         # Pre-flight: fetch account info
         account = self.data_provider.get_account_info(self.config.alpaca.base_url)
         if not account:
-            logger.error("Cannot fetch account info — aborting cycle.")
-            return [{"status": "error", "reason": "Account info unavailable"}]
+            msg = "Cannot fetch account info — aborting cycle."
+            logger.error(msg)
+            self.journal_kb.log_cycle_error(msg)
+            return {"status": "error", "reason": "Account info unavailable",
+                    "timestamp": datetime.now(timezone.utc).isoformat()}
 
         account_balance = float(account.get("equity", 0))
-        account_type = "paper" if "paper" in self.config.alpaca.base_url else "live"
-        market_open = self.data_provider.is_market_open(self.config.alpaca.base_url)
+        account_type = ("paper"
+                        if "paper" in self.config.alpaca.base_url else "live")
+        market_open = self.data_provider.is_market_open(
+            self.config.alpaca.base_url)
 
         logger.info("Account: balance=$%s, type=%s, market_open=%s",
                      f"{account_balance:,.2f}", account_type, market_open)
+
+        # ------------------------------------------------------------------
+        # Pre-fetch data for all tickers in parallel (5-min optimisation)
+        # ------------------------------------------------------------------
+        tickers = self.config.trading.tickers
+        logger.info("Pre-fetching market data for %d ticker(s)…", len(tickers))
+        self.data_provider.prefetch_historical_parallel(tickers)
+        self.data_provider.fetch_batch_snapshots(tickers)
 
         # ------------------------------------------------------------------
         # Stage 1: MONITOR existing positions
@@ -179,24 +269,29 @@ class TradingAgent:
 
         monitor_results = self._stage_monitor(account_balance)
 
-        # Determine which tickers already have open positions
         tickers_with_positions = set()
         for sr in monitor_results.get("positions", []):
             if sr.get("signal") == ExitSignal.HOLD.value:
                 tickers_with_positions.add(sr.get("underlying", ""))
 
         # ------------------------------------------------------------------
-        # Stage 2: OPEN new positions for tickers without spreads
+        # Stage 2: OPEN new positions
         # ------------------------------------------------------------------
         logger.info("=" * 70)
         logger.info("STAGE 2 — OPEN NEW POSITIONS")
         logger.info("=" * 70)
 
         new_trade_results = []
-        for ticker in self.config.trading.tickers:
+        for ticker in tickers:
             if ticker in tickers_with_positions:
-                logger.info("[%s] Already has an open spread — skipping new entry",
+                logger.info("[%s] Already has an open spread — skipping",
                             ticker)
+                self.journal_kb.log_signal(
+                    ticker=ticker,
+                    action="skipped_existing",
+                    price=self._cached_price(ticker),
+                    raw_signal={"reason": "Existing open position"},
+                )
                 new_trade_results.append({
                     "ticker": ticker,
                     "status": "skipped",
@@ -209,7 +304,12 @@ class TradingAgent:
                     ticker, account_balance, account_type, market_open)
                 new_trade_results.append(result)
             except Exception as exc:
-                logger.exception("[%s] Unhandled error in cycle: %s", ticker, exc)
+                logger.exception("[%s] Unhandled error: %s", ticker, exc)
+                self.journal_kb.log_error(
+                    ticker=ticker,
+                    error=str(exc),
+                    price=self._cached_price(ticker),
+                )
                 new_trade_results.append({
                     "ticker": ticker,
                     "status": "error",
@@ -228,7 +328,7 @@ class TradingAgent:
         logger.info("=" * 70)
 
         return {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "account_balance": account_balance,
             "monitor": monitor_results,
             "new_trades": new_trade_results,
@@ -244,43 +344,38 @@ class TradingAgent:
         Fetch positions, classify regimes, evaluate exit signals,
         and close spreads that need closing.
         """
-        # 1. Fetch open option positions
         positions = self.position_monitor.fetch_open_positions()
         if not positions:
             logger.info("No open option positions found.")
             return {"total_spreads": 0, "positions": [], "closed": []}
 
-        # 2. Load trade plans to match positions to their original entry
         trade_plans = self._load_trade_plans()
-
-        # 3. Group positions into spreads
         spreads = self.position_monitor.group_into_spreads(positions, trade_plans)
         if not spreads:
             logger.info("Could not match positions to any trade plans.")
             return {"total_spreads": 0, "positions": [], "closed": []}
 
-        # 4. Classify current regimes for underlyings with positions
         underlyings = {s.underlying for s in spreads}
         current_regimes = {}
         for ticker in underlyings:
             try:
                 analysis = self.regime_classifier.classify(ticker)
                 current_regimes[ticker] = analysis.regime
-                logger.info("[%s] Current regime: %s", ticker, analysis.regime.value)
+                logger.info("[%s] Current regime: %s",
+                            ticker, analysis.regime.value)
             except Exception as exc:
                 logger.warning("[%s] Could not classify regime: %s", ticker, exc)
 
-        # 5. Evaluate exit signals
         spreads = self.position_monitor.evaluate(spreads, current_regimes)
 
-        # 6. Close spreads with exit signals + post-trade learning
         closed = []
         for spread in spreads:
             if spread.exit_signal != ExitSignal.HOLD:
                 if self.config.trading.dry_run:
-                    logger.info("[%s] DRY RUN — would close %s (%s: %s)",
-                                spread.underlying, spread.strategy_name,
-                                spread.exit_signal.value, spread.exit_reason)
+                    logger.info(
+                        "[%s] DRY RUN — would close %s (%s: %s)",
+                        spread.underlying, spread.strategy_name,
+                        spread.exit_signal.value, spread.exit_reason)
                     closed.append({
                         "underlying": spread.underlying,
                         "signal": spread.exit_signal.value,
@@ -291,7 +386,6 @@ class TradingAgent:
                     result = self.executor.close_spread(spread)
                     closed.append(result)
 
-                # Post-trade LLM analysis (learn from outcome)
                 if self.llm_analyst:
                     self._learn_from_close(spread)
 
@@ -300,22 +394,40 @@ class TradingAgent:
         return summary
 
     def _load_trade_plans(self) -> List[Dict]:
-        """Load all trade plan JSON files from the plan directory."""
+        """
+        Load trade plans from the plan directory.
+
+        Handles two formats:
+          • New  — trade_plan_{TICKER}.json  (state_history array)
+          • Old  — trade_plan_{TICKER}_{TS}.json  (flat dict, legacy)
+        """
         plan_dir = self.config.logging.trade_plan_dir
         if not os.path.isdir(plan_dir):
             return []
+
         plans = []
-        for path in sorted(glob.glob(os.path.join(plan_dir, "trade_plan_*.json"))):
+        for path in sorted(glob.glob(
+                os.path.join(plan_dir, "trade_plan_*.json"))):
             try:
-                with open(path) as f:
-                    plans.append(json.load(f))
+                with open(path) as fh:
+                    data = json.load(fh)
+
+                if "state_history" in data:
+                    # New format: flatten all approved history entries
+                    for entry in data["state_history"]:
+                        plans.append(entry)
+                else:
+                    # Old timestamped format
+                    plans.append(data)
+
             except Exception as exc:
                 logger.warning("Could not load plan %s: %s", path, exc)
+
         logger.info("Loaded %d trade plan(s) from %s", len(plans), plan_dir)
         return plans
 
     # ==================================================================
-    # Stage 2: New trade entry (original four-phase loop)
+    # Stage 2: New trade entry
     # ==================================================================
 
     def _process_ticker(self, ticker: str, balance: float,
@@ -324,17 +436,14 @@ class TradingAgent:
         logger.info("-" * 50)
         logger.info("[%s] Phase I  — PERCEIVE", ticker)
 
-        # Phase II: Classify
         logger.info("[%s] Phase II — CLASSIFY", ticker)
         analysis: RegimeAnalysis = self.regime_classifier.classify(ticker)
 
-        # Phase III: Plan
         logger.info("[%s] Phase III — PLAN (%s → %s)", ticker,
                      analysis.regime.value,
                      self._regime_to_strategy(analysis.regime))
         plan: SpreadPlan = self.strategy_planner.plan(ticker, analysis)
 
-        # Phase IV: Validate risk
         logger.info("[%s] Phase IV — RISK CHECK", ticker)
         verdict: RiskVerdict = self.risk_manager.evaluate(
             plan, balance, acct_type, market_open,
@@ -352,6 +461,11 @@ class TradingAgent:
                     "[%s] LLM SKIPPED trade (confidence=%.2f): %s",
                     ticker, llm_decision.confidence,
                     llm_decision.reasoning[:150])
+
+                self._log_signal(
+                    ticker, "skipped_by_llm", analysis, plan, verdict,
+                    llm_decision, exec_result=None)
+
                 return {
                     "ticker": ticker,
                     "regime": analysis.regime.value,
@@ -362,13 +476,7 @@ class TradingAgent:
                     "llm_reasoning": llm_decision.reasoning,
                     "llm_confidence": llm_decision.confidence,
                     "execution": {"status": "skipped_by_llm"},
-                    "analysis": {
-                        "price": analysis.current_price,
-                        "sma_50": analysis.sma_50,
-                        "sma_200": analysis.sma_200,
-                        "rsi": analysis.rsi_14,
-                        "reasoning": analysis.reasoning,
-                    },
+                    "analysis": self._analysis_dict(analysis),
                 }
 
         # Execute trade
@@ -376,7 +484,8 @@ class TradingAgent:
         exec_result = self.executor.execute(verdict)
 
         # Journal the trade (if LLM enabled)
-        if self.llm_analyst and llm_decision and exec_result.get("status") in ("submitted", "dry_run"):
+        if (self.llm_analyst and llm_decision
+                and exec_result.get("status") in ("submitted", "dry_run")):
             try:
                 entry = self.llm_analyst.create_journal_entry(
                     ticker, analysis, plan, verdict, llm_decision)
@@ -387,6 +496,10 @@ class TradingAgent:
             except Exception as exc:
                 logger.warning("[%s] Failed to journal trade: %s", ticker, exc)
 
+        # Always log to JournalKB
+        self._log_signal(ticker, exec_result.get("status", "unknown"),
+                         analysis, plan, verdict, llm_decision, exec_result)
+
         result = {
             "ticker": ticker,
             "regime": analysis.regime.value,
@@ -394,13 +507,7 @@ class TradingAgent:
             "plan_valid": plan.valid,
             "risk_approved": verdict.approved,
             "execution": exec_result,
-            "analysis": {
-                "price": analysis.current_price,
-                "sma_50": analysis.sma_50,
-                "sma_200": analysis.sma_200,
-                "rsi": analysis.rsi_14,
-                "reasoning": analysis.reasoning,
-            },
+            "analysis": self._analysis_dict(analysis),
         }
 
         if llm_decision:
@@ -410,6 +517,59 @@ class TradingAgent:
             result["llm_warnings"] = llm_decision.warnings
 
         return result
+
+    # ==================================================================
+    # JournalKB signal helper
+    # ==================================================================
+
+    def _log_signal(
+        self,
+        ticker: str,
+        action: str,
+        analysis: "RegimeAnalysis",
+        plan: "SpreadPlan",
+        verdict: "RiskVerdict",
+        llm_decision: Optional["AnalystDecision"],
+        exec_result: Optional[Dict],
+    ) -> None:
+        """Build raw_signal dict and write to JournalKB."""
+        raw: Dict = {
+            "regime": analysis.regime.value,
+            "strategy": plan.strategy_name,
+            "plan_valid": plan.valid,
+            "rejection_reason": plan.rejection_reason if not plan.valid else None,
+            "risk_approved": verdict.approved,
+            "net_credit": plan.net_credit if plan.valid else None,
+            "max_loss": plan.max_loss if plan.valid else None,
+            "credit_to_width_ratio": (plan.credit_to_width_ratio
+                                      if plan.valid else None),
+            "spread_width": plan.spread_width if plan.valid else None,
+            "expiration": plan.expiration if plan.valid else None,
+            "sma_50": analysis.sma_50,
+            "sma_200": analysis.sma_200,
+            "rsi_14": analysis.rsi_14,
+            "account_balance": verdict.account_balance,
+            "checks_passed": verdict.checks_passed,
+            "checks_failed": verdict.checks_failed,
+            "llm_decision": llm_decision.action if llm_decision else None,
+            "llm_confidence": llm_decision.confidence if llm_decision else None,
+            "order_id": (exec_result.get("order_id")
+                         if exec_result else None),
+            "run_id": (exec_result.get("run_id") if exec_result else None),
+        }
+
+        exec_status = exec_result.get("status") if exec_result else action
+
+        try:
+            self.journal_kb.log_signal(
+                ticker=ticker,
+                action=action,
+                price=analysis.current_price,
+                raw_signal=raw,
+                exec_status=exec_status,
+            )
+        except Exception as exc:
+            logger.warning("[%s] JournalKB log failed: %s", ticker, exc)
 
     # ==================================================================
     # Order status check
@@ -439,26 +599,43 @@ class TradingAgent:
     # Helpers
     # ==================================================================
 
+    def _cached_price(self, ticker: str) -> float:
+        """Return cached price for *ticker* or 0.0 if unavailable."""
+        entry = self.data_provider._snapshot_cache.get(ticker)
+        if entry:
+            return entry[0]
+        cache = self.data_provider._price_cache.get(ticker)
+        if cache is not None and not cache.empty:
+            return float(cache["Close"].iloc[-1])
+        return 0.0
+
     def _learn_from_close(self, spread: SpreadPosition):
         """Run post-trade LLM analysis when a spread is closed."""
         try:
-            # Find the journal entry for this spread
             recent = self.llm_analyst.journal.get_trades_by_ticker(
                 spread.underlying, limit=5)
             for trade in recent:
-                if (trade.strategy_name == spread.strategy_name and
-                        not trade.timestamp_closed):
-                    # Close in journal
+                if (trade.strategy_name == spread.strategy_name
+                        and not trade.timestamp_closed):
                     self.llm_analyst.journal.close_trade(
                         trade_id=trade.trade_id,
                         exit_signal=spread.exit_signal.value,
                         exit_reason=spread.exit_reason,
                         realized_pl=spread.net_unrealized_pl,
                     )
-                    # LLM post-trade analysis
                     trade = self.llm_analyst.journal.get_trade(trade.trade_id)
                     if trade:
                         self.llm_analyst.analyze_outcome(trade)
+                        # Back-fill the outcome into the KB document so
+                        # future RAG searches return outcome-labelled results
+                        self.llm_analyst.knowledge_base.update_trade_outcome(
+                            trade_id=trade.trade_id,
+                            outcome_label=trade.outcome_label,
+                            realized_pl=trade.realized_pl,
+                            exit_signal=trade.exit_signal,
+                            exit_reason=trade.exit_reason,
+                            updated_text=trade.to_embedding_text(),
+                        )
                     break
         except Exception as exc:
             logger.warning("[%s] Post-trade learning failed: %s",
@@ -472,6 +649,16 @@ class TradingAgent:
             Regime.SIDEWAYS: "Iron Condor",
         }.get(regime, "Unknown")
 
+    @staticmethod
+    def _analysis_dict(analysis: "RegimeAnalysis") -> Dict:
+        return {
+            "price": analysis.current_price,
+            "sma_50": analysis.sma_50,
+            "sma_200": analysis.sma_200,
+            "rsi": analysis.rsi_14,
+            "reasoning": analysis.reasoning,
+        }
+
     def _print_summary(self, results: List[Dict]):
         """Log a human-readable summary table."""
         logger.info("\n%-6s | %-10s | %-18s | %-8s | %-10s | %s",
@@ -484,8 +671,8 @@ class TradingAgent:
                          r.get("strategy", "?"),
                          r.get("plan_valid", "?"),
                          r.get("risk_approved", "?"),
-                         r.get("execution", {}).get("status",
-                                                     r.get("status", "?")))
+                         r.get("execution", {}).get(
+                             "status", r.get("status", "?")))
 
 
 # ------------------------------------------------------------------
@@ -495,7 +682,8 @@ class TradingAgent:
 def main():
     """Run a single trading cycle from the command line."""
     import argparse
-    parser = argparse.ArgumentParser(description="Autonomous Options Trading Agent")
+    parser = argparse.ArgumentParser(
+        description="Autonomous Options Trading Agent")
     parser.add_argument("--env", type=str, default=None,
                         help="Path to .env file")
     parser.add_argument("--dry-run", action="store_true",

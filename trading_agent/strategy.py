@@ -243,13 +243,38 @@ class StrategyPlanner:
     # ------------------------------------------------------------------
 
     def _pick_expiration(self) -> str:
-        """Choose the nearest Friday within our DTE window."""
-        today = datetime.utcnow().date()
+        """
+        Choose the Friday nearest to TARGET_DTE, clamped inside DTE_RANGE.
+
+        Uses local date (not UTC) so the expiration matches the trading
+        day the user expects.  The old roll-forward-only logic could land
+        on a Friday that is outside the upper DTE bound when the target
+        date falls on a Saturday or Sunday.
+        """
+        today = datetime.now().date()           # local date, not UTC
         target = today + timedelta(days=self.TARGET_DTE)
-        # Roll to the next Friday
-        days_until_friday = (4 - target.weekday()) % 7
-        expiry = target + timedelta(days=days_until_friday)
-        return expiry.strftime("%Y-%m-%d")
+
+        # Find both adjacent Fridays and pick the closer one
+        days_to_next = (4 - target.weekday()) % 7
+        next_friday = target + timedelta(days=days_to_next)
+        prev_friday = next_friday - timedelta(days=7)
+
+        # Prefer the closer Friday; ties go to the earlier one
+        candidate = next_friday if days_to_next <= 3 else prev_friday
+
+        # Clamp within DTE_RANGE so we never request an expiration Alpaca
+        # won't have liquid data for
+        min_expiry = today + timedelta(days=self.DTE_RANGE[0])
+        max_expiry = today + timedelta(days=self.DTE_RANGE[1])
+
+        if candidate > max_expiry:
+            candidate -= timedelta(days=7)   # step back one week
+        elif candidate < min_expiry:
+            candidate += timedelta(days=7)   # step forward one week
+
+        dte = (candidate - today).days
+        logger.debug("Expiration selected: %s (%d DTE)", candidate, dte)
+        return candidate.strftime("%Y-%m-%d")
 
     def _find_sold_strike(self, contracts: List[Dict]) -> Optional[Dict]:
         """

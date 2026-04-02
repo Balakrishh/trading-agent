@@ -86,28 +86,79 @@ class TradeEntry:
 
     def to_embedding_text(self) -> str:
         """
-        Generate a natural-language summary for embedding in the RAG store.
-        This text captures the essence of the trade for similarity search.
+        Generate a canonical structured summary for embedding in the RAG store.
+
+        Uses a fixed-format template so that semantically similar trades
+        (same regime, similar RSI band, same strategy) produce embeddings
+        that are geometrically close in vector space.  Freeform prose causes
+        synonyms and word-order variance to scatter similar trades far apart.
+
+        Template sections (always in this order):
+          [TRADE]      strategy / ticker / regime — the primary discriminator
+          [MARKET]     price-action indicators in fixed numeric buckets
+          [STRUCTURE]  spread geometry — credit, width, ratio, delta, DTE
+          [OUTCOME]    result section — empty until trade closes
+          [LESSONS]    post-trade learnings (LLM-generated)
         """
+        sma_ratio = (self.sma_50 / self.sma_200) if self.sma_200 else 0
+        price_vs_sma200 = (
+            "above" if self.current_price > self.sma_200 else "below"
+        )
+        slope_dir = (
+            "rising" if self.sma_50_slope > 0 else "falling"
+        )
+
+        # Bucket RSI into ranges so similar values cluster: oversold/neutral/overbought
+        if self.rsi_14 < 30:
+            rsi_bucket = "oversold (<30)"
+        elif self.rsi_14 < 45:
+            rsi_bucket = "low-neutral (30-45)"
+        elif self.rsi_14 < 55:
+            rsi_bucket = "mid-neutral (45-55)"
+        elif self.rsi_14 < 70:
+            rsi_bucket = "high-neutral (55-70)"
+        else:
+            rsi_bucket = "overbought (>70)"
+
         parts = [
-            f"Trade: {self.strategy_name} on {self.ticker}",
-            f"Regime: {self.regime} (RSI={self.rsi_14:.1f}, BB width={self.bollinger_width:.4f})",
-            f"Price: ${self.current_price:.2f} (SMA50={self.sma_50:.2f}, SMA200={self.sma_200:.2f})",
-            f"Credit: ${self.net_credit:.2f}, Width: ${self.spread_width:.2f}, "
-            f"Ratio: {self.credit_to_width_ratio:.4f}",
-            f"Sold delta: {self.sold_delta:.3f}, DTE: {self.dte_at_entry}",
+            # --- Primary discriminator ---
+            f"[TRADE] {self.strategy_name} | {self.ticker} | regime={self.regime}",
+
+            # --- Market state ---
+            f"[MARKET] price=${self.current_price:.2f} ({price_vs_sma200} SMA200) "
+            f"| SMA50/200={sma_ratio:.3f} slope={slope_dir} "
+            f"| RSI={self.rsi_14:.1f} ({rsi_bucket}) "
+            f"| BB_width={self.bollinger_width:.4f} "
+            f"| IV_rank={self.iv_rank:.1f}",
+
+            # --- Spread structure ---
+            f"[STRUCTURE] credit=${self.net_credit:.2f} "
+            f"| width=${self.spread_width:.2f} "
+            f"| ratio={self.credit_to_width_ratio:.4f} "
+            f"| sold_delta={self.sold_delta:.3f} "
+            f"| DTE={self.dte_at_entry} "
+            f"| expiration={self.expiration}",
         ]
 
-        if self.llm_reasoning:
-            parts.append(f"LLM reasoning: {self.llm_reasoning}")
-
+        # --- Outcome (only present after close) ---
         if self.exit_signal:
-            parts.append(f"Exit: {self.exit_signal} — {self.exit_reason}")
-            parts.append(f"P&L: ${self.realized_pl:.2f} ({self.realized_pl_pct:.1f}%)")
-            parts.append(f"Held {self.hold_duration_days} days, outcome: {self.outcome_label}")
+            parts.append(
+                f"[OUTCOME] {self.outcome_label} "
+                f"| P&L=${self.realized_pl:.2f} ({self.realized_pl_pct:.1f}%) "
+                f"| held={self.hold_duration_days}d "
+                f"| exit={self.exit_signal} "
+                f"| reason={self.exit_reason}"
+            )
+        else:
+            parts.append("[OUTCOME] open — result not yet available")
 
+        # --- LLM reasoning (if available) ---
+        if self.llm_reasoning:
+            parts.append(f"[REASONING] {self.llm_reasoning[:300]}")
+
+        # --- Lessons (if available) ---
         if self.lessons_learned:
-            parts.append("Lessons: " + "; ".join(self.lessons_learned))
+            parts.append("[LESSONS] " + " | ".join(self.lessons_learned))
 
         return "\n".join(parts)
 

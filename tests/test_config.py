@@ -32,8 +32,16 @@ def test_load_config_from_env(tmp_path):
     assert cfg.logging.log_level == "DEBUG"
 
 
-def test_load_config_defaults(tmp_path):
-    """Config falls back to sane defaults when env vars are missing."""
+def test_load_config_defaults(tmp_path, monkeypatch):
+    """Config falls back to sane defaults when env vars are missing.
+
+    monkeypatch clears any TICKERS / MAX_RISK_PCT that may be set in the
+    project's real .env so the test only sees the code-level defaults.
+    """
+    for var in ("TICKERS", "MAX_RISK_PCT", "DRY_RUN", "MIN_CREDIT_RATIO",
+                "MAX_DELTA", "MODE", "FORCE_MARKET_OPEN"):
+        monkeypatch.delenv(var, raising=False)
+
     env_file = tmp_path / ".env"
     env_file.write_text("")  # empty
     cfg = load_config(str(env_file))
