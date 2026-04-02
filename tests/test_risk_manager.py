@@ -81,3 +81,60 @@ class TestRiskChecks:
         plan = _make_plan(ratio=0.34, max_loss=300)
         verdict = self.rm.evaluate(plan, 50_000, "paper", True, False)
         assert verdict.max_allowed_loss == 1000.0  # 2% of 50k
+
+
+class TestLiquidityCheck:
+    def setup_method(self):
+        self.rm = RiskManager(max_risk_pct=0.02, min_credit_ratio=0.25,
+                              max_delta=0.25, liquidity_max_spread=0.05)
+
+    def test_liquid_underlying_passes(self):
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=(499.98, 500.01))  # $0.03 spread
+        assert verdict.approved is True
+        assert any("liquid" in p.lower() for p in verdict.checks_passed)
+
+    def test_illiquid_underlying_fails(self):
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=(499.90, 499.96))  # $0.06 spread
+        assert verdict.approved is False
+        assert any("illiquid" in f.lower() for f in verdict.checks_failed)
+
+    def test_no_bid_ask_skips_check(self):
+        """When underlying_bid_ask is not provided, the check is skipped."""
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=None)
+        assert verdict.approved is True
+        assert not any("liquid" in p.lower() for p in verdict.checks_passed)
+
+
+class TestBuyingPowerCheck:
+    def setup_method(self):
+        self.rm = RiskManager(max_risk_pct=0.02, min_credit_ratio=0.25,
+                              max_delta=0.25, max_buying_power_pct=0.80)
+
+    def test_sufficient_buying_power_passes(self):
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        # 50% buying power remaining (50% used)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   account_buying_power=50_000)
+        assert verdict.approved is True
+        assert any("buying power" in p.lower() for p in verdict.checks_passed)
+
+    def test_exhausted_buying_power_fails(self):
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        # Only 5% buying power remaining (95% used > 80% limit)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   account_buying_power=5_000)
+        assert verdict.approved is False
+        assert any("liquidation" in f.lower() for f in verdict.checks_failed)
+
+    def test_no_buying_power_skips_check(self):
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   account_buying_power=None)
+        assert verdict.approved is True
+        assert not any("buying power" in p.lower() for p in verdict.checks_passed)

@@ -64,6 +64,9 @@ logger = logging.getLogger(__name__)
 # The external scheduler (cron / APScheduler) will start the next run cleanly.
 CYCLE_TIMEOUT_SECONDS = 270  # 4 min 30 sec
 
+# File that persists daily equity baseline for the drawdown circuit breaker.
+DAILY_STATE_FILENAME = "daily_state.json"
+
 
 class TradingAgent:
     """
@@ -92,6 +95,8 @@ class TradingAgent:
             max_risk_pct=config.trading.max_risk_pct,
             min_credit_ratio=config.trading.min_credit_ratio,
             max_delta=config.trading.max_delta,
+            liquidity_max_spread=config.trading.liquidity_max_spread,
+            max_buying_power_pct=config.trading.max_buying_power_pct,
         )
         self.executor = OrderExecutor(
             api_key=config.alpaca.api_key,
@@ -244,13 +249,34 @@ class TradingAgent:
                     "timestamp": datetime.now(timezone.utc).isoformat()}
 
         account_balance = float(account.get("equity", 0))
+        account_buying_power = float(account.get("buying_power", account_balance))
         account_type = ("paper"
                         if "paper" in self.config.alpaca.base_url else "live")
         market_open = self.data_provider.is_market_open(
             self.config.alpaca.base_url)
 
-        logger.info("Account: balance=$%s, type=%s, market_open=%s",
-                     f"{account_balance:,.2f}", account_type, market_open)
+        logger.info("Account: balance=$%s, buying_power=$%s, type=%s, market_open=%s",
+                     f"{account_balance:,.2f}",
+                     f"{account_buying_power:,.2f}",
+                     account_type, market_open)
+        logger.info("Schedule interval: %s", self.config.trading.schedule_interval)
+
+        # --- Daily Drawdown Circuit Breaker ---
+        if self._check_daily_drawdown(account_balance):
+            msg = (f"Daily drawdown limit "
+                   f"({self.config.trading.daily_drawdown_limit*100:.0f}%) "
+                   f"exceeded — stopping all trading")
+            logger.critical(msg)
+            os._exit(1)   # noqa: SLF001  intentional hard kill
+
+        # --- Liquidation Mode Check ---
+        liquidation_mode = self._check_liquidation_mode(
+            account_balance, account_buying_power)
+        if liquidation_mode:
+            logger.warning(
+                "LIQUIDATION MODE: buying power >%.0f%% used — "
+                "closing positions only, no new trades",
+                self.config.trading.max_buying_power_pct * 100)
 
         # ------------------------------------------------------------------
         # Pre-fetch data for all tickers in parallel (5-min optimisation)
@@ -299,9 +325,24 @@ class TradingAgent:
                 })
                 continue
 
+            if liquidation_mode:
+                self.journal_kb.log_signal(
+                    ticker=ticker,
+                    action="skipped_liquidation_mode",
+                    price=self._cached_price(ticker),
+                    raw_signal={"reason": "Liquidation Mode — buying power exhausted"},
+                )
+                new_trade_results.append({
+                    "ticker": ticker,
+                    "status": "skipped",
+                    "reason": "Liquidation Mode",
+                })
+                continue
+
             try:
                 result = self._process_ticker(
-                    ticker, account_balance, account_type, market_open)
+                    ticker, account_balance, account_buying_power,
+                    account_type, market_open)
                 new_trade_results.append(result)
             except Exception as exc:
                 logger.exception("[%s] Unhandled error: %s", ticker, exc)
@@ -431,10 +472,14 @@ class TradingAgent:
     # ==================================================================
 
     def _process_ticker(self, ticker: str, balance: float,
+                        buying_power: float,
                         acct_type: str, market_open: bool) -> Dict:
         """Full four-phase pipeline for a single ticker (+ LLM Phase V)."""
         logger.info("-" * 50)
         logger.info("[%s] Phase I  — PERCEIVE", ticker)
+
+        # Liquidity check on underlying
+        underlying_bid_ask = self.data_provider.get_underlying_bid_ask(ticker)
 
         logger.info("[%s] Phase II — CLASSIFY", ticker)
         analysis: RegimeAnalysis = self.regime_classifier.classify(ticker)
@@ -447,7 +492,10 @@ class TradingAgent:
         logger.info("[%s] Phase IV — RISK CHECK", ticker)
         verdict: RiskVerdict = self.risk_manager.evaluate(
             plan, balance, acct_type, market_open,
-            self.config.trading.force_market_open)
+            self.config.trading.force_market_open,
+            underlying_bid_ask=underlying_bid_ask,
+            account_buying_power=buying_power,
+        )
 
         # Phase V: LLM Analysis (if enabled)
         llm_decision = None
@@ -533,6 +581,9 @@ class TradingAgent:
         exec_result: Optional[Dict],
     ) -> None:
         """Build raw_signal dict and write to JournalKB."""
+        # Build trade thesis for JournalKB — answers why, why now, exit plan
+        thesis = self._build_thesis(analysis, plan, verdict)
+
         raw: Dict = {
             "regime": analysis.regime.value,
             "strategy": plan.strategy_name,
@@ -548,6 +599,10 @@ class TradingAgent:
             "sma_50": analysis.sma_50,
             "sma_200": analysis.sma_200,
             "rsi_14": analysis.rsi_14,
+            "mean_reversion_signal": getattr(analysis, "mean_reversion_signal", False),
+            "mean_reversion_direction": getattr(analysis, "mean_reversion_direction", ""),
+            "rs_vs_spy": getattr(analysis, "relative_strength_vs_spy", 0.0),
+            "rs_vs_qqq": getattr(analysis, "relative_strength_vs_qqq", 0.0),
             "account_balance": verdict.account_balance,
             "checks_passed": verdict.checks_passed,
             "checks_failed": verdict.checks_failed,
@@ -556,6 +611,7 @@ class TradingAgent:
             "order_id": (exec_result.get("order_id")
                          if exec_result else None),
             "run_id": (exec_result.get("run_id") if exec_result else None),
+            "thesis": thesis,
         }
 
         exec_status = exec_result.get("status") if exec_result else action
@@ -570,6 +626,138 @@ class TradingAgent:
             )
         except Exception as exc:
             logger.warning("[%s] JournalKB log failed: %s", ticker, exc)
+
+    # ==================================================================
+    # Risk guardrail helpers
+    # ==================================================================
+
+    def _check_daily_drawdown(self, current_equity: float) -> bool:
+        """
+        Check if today's equity has fallen beyond the daily drawdown limit.
+        Persists day-start equity in {trade_plan_dir}/daily_state.json,
+        resetting automatically each calendar day.
+
+        Returns True if the circuit breaker should fire.
+        """
+        state_path = os.path.join(
+            self.config.logging.trade_plan_dir, DAILY_STATE_FILENAME)
+        today = datetime.now().date().isoformat()
+
+        state: Dict = {}
+        if os.path.exists(state_path):
+            try:
+                with open(state_path) as fh:
+                    state = json.load(fh)
+            except Exception as exc:
+                logger.warning("Could not read daily state file: %s", exc)
+
+        if state.get("date") != today:
+            # New day — reset baseline
+            state = {"date": today, "start_equity": current_equity}
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            try:
+                with open(state_path, "w") as fh:
+                    json.dump(state, fh)
+                logger.info("Daily state reset: start_equity=$%.2f", current_equity)
+            except Exception as exc:
+                logger.warning("Could not write daily state file: %s", exc)
+            return False
+
+        start_equity = float(state.get("start_equity", current_equity))
+        if start_equity == 0:
+            return False
+        drawdown = (current_equity - start_equity) / start_equity
+        limit = self.config.trading.daily_drawdown_limit
+
+        if drawdown < -limit:
+            logger.critical(
+                "DAILY DRAWDOWN CIRCUIT BREAKER TRIGGERED: "
+                "%.2f%% loss today (limit=%.0f%%, start=$%.2f, now=$%.2f)",
+                abs(drawdown) * 100, limit * 100,
+                start_equity, current_equity,
+            )
+            self.journal_kb.log_cycle_error(
+                "daily_drawdown_circuit_breaker",
+                {
+                    "drawdown_pct": round(drawdown * 100, 3),
+                    "start_equity": start_equity,
+                    "current_equity": current_equity,
+                    "limit_pct": limit * 100,
+                    "date": today,
+                },
+            )
+            return True
+
+        logger.info("Daily drawdown check OK: %.2f%% (limit=%.0f%%)",
+                    drawdown * 100, limit * 100)
+        return False
+
+    def _check_liquidation_mode(self, equity: float,
+                                buying_power: float) -> bool:
+        """
+        Returns True if buying power usage exceeds the configured threshold,
+        signalling the agent should close positions rather than open new ones.
+        """
+        if equity <= 0:
+            return False
+        pct_used = 1.0 - (buying_power / equity)
+        limit = self.config.trading.max_buying_power_pct
+        if pct_used > limit:
+            logger.warning(
+                "Buying power %.1f%% used (limit=%.0f%%) — Liquidation Mode",
+                pct_used * 100, limit * 100,
+            )
+            self.journal_kb.log_cycle_error(
+                "liquidation_mode_activated",
+                {
+                    "buying_power_used_pct": round(pct_used * 100, 1),
+                    "limit_pct": limit * 100,
+                    "equity": equity,
+                    "buying_power": buying_power,
+                },
+            )
+            return True
+        return False
+
+    @staticmethod
+    def _build_thesis(analysis: "RegimeAnalysis",
+                      plan: "SpreadPlan",
+                      verdict: "RiskVerdict") -> Dict:
+        """
+        Build a structured trade thesis for JournalKB:
+          • why       — what the market is doing right now
+          • why_now   — the specific signal that triggered this entry
+          • exit_plan — expiration, profit target, and risk cap
+        """
+        mr = getattr(analysis, "mean_reversion_signal", False)
+        rs_spy = getattr(analysis, "relative_strength_vs_spy", 0.0)
+
+        why = (f"{analysis.regime.value.upper()} regime — "
+               f"price={analysis.current_price:.2f}, "
+               f"SMA50={analysis.sma_50:.2f}, SMA200={analysis.sma_200:.2f}, "
+               f"RSI={analysis.rsi_14:.1f}, BB_width={analysis.bollinger_width:.4f}")
+
+        if mr:
+            direction = getattr(analysis, "mean_reversion_direction", "")
+            why_now = (f"Price touched {direction} 3-std Bollinger Band — "
+                       f"mean reversion trade triggered")
+        elif rs_spy > 0.001:
+            why_now = (f"Ticker outperforming SPY by {rs_spy*100:.2f}% "
+                       f"in 5-min window — relative strength bias")
+        else:
+            why_now = analysis.reasoning[:200]
+
+        if plan.valid:
+            profit_target = round(plan.net_credit * 0.5 * 100, 2)
+            exit_plan = (f"Expiry {plan.expiration} | "
+                         f"Profit target: 50% of credit "
+                         f"(${profit_target:.2f}/contract) | "
+                         f"Max loss: ${plan.max_loss:.2f} | "
+                         f"Close if regime shifts adversely")
+        else:
+            exit_plan = f"No trade — plan rejected: {plan.rejection_reason}"
+
+        return {"why": why, "why_now": why_now, "exit_plan": exit_plan}
 
     # ==================================================================
     # Order status check
@@ -647,6 +835,7 @@ class TradingAgent:
             Regime.BULLISH: "Bull Put Spread",
             Regime.BEARISH: "Bear Call Spread",
             Regime.SIDEWAYS: "Iron Condor",
+            Regime.MEAN_REVERSION: "Mean Reversion Spread",
         }.get(regime, "Unknown")
 
     @staticmethod

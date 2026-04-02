@@ -5,7 +5,7 @@ Enforces all non-negotiable risk guardrails before any order is placed.
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from trading_agent.strategy import SpreadPlan
 
@@ -28,25 +28,34 @@ class RiskManager:
     """
     Non-negotiable pre-trade risk checks:
 
-    1. Credit-to-Width ratio  ≥  min_credit_ratio  (~0.25)
-    2. Sold-strike |Delta|    ≤  max_delta          (~0.25)
-    3. Max loss               ≤  max_risk_pct × account_balance
-    4. Account type           == "paper"
-    5. Market is open
+    1. Plan structural validity
+    2. Credit-to-Width ratio  ≥  min_credit_ratio
+    3. Sold-strike |Delta|    ≤  max_delta
+    4. Max loss               ≤  max_risk_pct × account_balance
+    5. Account type           == "paper"
+    6. Market is open
+    7. Underlying liquidity   — bid/ask spread < liquidity_max_spread
+    8. Buying power           — available BP ≥ (1 - max_buying_power_pct) × equity
     """
 
     def __init__(self, max_risk_pct: float = 0.02,
-                 min_credit_ratio: float = 0.25,  # updated default
-                 max_delta: float = 0.25):  # updated default
+                 min_credit_ratio: float = 0.25,
+                 max_delta: float = 0.25,
+                 liquidity_max_spread: float = 0.05,
+                 max_buying_power_pct: float = 0.80):
         self.max_risk_pct = max_risk_pct
         self.min_credit_ratio = min_credit_ratio
         self.max_delta = max_delta
+        self.liquidity_max_spread = liquidity_max_spread
+        self.max_buying_power_pct = max_buying_power_pct
 
     def evaluate(self, plan: SpreadPlan,
                  account_balance: float,
                  account_type: str = "paper",
                  market_open: bool = True,
-                 force_market_open: bool = False) -> RiskVerdict:
+                 force_market_open: bool = False,
+                 underlying_bid_ask: Optional[Tuple[float, float]] = None,
+                 account_buying_power: Optional[float] = None) -> RiskVerdict:
         """
         Run all guardrails against *plan*.  Returns a RiskVerdict.
         """
@@ -100,6 +109,32 @@ class RiskManager:
             passed.append("Market is currently OPEN")
         else:
             failed.append("Market is currently CLOSED")
+
+        # --- Check 7: underlying liquidity (bid/ask spread) ---
+        if underlying_bid_ask is not None:
+            bid, ask = underlying_bid_ask
+            spread = ask - bid
+            if spread < self.liquidity_max_spread:
+                passed.append(
+                    f"Underlying bid/ask spread ${spread:.4f} "
+                    f"< ${self.liquidity_max_spread:.2f} (liquid)")
+            else:
+                failed.append(
+                    f"Underlying bid/ask spread ${spread:.4f} "
+                    f">= ${self.liquidity_max_spread:.2f} (illiquid)")
+
+        # --- Check 8: buying power availability ---
+        if account_buying_power is not None and account_balance > 0:
+            pct_used = 1.0 - (account_buying_power / account_balance)
+            if pct_used <= self.max_buying_power_pct:
+                passed.append(
+                    f"Buying power {pct_used*100:.1f}% used "
+                    f"≤ {self.max_buying_power_pct*100:.0f}% limit")
+            else:
+                failed.append(
+                    f"Buying power {pct_used*100:.1f}% used "
+                    f"> {self.max_buying_power_pct*100:.0f}% limit "
+                    f"— enter Liquidation Mode")
 
         approved = len(failed) == 0
         summary = (f"{'APPROVED' if approved else 'REJECTED'}: "

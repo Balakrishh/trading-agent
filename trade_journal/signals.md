@@ -49,3 +49,30 @@
 | 2026-04-02T04:09:51 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
 | 2026-04-02T04:09:51 | QQQ | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
 | 2026-04-02T04:09:51 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T11:53:35 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T11:53:35 | SPY | error | $0.00 | — | — | — | error | — | API timeout |
+| 2026-04-02T11:53:35 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T11:53:36 | QQQ | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T11:53:36 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T11:53:36 | QQQ | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T11:53:36 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:00:16 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:00:17 | SPY | error | $0.00 | — | — | — | error | — | API timeout |
+| 2026-04-02T12:00:17 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:00:17 | QQQ | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:00:17 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:00:17 | QQQ | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:00:17 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:00:17 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:02:47 | SPY | rejected | $490.86 | Bull Put Spread | bullish | False | rejected | — | rejected: Bull Put Spread, Credit-to-width ratio 0.0400 < minimum 0.33 |
+| 2026-04-02T12:55:34 | SPY | rejected | $645.41 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, Credit-to-width ratio 0.2200 < minimum 0.25 |
+| 2026-04-02T12:55:34 | QQQ | rejected | $572.10 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, No call with \|delta\| ≤ 0.2 |
+| 2026-04-02T12:55:37 | AAPL | rejected | $252.83 | Iron Condor | sideways | False | rejected | — | rejected: Iron Condor, Credit-to-width ratio 0.2380 < minimum 0.25 |
+| 2026-04-02T12:55:39 | MSFT | rejected | $364.73 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, Credit-to-width ratio 0.1560 < minimum 0.25 |
+| 2026-04-02T12:55:39 | AMZN | rejected | $210.60 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, Credit-to-width ratio 0.1100 < minimum 0.25 |
+| 2026-04-02T12:55:40 | IWM | rejected | $244.71 | Iron Condor | sideways | False | rejected | — | rejected: Iron Condor, cr=1.52, ratio=0.30 |
+| 2026-04-02T12:55:41 | JPM | rejected | $295.27 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, Credit-to-width ratio 0.0860 < minimum 0.25 |
+| 2026-04-02T12:55:41 | TSLA | rejected | $370.45 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, Credit-to-width ratio 0.1420 < minimum 0.25 |
+| 2026-04-02T12:55:41 | GOOG | skipped_existing | $294.88 | — | — | — | skipped_existing | — | skipped_existing |
+| 2026-04-02T12:55:42 | META | rejected | $561.74 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, Credit-to-width ratio 0.1240 < minimum 0.25 |
+| 2026-04-02T12:55:43 | SOFI | rejected | $15.05 | Bear Call Spread | bearish | False | rejected | — | rejected: Bear Call Spread, Credit-to-width ratio 0.0340 < minimum 0.25 |

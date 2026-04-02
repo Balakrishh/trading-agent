@@ -386,6 +386,64 @@ class MarketDataProvider:
             logger.warning("Live option quote fetch failed: %s", exc)
             return {}
 
+    def get_underlying_bid_ask(self, ticker: str) -> Optional[Tuple[float, float]]:
+        """
+        Fetch the current bid/ask for the underlying stock from Alpaca.
+        Returns (bid, ask) or None if unavailable.
+
+        Used by the liquidity check — only trade tickers whose underlying
+        bid/ask spread is below the configured threshold.
+        """
+        url = f"{self.alpaca_data_url}/stocks/snapshots"
+        params = {"symbols": ticker}
+        try:
+            resp = requests.get(url, headers=self._alpaca_headers(),
+                                params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            snap = data.get(ticker, {})
+            quote = snap.get("latestQuote", {})
+            bid = quote.get("bp")
+            ask = quote.get("ap")
+            if bid is not None and ask is not None:
+                logger.debug("[%s] Underlying bid=%.4f ask=%.4f spread=%.4f",
+                             ticker, bid, ask, ask - bid)
+                return float(bid), float(ask)
+            logger.warning("[%s] No bid/ask in snapshot latestQuote", ticker)
+            return None
+        except requests.RequestException as exc:
+            logger.warning("[%s] Failed to fetch underlying bid/ask: %s", ticker, exc)
+            return None
+
+    def get_5min_return(self, ticker: str) -> Optional[float]:
+        """
+        Fetch the most recent 5-minute bar return for *ticker* from Alpaca.
+        Returns (last_close / prev_close) - 1, or None on failure.
+
+        Used for relative strength comparison: if a ticker's 5-min return
+        exceeds the benchmark (SPY/QQQ), it is showing relative strength.
+        """
+        url = f"{self.alpaca_data_url}/stocks/{ticker}/bars"
+        params = {"timeframe": "5Min", "limit": 2, "adjustment": "raw"}
+        try:
+            resp = requests.get(url, headers=self._alpaca_headers(),
+                                params=params, timeout=10)
+            resp.raise_for_status()
+            bars = resp.json().get("bars", [])
+            if len(bars) < 2:
+                logger.debug("[%s] Not enough 5-min bars for RS calculation", ticker)
+                return None
+            prev_close = float(bars[-2]["c"])
+            last_close = float(bars[-1]["c"])
+            if prev_close == 0:
+                return None
+            ret = (last_close / prev_close) - 1.0
+            logger.debug("[%s] 5-min return=%.4f%%", ticker, ret * 100)
+            return ret
+        except requests.RequestException as exc:
+            logger.warning("[%s] 5-min bar fetch failed: %s", ticker, exc)
+            return None
+
     def get_account_info(self, base_url: str) -> Optional[Dict]:
         """Fetch paper trading account information from Alpaca."""
         url = f"{base_url}/account"

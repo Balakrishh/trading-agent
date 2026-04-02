@@ -9,7 +9,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from trading_agent.agent import TradingAgent
-from trading_agent.config import AppConfig, AlpacaConfig, TradingConfig, LoggingConfig
+from trading_agent.config import (AppConfig, AlpacaConfig, TradingConfig,
+                                   LoggingConfig, IntelligenceConfig)
 
 
 def _make_config(tmp_path, tickers=None):
@@ -34,6 +35,17 @@ def _make_config(tmp_path, tickers=None):
             log_dir=str(tmp_path / "logs"),
             trade_plan_dir=str(tmp_path / "plans"),
         ),
+        intelligence=IntelligenceConfig(
+            enabled=False,
+            llm_provider="ollama",
+            llm_base_url="",
+            llm_model="",
+            llm_embedding_model="",
+            llm_api_key="",
+            llm_temperature=0.0,
+            journal_dir=str(tmp_path / "journal"),  # isolated per test
+            knowledge_base_dir=str(tmp_path / "kb"),
+        ),
     )
 
 
@@ -42,7 +54,8 @@ def _mock_agent(agent, prices, option_chain):
     dp = agent.data_provider
     dp.fetch_historical_prices = MagicMock(return_value=prices)
     dp.fetch_option_chain = MagicMock(return_value=option_chain)
-    dp.get_account_info = MagicMock(return_value={"equity": "100000"})
+    dp.get_account_info = MagicMock(
+        return_value={"equity": "100000", "buying_power": "50000"})
     dp.is_market_open = MagicMock(return_value=True)
     # get_current_price is separate from fetch_historical_prices after the
     # TTL cache split — mock it explicitly so classify() gets a real float
@@ -51,6 +64,8 @@ def _mock_agent(agent, prices, option_chain):
     # New methods added for 5-min optimisation
     dp.fetch_batch_snapshots = MagicMock(return_value={"SPY": 500.0})
     dp.prefetch_historical_parallel = MagicMock()
+    # Liquidity check — return a liquid spread (< $0.05) so tests pass by default
+    dp.get_underlying_bid_ask = MagicMock(return_value=(499.98, 500.01))
     # Stage 1: no open positions so we skip straight to Stage 2
     agent.position_monitor.fetch_open_positions = MagicMock(return_value=[])
 
@@ -93,10 +108,12 @@ class TestFullPipeline:
     def test_full_cycle_handles_per_ticker_exception(self, tmp_path, bullish_prices):
         """Agent catches unhandled errors per-ticker without crashing."""
         agent = TradingAgent(_make_config(tmp_path))
-        agent.data_provider.get_account_info = MagicMock(return_value={"equity": "100000"})
+        agent.data_provider.get_account_info = MagicMock(
+            return_value={"equity": "100000", "buying_power": "50000"})
         agent.data_provider.is_market_open = MagicMock(return_value=True)
         agent.data_provider.fetch_batch_snapshots = MagicMock(return_value={})
         agent.data_provider.prefetch_historical_parallel = MagicMock()
+        agent.data_provider.get_underlying_bid_ask = MagicMock(return_value=(499.98, 500.01))
         agent.position_monitor.fetch_open_positions = MagicMock(return_value=[])
         # Make classify throw per ticker
         agent.regime_classifier.classify = MagicMock(
@@ -153,3 +170,112 @@ class TestFullPipeline:
         assert record["ticker"] == "SPY"
         assert "action" in record
         assert "raw_signal" in record
+
+    def test_signal_contains_thesis(self, tmp_path, bullish_prices,
+                                     sample_put_contracts):
+        """JournalKB record includes the trade thesis (why/why_now/exit_plan)."""
+        agent = TradingAgent(_make_config(tmp_path))
+        _mock_agent(agent, bullish_prices, sample_put_contracts)
+
+        agent.run_cycle()
+
+        jsonl_path = os.path.join(agent.journal_kb.journal_dir, "signals.jsonl")
+        record = json.loads(open(jsonl_path).readline())
+        thesis = record["raw_signal"].get("thesis", {})
+        assert "why" in thesis
+        assert "why_now" in thesis
+        assert "exit_plan" in thesis
+
+
+class TestDailyDrawdown:
+
+    def test_daily_state_file_created_on_first_run(self, tmp_path, bullish_prices,
+                                                    sample_put_contracts):
+        """First cycle of the day writes daily_state.json."""
+        agent = TradingAgent(_make_config(tmp_path))
+        _mock_agent(agent, bullish_prices, sample_put_contracts)
+
+        agent.run_cycle()
+
+        state_path = tmp_path / "plans" / "daily_state.json"
+        assert state_path.exists()
+        state = json.loads(state_path.read_text())
+        assert "start_equity" in state
+        assert "date" in state
+
+    def test_drawdown_circuit_breaker_fires(self, tmp_path, bullish_prices,
+                                             sample_put_contracts):
+        """When equity drops >5% from day start, _check_daily_drawdown returns True."""
+        import datetime as dt
+        agent = TradingAgent(_make_config(tmp_path))
+
+        today = dt.date.today().isoformat()
+        state_path = tmp_path / "plans" / "daily_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(
+            {"date": today, "start_equity": 100_000.0}))
+
+        # Equity has dropped 6% — exceeds 5% limit
+        assert agent._check_daily_drawdown(94_000.0) is True
+
+    def test_drawdown_within_limit_passes(self, tmp_path):
+        import datetime as dt
+        agent = TradingAgent(_make_config(tmp_path))
+
+        today = dt.date.today().isoformat()
+        state_path = tmp_path / "plans" / "daily_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(
+            {"date": today, "start_equity": 100_000.0}))
+
+        # Equity dropped only 2% — under the 5% limit
+        assert agent._check_daily_drawdown(98_000.0) is False
+
+    def test_new_day_resets_baseline(self, tmp_path):
+        """State from a previous day is replaced with today's equity."""
+        import datetime as dt
+        agent = TradingAgent(_make_config(tmp_path))
+
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        state_path = tmp_path / "plans" / "daily_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(
+            {"date": yesterday, "start_equity": 50_000.0}))
+
+        # Even though equity would be -90% vs yesterday, a new day resets
+        assert agent._check_daily_drawdown(100_000.0) is False
+        new_state = json.loads(state_path.read_text())
+        assert new_state["date"] == dt.date.today().isoformat()
+        assert new_state["start_equity"] == pytest.approx(100_000.0)
+
+
+class TestLiquidationMode:
+
+    def test_liquidation_mode_skips_new_trades(self, tmp_path, bullish_prices,
+                                                sample_put_contracts):
+        """When buying power is exhausted, new trades are skipped."""
+        agent = TradingAgent(_make_config(tmp_path))
+        _mock_agent(agent, bullish_prices, sample_put_contracts)
+        # Only 5% BP remaining (95% used > 80% limit)
+        agent.data_provider.get_account_info = MagicMock(
+            return_value={"equity": "100000", "buying_power": "5000"})
+
+        results = agent.run_cycle()
+        trades = results["new_trades"]
+        assert len(trades) == 1
+        assert trades[0]["status"] == "skipped"
+        assert "liquidation" in trades[0]["reason"].lower()
+
+    def test_sufficient_bp_allows_trades(self, tmp_path, bullish_prices,
+                                          sample_put_contracts):
+        """With plenty of buying power, trades proceed normally."""
+        agent = TradingAgent(_make_config(tmp_path))
+        _mock_agent(agent, bullish_prices, sample_put_contracts)
+        # 50% BP remaining (50% used < 80% limit)
+        agent.data_provider.get_account_info = MagicMock(
+            return_value={"equity": "100000", "buying_power": "50000"})
+
+        results = agent.run_cycle()
+        trades = results["new_trades"]
+        assert len(trades) == 1
+        assert trades[0].get("status") != "skipped"

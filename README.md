@@ -25,10 +25,11 @@ The agent runs a **two-stage loop** on every cycle: first it manages existing op
 │  │  STAGE 2 — Open New Positions  (per ticker: SPY QQQ AAPL …)    │   │
 │  │                                                                  │   │
 │  │  I·Perceive ──▶ II·Classify ──▶ III·Plan ──▶ IV·Risk ──▶       │   │
-│  │  yfinance 200d   SMA-50/200     Select        6 guardrails       │   │
-│  │  Alpaca snap.    RSI-14         strikes        Max loss 2%        │   │
-│  │  (batch+cached)  Bollinger BB   nearest Fri    Paper only         │   │
-│  │                                 in DTE range                     │   │
+│  │  yfinance 200d   SMA-50/200     Select        8 guardrails       │   │
+│  │  Alpaca snap.    RSI-14         strikes        Liquidity check    │   │
+│  │  Bid/ask check   Bollinger BB   nearest Fri    Buying power       │   │
+│  │  (batch+cached)  3-std MR sig.  in DTE range   Daily DD CB        │   │
+│  │                  RS vs SPY/QQQ                                    │   │
 │  │              ──▶ V·LLM Analysis ──▶ VI·Execute                  │   │
 │  │                 RAG context         mleg order                   │   │
 │  │                 Approve/Skip        Alpaca API                   │   │
@@ -43,11 +44,31 @@ The agent runs a **two-stage loop** on every cycle: first it manages existing op
 
 ## Market Regime → Strategy Matrix
 
-| Regime | Detection Rule | Strategy |
-|--------|---------------|----------|
-| **Bullish** | Price > SMA-200 AND SMA-50 slope > 0 | Bull Put Spread |
-| **Bearish** | Price < SMA-200 AND SMA-50 slope < 0 | Bear Call Spread |
-| **Sideways** | Between SMAs or narrow Bollinger Bands | Iron Condor |
+Strategy selection follows a strict priority order:
+
+| Priority | Regime | Detection Rule | Strategy |
+|----------|--------|---------------|----------|
+| **1 (highest)** | **Mean Reversion** | Price touches 3-std Bollinger Band | Mean Reversion Spread |
+| 2 | **Bullish + RS** | Bullish AND ticker outperforming SPY/QQQ by >0.1% in 5-min window | Bull Put Spread (RS bias) |
+| 3 | **Sideways + RS** | Sideways AND ticker outperforming SPY/QQQ by >0.1% | Bull Put Spread (RS bias) |
+| 4 | **Bullish** | Price > SMA-200 AND SMA-50 slope > 0 | Bull Put Spread |
+| 5 | **Bearish** | Price < SMA-200 AND SMA-50 slope < 0 | Bear Call Spread |
+| 6 | **Sideways** | Between SMAs or narrow Bollinger Bands | Iron Condor |
+
+### Mean Reversion Spreads
+
+When price reaches a **3-standard-deviation Bollinger Band** (statistically extreme), the agent expects reversion toward the mean and sells a spread in the direction of the expected move:
+
+| Band Touch | Expected Move | Strategy |
+|------------|--------------|----------|
+| Upper 3-std touch | Price extended to upside → expect reversion down | Bear Call Spread above current price |
+| Lower 3-std touch | Price extended to downside → expect reversion up | Bull Put Spread below current price |
+
+The strategy name is labelled `"Mean Reversion Spread"` in all outputs.
+
+### Relative Strength Bias
+
+On every cycle, the agent computes each ticker's **5-minute return** via Alpaca bars and compares it to SPY and QQQ. If the ticker outperforms by >0.1% in the 5-min window, the strategy selection is biased toward a Bull Put Spread even in a sideways regime — indicating short-term momentum that supports a bullish credit spread.
 
 ---
 
@@ -104,7 +125,7 @@ Regardless of whether the LLM layer is enabled, **every trade signal and executi
 - `signals.jsonl` — one JSON record per line; LLM fine-tuning and RAG-ready
 - `signals.md` — append-only Markdown table for human review
 
-Each record captures: `timestamp`, `ticker`, `action`, `price`, `exec_status`, and a `raw_signal` dict with regime, Greeks, risk checks, and LLM fields.
+Each record captures: `timestamp`, `ticker`, `action`, `price`, `exec_status`, and a `raw_signal` dict with regime, Greeks, risk checks, LLM fields, and a structured `thesis` block.
 
 ### Components
 
@@ -155,20 +176,34 @@ Other recommended models: `llama3`, `deepseek-r1:7b`, `qwen2.5:7b`.
 
 ## Risk Management Guardrails
 
-Every trade must pass **all six checks** before execution:
+Every trade must pass **all eight checks** before execution:
 
 | # | Check | Rule |
 |---|-------|------|
 | 1 | **Plan Validity** | Strategy planner found valid strikes and contracts |
-| 2 | **Credit-to-Width Ratio** | Credit ≥ 1/3 of spread width |
-| 3 | **Sold Delta** | ≤ 0.20 (≈80% probability OTM) |
-| 4 | **Max Loss** | ≤ 2% of account equity per trade |
+| 2 | **Credit-to-Width Ratio** | Credit ≥ `MIN_CREDIT_RATIO` of spread width (default 0.33) |
+| 3 | **Sold Delta** | ≤ `MAX_DELTA` (default 0.20, ≈80% probability OTM) |
+| 4 | **Max Loss** | ≤ `MAX_RISK_PCT` × account equity per trade (default 2%) |
 | 5 | **Account Type** | Must be `paper` |
 | 6 | **Market Hours** | Market must be open |
+| 7 | **Underlying Liquidity** | Stock bid/ask spread < `LIQUIDITY_MAX_SPREAD` (default $0.05) |
+| 8 | **Buying Power** | Available buying power ≥ (1 − `MAX_BUYING_POWER_PCT`) × equity |
 
 ```
 Max Loss = (Spread Width − Credit Collected) × 100
 ```
+
+### Daily Drawdown Circuit Breaker
+
+The agent persists today's opening equity in `trade_plans/daily_state.json` and checks it on every cycle. If the current equity has fallen more than `DAILY_DRAWDOWN_LIMIT` (default 5%) from the day's opening value, the agent:
+1. Logs a `daily_drawdown_circuit_breaker` event to `signals.jsonl`
+2. Calls `os._exit(1)` to hard-terminate the process
+
+The file resets automatically at the start of each calendar day.
+
+### Liquidation Mode
+
+If available buying power exceeds `MAX_BUYING_POWER_PCT` (default 80%) of account equity, the agent enters **Liquidation Mode**: Stage 2 (new trade opening) is skipped entirely for all tickers. Stage 1 (position monitoring and closing) continues normally. Every skipped ticker is logged with action `skipped_liquidation_mode`.
 
 ---
 
@@ -216,7 +251,8 @@ trading-agent/
 │
 ├── knowledge_base/               # RAG vector store (auto-created, LLM layer only)
 ├── trade_plans/                  # Per-ticker persistent trade plan files (auto-created)
-│   └── trade_plan_{TICKER}.json  #   Single file per ticker with state_history array
+│   ├── trade_plan_{TICKER}.json  #   Single file per ticker with state_history array
+│   └── daily_state.json          #   Daily drawdown circuit breaker state (auto-reset)
 └── logs/                         # Runtime log files
 ```
 
@@ -272,7 +308,7 @@ Every trade attempt is logged as a single JSON line, regardless of LLM state:
   "exec_status": "dry_run",
   "notes": "dry_run: Bull Put Spread, cr=1.70, ratio=0.34",
   "raw_signal": {
-    "regime": "BULLISH",
+    "regime": "bullish",
     "strategy": "Bull Put Spread",
     "plan_valid": true,
     "risk_approved": true,
@@ -284,16 +320,26 @@ Every trade attempt is logged as a single JSON line, regardless of LLM state:
     "sma_50": 675.93,
     "sma_200": 658.41,
     "rsi_14": 37.8,
+    "mean_reversion_signal": false,
+    "mean_reversion_direction": "",
+    "rs_vs_spy": 0.0012,
+    "rs_vs_qqq": -0.0003,
     "account_balance": 25000.0,
-    "checks_passed": ["plan_valid", "credit_ratio", "delta", "max_loss", "paper_account", "market_open"],
+    "checks_passed": ["plan_valid", "credit_ratio", "delta", "max_loss",
+                      "paper_account", "market_open", "liquidity", "buying_power"],
     "checks_failed": [],
     "llm_decision": null,
-    "llm_confidence": null
+    "llm_confidence": null,
+    "thesis": {
+      "why": "BULLISH regime — price=655.44, SMA50=675.93, SMA200=658.41, RSI=37.8, BB_width=0.0821",
+      "why_now": "Price (655.44) > SMA-200 (658.41) and SMA-50 slope is positive (0.4200).",
+      "exit_plan": "Expiry 2026-05-15 | Profit target: 50% of credit ($85.00/contract) | Max loss: $330.00 | Close if regime shifts adversely"
+    }
   }
 }
 ```
 
-Action values: `dry_run`, `submitted`, `rejected`, `skipped_by_llm`, `skipped_existing`, `error`, `cycle_timeout`.
+Action values: `dry_run`, `submitted`, `rejected`, `skipped_by_llm`, `skipped_existing`, `skipped_liquidation_mode`, `error`, `cycle_timeout`, `daily_drawdown_circuit_breaker`.
 
 ---
 
@@ -378,11 +424,21 @@ pytest tests/ -v           # Core modules only
 |----------|---------|-------------|
 | `TICKERS` | `SPY,QQQ` | Comma-separated underlyings |
 | `DRY_RUN` | `true` | Log plans but don't submit orders |
+| `MODE` | `dry_run` | `live` or `dry_run` |
 | `MAX_RISK_PCT` | `0.02` | Max loss per trade as % of equity |
 | `MIN_CREDIT_RATIO` | `0.33` | Minimum credit / spread width |
 | `MAX_DELTA` | `0.20` | Max absolute delta of sold strike |
+| `SCHEDULE_INTERVAL` | `5m` | Cycle interval (informational — used in startup log) |
+| **Risk Guardrails** | | |
+| `DAILY_DRAWDOWN_LIMIT` | `0.05` | Kill process if account drops >N% in one day |
+| `MAX_BUYING_POWER_PCT` | `0.80` | Enter Liquidation Mode if >N% of BP used |
+| `LIQUIDITY_MAX_SPREAD` | `0.05` | Skip tickers where underlying bid/ask spread ≥ $N |
+| **Logging** | | |
 | `LOG_LEVEL` | `INFO` | Python logging level |
-| `LLM_ENABLED` | `false` | Enable the intelligence layer |
+| `LOG_DIR` | `logs` | Log file directory |
+| `TRADE_PLAN_DIR` | `trade_plans` | Per-ticker plan files + `daily_state.json` |
+| **Intelligence Layer** | | |
+| `LLM_ENABLED` | `false` | Enable the LLM intelligence layer |
 | `LLM_PROVIDER` | `ollama` | `ollama`, `lmstudio`, `openai`, `anthropic` |
 | `LLM_BASE_URL` | `http://localhost:11434` | LLM API endpoint |
 | `LLM_MODEL` | `mistral` | Reasoning model |

@@ -129,6 +129,87 @@ class TestPickExpiration:
         assert broken_dte > 45
 
 
+class TestMeanReversionStrategy:
+    def _make_planner(self, put_chain=None, call_chain=None):
+        provider = MagicMock(spec=MarketDataProvider)
+        provider.fetch_option_chain.side_effect = lambda ticker, exp, opt_type: (
+            put_chain if opt_type == "put" else call_chain
+        )
+        return StrategyPlanner(provider, max_delta=0.20, min_credit_ratio=0.33)
+
+    def _make_mr_analysis(self, direction: str) -> RegimeAnalysis:
+        from trading_agent.regime import Regime
+        return RegimeAnalysis(
+            regime=Regime.MEAN_REVERSION,
+            current_price=500.0,
+            sma_50=498.0,
+            sma_200=490.0,
+            sma_50_slope=0.5,
+            rsi_14=55.0,
+            bollinger_width=0.06,
+            reasoning="3-std BB touch",
+            mean_reversion_signal=True,
+            mean_reversion_direction=direction,
+        )
+
+    def test_upper_band_touch_sells_bear_call(self, sample_call_contracts):
+        planner = self._make_planner(call_chain=sample_call_contracts)
+        plan = planner.plan("SPY", self._make_mr_analysis("upper"))
+        assert plan.strategy_name == "Mean Reversion Spread"
+        assert "upper" in plan.reasoning.lower() or "reversion" in plan.reasoning.lower()
+        sold = [l for l in plan.legs if l.action == "sell"]
+        bought = [l for l in plan.legs if l.action == "buy"]
+        assert sold[0].strike < bought[0].strike  # bear call structure
+
+    def test_lower_band_touch_sells_bull_put(self, sample_put_contracts):
+        planner = self._make_planner(put_chain=sample_put_contracts)
+        plan = planner.plan("SPY", self._make_mr_analysis("lower"))
+        assert plan.strategy_name == "Mean Reversion Spread"
+        sold = [l for l in plan.legs if l.action == "sell"]
+        bought = [l for l in plan.legs if l.action == "buy"]
+        assert sold[0].strike > bought[0].strike  # bull put structure
+
+
+class TestRelativeStrengthBias:
+    def _make_planner(self, put_chain=None, call_chain=None):
+        provider = MagicMock(spec=MarketDataProvider)
+        provider.fetch_option_chain.side_effect = lambda ticker, exp, opt_type: (
+            put_chain if opt_type == "put" else call_chain
+        )
+        return StrategyPlanner(provider, max_delta=0.20, min_credit_ratio=0.33)
+
+    def test_sideways_with_rs_picks_bull_put(self, sample_put_contracts):
+        """SIDEWAYS regime + relative strength outperforming → Bull Put Spread."""
+        from trading_agent.regime import Regime
+        planner = self._make_planner(put_chain=sample_put_contracts)
+        analysis = RegimeAnalysis(
+            regime=Regime.SIDEWAYS,
+            current_price=500.0, sma_50=498.0, sma_200=490.0,
+            sma_50_slope=0.5, rsi_14=55.0, bollinger_width=0.06,
+            reasoning="sideways",
+            relative_strength_vs_spy=0.002,   # +0.2% outperforming
+        )
+        plan = planner.plan("SPY", analysis)
+        assert plan.strategy_name == "Bull Put Spread"
+
+    def test_sideways_without_rs_picks_iron_condor(self, sample_put_contracts,
+                                                     sample_call_contracts):
+        """SIDEWAYS regime with no RS signal → Iron Condor."""
+        from trading_agent.regime import Regime
+        planner = self._make_planner(put_chain=sample_put_contracts,
+                                      call_chain=sample_call_contracts)
+        analysis = RegimeAnalysis(
+            regime=Regime.SIDEWAYS,
+            current_price=500.0, sma_50=498.0, sma_200=490.0,
+            sma_50_slope=0.0, rsi_14=50.0, bollinger_width=0.06,
+            reasoning="sideways",
+            relative_strength_vs_spy=0.0,
+            relative_strength_vs_qqq=0.0,
+        )
+        plan = planner.plan("SPY", analysis)
+        assert plan.strategy_name == "Iron Condor"
+
+
 class TestPlanSerialization:
     def test_to_dict_roundtrip(self, valid_spread_plan):
         d = valid_spread_plan.to_dict()

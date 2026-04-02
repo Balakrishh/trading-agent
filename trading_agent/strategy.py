@@ -83,12 +83,18 @@ class StrategyPlanner:
     """
     Maps regime → strategy and picks strikes from the option chain.
 
-    Regime          Strategy
-    ────────────    ─────────────────
-    BULLISH         Bull Put Spread
-    BEARISH         Bear Call Spread
-    SIDEWAYS        Iron Condor
+    Regime            Strategy
+    ──────────────    ───────────────────────────────────────────
+    MEAN_REVERSION    Mean Reversion Spread (highest priority)
+    BULLISH           Bull Put Spread
+    BULLISH + RS      Bull Put Spread  (relative strength bias)
+    BEARISH           Bear Call Spread
+    SIDEWAYS          Iron Condor
+    SIDEWAYS + RS     Bull Put Spread  (relative strength bias)
     """
+
+    # Minimum relative strength differential (vs SPY or QQQ) to trigger bias
+    RS_THRESHOLD = 0.001   # 0.1% outperformance in 5-min window
 
     SPREAD_WIDTH = 5.0          # dollars between sold / bought strikes
     TARGET_DTE = 44             # days-to-expiration target (adjusted for available options)
@@ -108,11 +114,33 @@ class StrategyPlanner:
     def plan(self, ticker: str, analysis: RegimeAnalysis) -> SpreadPlan:
         """
         Build the best credit-spread plan for *ticker* given regime *analysis*.
+
+        Priority order:
+          1. Mean Reversion — 3-std BB touch overrides everything
+          2. Relative Strength bias — outperforming SPY/QQQ → Bull Put Spread
+          3. Normal regime → Bull Put / Bear Call / Iron Condor
         """
         expiration = self._pick_expiration()
         logger.info("[%s] Planning %s strategy, expiration %s",
                      ticker, analysis.regime.value, expiration)
 
+        # --- Priority 1: Mean Reversion (3-std BB touch) ---
+        if analysis.regime == Regime.MEAN_REVERSION:
+            return self._plan_mean_reversion(ticker, analysis, expiration)
+
+        # --- Priority 2: Relative Strength bias ---
+        rs_spy = getattr(analysis, "relative_strength_vs_spy", 0.0)
+        rs_qqq = getattr(analysis, "relative_strength_vs_qqq", 0.0)
+        rs_outperforming = (rs_spy > self.RS_THRESHOLD
+                            or rs_qqq > self.RS_THRESHOLD)
+        if rs_outperforming and analysis.regime in (Regime.BULLISH, Regime.SIDEWAYS):
+            logger.info(
+                "[%s] Relative strength bias → Bull Put Spread "
+                "(RS_SPY=%.4f, RS_QQQ=%.4f)",
+                ticker, rs_spy, rs_qqq)
+            return self._plan_bull_put(ticker, analysis, expiration)
+
+        # --- Priority 3: Normal regime mapping ---
         if analysis.regime == Regime.BULLISH:
             return self._plan_bull_put(ticker, analysis, expiration)
         elif analysis.regime == Regime.BEARISH:
@@ -169,6 +197,42 @@ class StrategyPlanner:
 
         return self._assemble_plan(ticker, "Bear Call Spread", analysis,
                                     expiration, sold, bought, "call")
+
+    def _plan_mean_reversion(self, ticker: str, analysis: RegimeAnalysis,
+                             expiration: str) -> SpreadPlan:
+        """
+        When price touches a 3-std Bollinger Band, sell a spread that
+        profits from the expected reversion back toward the mean.
+
+        Upper band touch → sell Bear Call Spread above current price
+        Lower band touch → sell Bull Put Spread below current price
+        """
+        direction = getattr(analysis, "mean_reversion_direction", "")
+        logger.info("[%s] Mean Reversion signal (%s band) — planning spread",
+                    ticker, direction)
+
+        if direction == "upper":
+            # Price extended to upside → expect reversion down → Bear Call Spread
+            result = self._plan_bear_call(ticker, analysis, expiration)
+            result.strategy_name = "Mean Reversion Spread"
+            result.reasoning = (
+                f"Mean Reversion: price ({analysis.current_price:.2f}) touched "
+                f"upper 3-std Bollinger Band. "
+                f"Selling Bear Call Spread expecting reversion toward mean. "
+                + result.reasoning
+            )
+            return result
+        else:
+            # Price extended to downside → expect reversion up → Bull Put Spread
+            result = self._plan_bull_put(ticker, analysis, expiration)
+            result.strategy_name = "Mean Reversion Spread"
+            result.reasoning = (
+                f"Mean Reversion: price ({analysis.current_price:.2f}) touched "
+                f"lower 3-std Bollinger Band. "
+                f"Selling Bull Put Spread expecting reversion toward mean. "
+                + result.reasoning
+            )
+            return result
 
     def _plan_iron_condor(self, ticker: str, analysis: RegimeAnalysis,
                           expiration: str) -> SpreadPlan:
