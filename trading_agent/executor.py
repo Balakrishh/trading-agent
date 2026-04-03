@@ -391,6 +391,15 @@ class OrderExecutor:
 
         logger.info("Trade plan saved to %s (run_id=%s, history=%d)",
                     filepath, run_id, len(persistent["state_history"]))
+
+        # Auto-generate companion HTML report
+        try:
+            from trading_agent.trade_plan_report import generate_report
+            html_path = generate_report(filepath)
+            logger.debug("HTML report updated: %s", html_path)
+        except Exception as exc:
+            logger.debug("HTML report generation skipped: %s", exc)
+
         return filepath, run_id
 
     def _append_to_plan(self, filepath: str, run_id: str, data: Dict) -> None:

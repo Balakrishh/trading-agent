@@ -227,8 +227,9 @@ trading-agent/
 │   ├── market_data.py            # Phase I   — yfinance + Alpaca (TTL cache, parallel)
 │   ├── regime.py                 # Phase II  — SMA / RSI / Bollinger regime classifier
 │   ├── strategy.py               # Phase III — strike selection, nearest-Friday DTE
-│   ├── risk_manager.py           # Phase IV  — 6-guardrail validator
-│   ├── executor.py               # Phase VI  — mleg order execution
+│   ├── risk_manager.py           # Phase IV  — 8-guardrail validator
+│   ├── executor.py               # Phase VI  — mleg order execution + HTML report
+│   ├── trade_plan_report.py      # HTML report generator (auto-called by executor)
 │   │
 │   │   # ── Position Management ──
 │   ├── position_monitor.py       # Stage 1 — monitor & close open spreads
@@ -252,6 +253,7 @@ trading-agent/
 ├── knowledge_base/               # RAG vector store (auto-created, LLM layer only)
 ├── trade_plans/                  # Per-ticker persistent trade plan files (auto-created)
 │   ├── trade_plan_{TICKER}.json  #   Single file per ticker with state_history array
+│   ├── trade_plan_{TICKER}.html  #   Self-contained HTML report (auto-generated each cycle)
 │   └── daily_state.json          #   Daily drawdown circuit breaker state (auto-reset)
 └── logs/                         # Runtime log files
 ```
@@ -292,6 +294,45 @@ Each ticker has one persistent file (`trade_plans/{TICKER}.json`) that accumulat
 ```
 
 History is capped at 200 entries per ticker. Old timestamped files (`trade_plan_{TICKER}_{TS}.json`) are loaded transparently for backward compatibility.
+
+---
+
+## HTML Trade Plan Report
+
+Every time a trade plan is saved, `executor.py` automatically generates a self-contained HTML report alongside the JSON:
+
+```
+trade_plans/
+├── trade_plan_IWM.json      ← machine-readable, authoritative
+└── trade_plan_IWM.html      ← human-readable, auto-generated each cycle
+```
+
+Open any `.html` file in a browser — no server required, no dependencies to install.
+
+### Report Sections
+
+| Section | What it shows |
+|---------|--------------|
+| **Summary Cards** | Strategy, net credit, max loss, credit/width ratio, expiration + DTE, account equity, approval rate |
+| **Spread Structure** | Visual strike ladder with colour-coded sell/buy bars, delta, bid/ask, mid for each leg |
+| **Option Legs Table** | Full per-leg breakdown — symbol, strike, action, type, delta, bid, ask, mid |
+| **Risk Checks** | Colour-coded ✅ / ❌ list of all 8 guardrails with verdict summary |
+| **Trade Thesis** | Structured *Why this market? / Why now? / Exit plan* block |
+| **Historical Trend Charts** | Chart.js line charts: net credit, credit/width ratio (vs 33% threshold line), account balance |
+| **Order Submission** | Order ID, Alpaca status, limit price, fill status, per-leg fill detail |
+| **Cycle History** | Collapsible entry for every run (newest first, auto-expanded) — plan + risk + legs + order |
+
+### Generating Reports Manually
+
+```bash
+# Single ticker
+python -m trading_agent.trade_plan_report trade_plans/trade_plan_IWM.json
+
+# All tickers in the directory
+python -m trading_agent.trade_plan_report trade_plans/
+```
+
+Reports are also regenerated automatically on every agent cycle — no manual step needed during live operation.
 
 ---
 
