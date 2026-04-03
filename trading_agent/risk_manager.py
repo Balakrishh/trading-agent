@@ -1,4 +1,4 @@
-7"""
+"""
 Phase IV (pre-flight) — RISK VALIDATION
 Enforces all non-negotiable risk guardrails before any order is placed.
 """
