@@ -1,0 +1,6 @@
+[2026-04-12 20:03:18 UTC] --- One-shot cycle start ---
+2026-04-12 16:03:22 | INFO     | root                           | Logging initialised — level=INFO, file=logs/trading_agent_20260412.log
+2026-04-12 16:03:22 | INFO     | __main__                       | Intelligence layer DISABLED — rule-based mode only
+2026-04-12 16:03:22 | INFO     | __main__                       | Outside NYSE market hours (Sunday 16:03 ET) — shutting down cleanly
+2026-04-12 16:03:22 | ERROR    | trading_agent.journal_kb       | JournalKB cycle_error: after_hours_shutdown
+[2026-04-12 20:03:22 UTC] --- One-shot cycle end (exit=0) ---

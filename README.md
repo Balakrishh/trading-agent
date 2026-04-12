@@ -640,9 +640,75 @@ The dashboard auto-discovers your `.env` file — no extra config needed.
 
 | Tab | Features |
 |-----|---------|
-| **📡 Live Monitoring** | Equity · P&L · regime badge · cycle countdown · open positions table · equity curve · 8-guardrail status cards · market status + SMA drift · journal expander · auto-refresh every 30 s · Emergency Pause button |
+| **📡 Live Monitoring** | Agent Start/Stop/Pause · Dry Run mode · Run Once · cycle PID tracking · equity · P&L · regime badge · cycle countdown · open positions table · equity curve · 8-guardrail status cards · market status + SMA drift · agent log · journal expander · auto-refresh every 30s |
 | **📊 Backtesting** | Date range · multi-ticker · timeframe (1Day/5Min) · simulated Bull Put / Bear Call / Iron Condor P&L · metric cards (trades, win%, profit factor, maxDD%, Sharpe, avg hold) · per-regime bar chart · equity + drawdown charts · sortable trade log · CSV/JSON/Journal export |
 | **🤖 LLM Extension** | Chat with local Ollama model (RAG over journal) · pre-built buttons: analyze last 10 trades, next-week plan, VIX +20% what-if · Optimize Strategy → one-click `.env` update |
+
+---
+
+### Live Monitoring — Agent Controls
+
+The Live Monitoring tab is the **single entry point** for the trading agent. You do not need to run any `python` or `cron` commands — everything is controlled from the browser.
+
+#### Agent control buttons
+
+| Button | Description |
+|--------|-------------|
+| **▶ Start Agent** | Writes `AGENT_RUNNING` sentinel and starts a background loop that runs one full cycle every 5 minutes indefinitely |
+| **▶ Start (Dry Run)** | Same as Start Agent, but injects `DRY_RUN=true` + `FORCE_MARKET_OPEN=true` — no orders placed, market-hours check bypassed |
+| **⏹ Stop Agent** | Removes `AGENT_RUNNING` — the current cycle completes, then the loop exits cleanly |
+| **⏸ Pause** | Writes `PAUSED` flag — loop keeps ticking but skips order submission until resumed |
+| **▶ Resume** | Removes `PAUSED` flag |
+| **⚡ Run Once** | Fires a single live cycle immediately without starting the 5-minute loop |
+| **⚡ Run Once (Dry)** | Same as Run Once but in dry-run mode |
+| **🔴** | Sends SIGKILL to the currently running cycle subprocess (emergency only) |
+
+#### File-based state
+
+The dashboard communicates state to the agent via sentinel files in the repo root. You can inspect or manipulate these directly if needed:
+
+| File | Present means… |
+|------|----------------|
+| `AGENT_RUNNING` | Loop is active; remove it to stop the agent |
+| `AGENT_PID` | PID of the currently executing cycle subprocess |
+| `AGENT_LOG` | Rolling last 200 lines of agent stdout/stderr |
+| `PAUSED` | Loop is paused; remove it to resume |
+| `DRY_RUN_MODE` | All cycles run with `DRY_RUN=true` + `FORCE_MARKET_OPEN=true` |
+
+#### Subprocess isolation
+
+Each trading cycle runs as a **child subprocess** (not a thread). This is intentional: the agent's 270-second timeout guard calls `os._exit(1)` on a hung cycle. If the agent ran in a thread, that call would kill the entire Streamlit dashboard. As a subprocess it exits cleanly and the dashboard continues running.
+
+---
+
+### Dry Run Mode — After-Hours Simulation
+
+Dry Run lets you run the **complete agent pipeline** after market close without placing any real orders. It is the most accurate way to preview what the agent would trade, because it uses real data — not historical approximations.
+
+#### What Dry Run does vs. Backtesting
+
+| | Dry Run (Live Dashboard) | Backtesting |
+|---|---|---|
+| **Price data** | Live Alpaca snapshots (today's closing price) | Historical yfinance closes |
+| **Option chains** | Real chains with live Greeks, IV, bid/ask | None — fixed 3% OTM formula |
+| **Regime classification** | Exact `RegimeClassifier` — same code as live | Approximated SMA-200 formula |
+| **Risk guardrails** | All 8 checks against your real account balance | None |
+| **Output** | `signals.jsonl` entries tagged `action: dry_run` | In-memory trade log |
+| **Market hours** | Bypassed (`FORCE_MARKET_OPEN=true`) | Not applicable |
+| **What you learn** | Exactly what would be traded tonight | Would the strategy have worked historically? |
+
+#### How to use after market close
+
+1. Open the **Live Monitoring** tab
+2. Expand **"Dry Run Mode"** (open by default when the agent is stopped)
+3. Toggle **Enable Dry Run → ON**
+4. Click **⚡ Run Once (Dry)** for a single simulation, or **▶ Start (Dry Run)** for a continuous loop
+5. Watch the **Agent Log** — full cycle output including option chain fetches, regime decisions, guardrail verdicts
+6. Expand **Recent Journal Entries** — every ticker appears with `action: dry_run` showing the exact spread that would have been placed
+
+#### Switching between modes
+
+The `DRY_RUN_MODE` sentinel file controls the mode. The toggle in the dashboard writes or removes it — no `.env` editing required. You can only switch modes while the agent is stopped.
 
 ---
 

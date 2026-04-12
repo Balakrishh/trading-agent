@@ -30,6 +30,11 @@ DEFAULT_TICKERS = ["SPY", "QQQ", "IWM"]
 DEFAULT_START = date.today() - timedelta(days=365)   # needs 200+ bars for SMA warmup
 DEFAULT_END = date.today() - timedelta(days=1)
 
+# Yahoo Finance hard limits for intraday data
+INTRADAY_MAX_DAYS = 29          # 5m data only available for last ~30 days
+INTRADAY_WARMUP_BARS = 20       # 20 × 5-min bars ≈ 1.5 hours warmup for intraday SMA
+INTRADAY_HOLD_BARS = 12         # 12 × 5-min bars = 1 hour hold per intraday trade
+
 ALL_TICKERS = [
     "SPY", "QQQ", "IWM", "GOOG", "AAPL",
     "MSFT", "AMZN", "META", "SOFI", "TSLA", "JPM",
@@ -104,20 +109,34 @@ class Backtester:
 
     @staticmethod
     def _classify(prices: pd.Series, idx: int) -> str:
-        if idx < 200:
+        """Legacy daily-bar classifier (200-bar window). Kept for test compatibility."""
+        return Backtester._classify_bars(prices, idx, warmup=200)
+
+    @staticmethod
+    def _classify_bars(prices: pd.Series, idx: int, warmup: int = 200) -> str:
+        """
+        Generalized regime classifier.
+
+        Uses `warmup` bars as the long SMA window and warmup//4 as the short
+        SMA window. Works for both daily bars (warmup=200) and intraday bars
+        (warmup=20, short window=5).
+        """
+        if idx < warmup:
             return "sideways"
-        window = prices.iloc[max(0, idx - 200): idx + 1]
-        sma50 = window.iloc[-min(50, len(window)):].mean()
-        sma200 = window.mean()
+        short_window = max(5, warmup // 4)
+        window = prices.iloc[max(0, idx - warmup): idx + 1]
+        sma_short = window.iloc[-min(short_window, len(window)):].mean()
+        sma_long = window.mean()
+        lookback = min(10, len(window))
         slope = (
-            window.iloc[-5:].mean() - window.iloc[-10:-5].mean()
-            if len(window) >= 10
+            window.iloc[-lookback // 2:].mean() - window.iloc[-lookback: -lookback // 2].mean()
+            if lookback >= 4
             else 0.0
         )
         price = window.iloc[-1]
-        if price > sma200 and slope > 0:
+        if price > sma_long and slope > 0:
             return "bullish"
-        if price < sma200 and slope < 0:
+        if price < sma_long and slope < 0:
             return "bearish"
         return "sideways"
 
@@ -132,9 +151,12 @@ class Backtester:
     # ── Outcome simulation ──────────────────────────────────────────────────
 
     def _simulate(
-        self, prices: pd.Series, entry_idx: int, regime: str, credit: float
+        self, prices: pd.Series, entry_idx: int, regime: str, credit: float,
+        hold_bars: int = None,
     ) -> tuple:
-        end_idx = min(entry_idx + self.target_dte, len(prices) - 1)
+        if hold_bars is None:
+            hold_bars = self.target_dte
+        end_idx = min(entry_idx + hold_bars, len(prices) - 1)
         fwd = prices.iloc[entry_idx: end_idx + 1]
         entry_p = prices.iloc[entry_idx]
 
@@ -145,12 +167,12 @@ class Backtester:
         else:  # sideways / iron condor
             breached = ((fwd < entry_p * 0.97) | (fwd > entry_p * 1.03)).any()
 
-        hold_days = end_idx - entry_idx
+        hold_count = end_idx - entry_idx
         if breached:
             pnl = -(self.spread_width * 100 - credit * 100) - self.commission
-            return "loss", round(pnl, 2), hold_days
+            return "loss", round(pnl, 2), hold_count
         pnl = credit * 100 * self.profit_target_pct - self.commission
-        return "win", round(pnl, 2), hold_days
+        return "win", round(pnl, 2), hold_count
 
     # ── Main run ────────────────────────────────────────────────────────────
 
@@ -171,14 +193,38 @@ class Backtester:
         start / end : date range
         timeframe   : "1Day" or "5Min"
         use_alpaca  : reserved for future Alpaca data source (currently no-op)
+
+        Notes on 5Min timeframe
+        -----------------------
+        Yahoo Finance only serves 5-minute data for the last ~30 days.
+        Any start date older than that returns an empty DataFrame.
+        When timeframe="5Min", start is automatically clamped to today-29 days.
+        The warmup period is reduced from 200 daily bars to 20 intraday bars
+        (≈ 1.5 hours) and the hold period from 45 bars to 12 bars (≈ 1 hour).
         """
+        is_intraday = timeframe == "5Min"
+        yf_interval = "1d" if not is_intraday else "5m"
+
+        # ── Yahoo Finance 5m hard limit: clamp start to last 29 days ──────
+        warnings: List[str] = []
+        if is_intraday:
+            earliest_allowed = date.today() - timedelta(days=INTRADAY_MAX_DAYS)
+            if start < earliest_allowed:
+                warnings.append(
+                    f"5-minute data is only available for the last {INTRADAY_MAX_DAYS} days "
+                    f"(Yahoo Finance limitation). Start date clamped from {start} "
+                    f"to {earliest_allowed}."
+                )
+                start = earliest_allowed
+
+        warmup_bars = INTRADAY_WARMUP_BARS if is_intraday else 200
+        hold_bars = INTRADAY_HOLD_BARS if is_intraday else self.target_dte
+
         all_trades: List[SimTrade] = []
         equity = self.starting_equity
         equity_curve: List[Dict] = [{"timestamp": pd.Timestamp(start), "account_balance": equity}]
 
-        yf_interval = "1d" if timeframe == "1Day" else "5m"
-
-        skipped: List[str] = []
+        skipped: List[str] = warnings.copy()
 
         for ticker in tickers:
             try:
@@ -191,7 +237,13 @@ class Backtester:
                     auto_adjust=True,
                 )
                 if raw.empty:
-                    skipped.append(f"{ticker} (no data returned)")
+                    skipped.append(
+                        f"{ticker} (no data returned — "
+                        + ("Yahoo only serves 5m data for the last 30 days; "
+                           "try a more recent date range" if is_intraday
+                           else "check ticker symbol or try a wider date range")
+                        + ")"
+                    )
                     continue
                 # Handle multi-level columns returned by recent yfinance versions
                 if isinstance(raw.columns, pd.MultiIndex):
@@ -202,48 +254,55 @@ class Backtester:
                 skipped.append(f"{ticker} (download error: {exc})")
                 continue
 
-            if len(prices) < 201:
+            min_bars = warmup_bars + hold_bars + 1
+            if len(prices) < min_bars:
+                unit = "intraday bars" if is_intraday else "daily bars"
                 skipped.append(
-                    f"{ticker} (only {len(prices)} bars — need 201+ for SMA-200 warmup; "
-                    f"extend your date range to at least 1 year)"
+                    f"{ticker} (only {len(prices)} {unit} downloaded — "
+                    f"need {min_bars}+ for {warmup_bars}-bar warmup; "
+                    + ("Yahoo Finance only provides ~1560 bars of 5m data over 30 days"
+                       if is_intraday
+                       else "extend your date range to at least 1 year")
+                    + ")"
                 )
                 continue
 
-            last_entry_idx = -self.target_dte
-            for i in range(200, len(prices)):
-                if i - last_entry_idx < self.target_dte:
+            last_entry_idx = -hold_bars
+            for i in range(warmup_bars, len(prices)):
+                if i - last_entry_idx < hold_bars:
                     continue
                 if equity <= 0:
                     break
 
-                regime = self._classify(prices, i)
+                regime = self._classify_bars(prices, i, warmup_bars)
                 strategy = self._strategy(regime)
                 credit = self.spread_width * self.credit_pct
                 max_loss = self.spread_width - credit
 
-                outcome, pnl, hold_days = self._simulate(prices, i, regime, credit)
+                outcome, pnl, hold_count = self._simulate(prices, i, regime, credit, hold_bars)
                 equity = round(equity + pnl, 2)
                 last_entry_idx = i
 
                 raw_date = prices.index[i]
                 entry_date = raw_date.date() if hasattr(raw_date, "date") else start
 
+                # For intraday, hold_days represents bars (each = 5 min), not calendar days
                 all_trades.append(
                     SimTrade(
                         ticker=ticker,
                         strategy=strategy,
                         regime=regime,
                         entry_date=entry_date,
-                        expiry_date=entry_date + timedelta(days=hold_days),
+                        expiry_date=entry_date + timedelta(days=1 if is_intraday else hold_count),
                         credit=credit,
                         max_loss=max_loss,
                         outcome=outcome,
                         pnl=pnl,
-                        hold_days=hold_days,
+                        hold_days=hold_count,
                     )
                 )
                 equity_curve.append(
-                    {"timestamp": pd.Timestamp(entry_date), "account_balance": equity}
+                    {"timestamp": pd.Timestamp(raw_date), "account_balance": equity}
                 )
 
         if not all_trades:
@@ -388,10 +447,24 @@ def render_backtest_ui() -> None:
     # ── Sidebar controls ───────────────────────────────────────────────────
     with st.sidebar:
         st.header("Backtest Settings")
-        start_date = st.date_input("Start Date", value=DEFAULT_START)
+        timeframe = st.selectbox("Timeframe", options=["1Day", "5Min"], index=0)
+
+        is_intraday = timeframe == "5Min"
+        if is_intraday:
+            st.info(
+                f"**5-Min limit:** Yahoo Finance only serves 5-minute data "
+                f"for the last {INTRADAY_MAX_DAYS} days. "
+                f"Start date is auto-clamped — any date you enter before "
+                f"{date.today() - timedelta(days=INTRADAY_MAX_DAYS)} will be ignored.",
+                icon="⚠️",
+            )
+            default_start = date.today() - timedelta(days=INTRADAY_MAX_DAYS)
+        else:
+            default_start = DEFAULT_START
+
+        start_date = st.date_input("Start Date", value=default_start)
         end_date = st.date_input("End Date", value=DEFAULT_END)
         tickers = st.multiselect("Tickers", options=ALL_TICKERS, default=DEFAULT_TICKERS)
-        timeframe = st.selectbox("Timeframe", options=["1Day", "5Min"], index=0)
         use_alpaca = st.toggle(
             "Use Alpaca Data",
             value=False,
@@ -401,6 +474,11 @@ def render_backtest_ui() -> None:
 
     if not run_btn and "backtest_result" not in st.session_state:
         st.info("Configure parameters in the sidebar and click **Run Backtest**.")
+        if is_intraday:
+            st.warning(
+                "**5-Min timeframe selected.** Yahoo Finance only provides 5-minute bars "
+                f"for the last {INTRADAY_MAX_DAYS} days. Use **1Day** for longer historical analysis."
+            )
         return
 
     if run_btn:
@@ -414,28 +492,44 @@ def render_backtest_ui() -> None:
             tuple(sorted(tickers)), start_date, end_date, timeframe, use_alpaca
         )
         st.session_state["backtest_result"] = result
+        st.session_state["backtest_timeframe"] = timeframe
 
     result: Optional[BacktestResult] = st.session_state.get("backtest_result")
     if result is None:
         return
 
+    result_timeframe = st.session_state.get("backtest_timeframe", timeframe)
+    is_result_intraday = result_timeframe == "5Min"
+
     m = result.metrics
 
-    # ── Skipped ticker warnings ────────────────────────────────────────────
+    # ── Skipped / clamped warnings ─────────────────────────────────────────
     if result.skipped:
         for msg in result.skipped:
-            st.warning(f"Skipped: {msg}")
+            st.warning(msg)
 
     if result.trades.empty:
-        st.error(
-            "No trades were simulated. The most common cause is a date range that is "
-            "too short — the backtester needs at least **201 daily bars** (≈ 1 year) "
-            "to compute the SMA-200 warmup before it can place the first trade. "
-            "Try setting Start Date to at least 1 year ago."
-        )
+        if is_result_intraday:
+            st.error(
+                "No trades were simulated for 5-Min timeframe. Possible causes:\n\n"
+                "- **Yahoo Finance 30-day limit** — 5-minute data is only available "
+                f"for the last {INTRADAY_MAX_DAYS} days. Dates older than that return empty data.\n"
+                "- **Not enough bars** — the intraday backtester needs at least "
+                f"{INTRADAY_WARMUP_BARS + INTRADAY_HOLD_BARS + 1} bars "
+                f"({INTRADAY_WARMUP_BARS}-bar warmup + {INTRADAY_HOLD_BARS}-bar hold).\n"
+                "- **Try 1Day timeframe** for multi-year historical analysis."
+            )
+        else:
+            st.error(
+                "No trades were simulated. The most common cause is a date range that is "
+                "too short — the backtester needs at least **201 daily bars** (≈ 1 year) "
+                "to compute the SMA-200 warmup before it can place the first trade. "
+                "Try setting Start Date to at least 1 year ago."
+            )
         return
 
     # ── Summary metric cards ───────────────────────────────────────────────
+    hold_label = "Avg Hold (bars)" if is_result_intraday else "Avg Hold (days)"
     cols = st.columns(6)
     for col, (label, value) in zip(
         cols,
@@ -445,7 +539,7 @@ def render_backtest_ui() -> None:
             ("Profit Factor", f"{m['profit_factor']:.2f}"),
             ("Max DD", f"{m['max_drawdown_pct']:.1f}%"),
             ("Sharpe", f"{m['sharpe']:.2f}"),
-            ("Avg Hold (d)", m["avg_hold_days"]),
+            (hold_label, m["avg_hold_days"]),
         ],
     ):
         col.metric(label, value)
