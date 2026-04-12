@@ -597,12 +597,14 @@ def render_live_monitor() -> None:
             )
 
     # ── Manual refresh ─────────────────────────────────────────────────────
+    # Note: auto-refresh is handled by @st.fragment(run_every=REFRESH_INTERVAL)
+    # above. Do NOT call _auto_refresh() here — it would add an extra
+    # time.sleep+rerun loop that triggers full-page reruns every second,
+    # breaking other tabs (especially the backtesting sidebar).
     st.divider()
     col_r1, col_r2 = st.columns([5, 1])
     with col_r1:
-        st.caption(f"Auto-refreshes every {REFRESH_INTERVAL}s")
+        st.caption(f"Auto-refreshes every {REFRESH_INTERVAL}s via fragment")
     with col_r2:
         if st.button("Refresh Now"):
             st.rerun()
-
-    _auto_refresh(REFRESH_INTERVAL)

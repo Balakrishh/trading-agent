@@ -11,6 +11,8 @@ import pandas as pd
 import pytest
 
 from trading_agent.streamlit.backtest_ui import (
+    DAILY_OTM_PCT,
+    INTRADAY_OTM_PCT,
     STARTING_EQUITY,
     Backtester,
     BacktestResult,
@@ -121,6 +123,23 @@ class TestSimulate:
         bt = Backtester(target_dte=5)
         _, _, hold_days = bt._simulate(prices, 210, "sideways", credit=1.5)
         assert hold_days <= 5
+
+    def test_intraday_otm_pct_triggers_loss_on_small_move(self):
+        # Price drops 1% over 12 bars — well within daily 3% but exceeds intraday 0.5%
+        # → with INTRADAY_OTM_PCT the short put is breached; daily OTM would see a win.
+        idx = pd.date_range("2025-01-02", periods=250, freq="5min")
+        prices_list = [500.0] * 211 + [500.0 * 0.99] * 39  # 1% drop from bar 211
+        prices = pd.Series(prices_list, index=idx)
+        bt = Backtester(target_dte=20)
+        outcome_daily, _, _ = bt._simulate(prices, 210, "bullish", credit=1.5, otm_pct=DAILY_OTM_PCT)
+        outcome_intraday, _, _ = bt._simulate(prices, 210, "bullish", credit=1.5, otm_pct=INTRADAY_OTM_PCT)
+        assert outcome_daily == "win"      # 1% < 3% OTM → not breached
+        assert outcome_intraday == "loss"  # 1% > 0.5% OTM → breached
+
+    def test_otm_pct_constants_are_sensible(self):
+        assert DAILY_OTM_PCT == 0.03
+        assert INTRADAY_OTM_PCT == 0.005
+        assert INTRADAY_OTM_PCT < DAILY_OTM_PCT
 
 
 # ---------------------------------------------------------------------------

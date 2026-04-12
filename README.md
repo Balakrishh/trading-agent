@@ -690,7 +690,7 @@ Dry Run lets you run the **complete agent pipeline** after market close without 
 | | Dry Run (Live Dashboard) | Backtesting |
 |---|---|---|
 | **Price data** | Live Alpaca snapshots (today's closing price) | Historical yfinance closes |
-| **Option chains** | Real chains with live Greeks, IV, bid/ask | None — fixed 3% OTM formula |
+| **Option chains** | Real chains with live Greeks, IV, bid/ask | None — fixed OTM formula (3% daily / 0.5% intraday) |
 | **Regime classification** | Exact `RegimeClassifier` — same code as live | Approximated SMA-200 formula |
 | **Risk guardrails** | All 8 checks against your real account balance | None |
 | **Output** | `signals.jsonl` entries tagged `action: dry_run` | In-memory trade log |
@@ -805,7 +805,7 @@ The dominant regime across all tickers is shown in the results breakdown table a
 | Profit target | 50% of credit ($0.75) | Matches the live agent's 50% take-profit |
 | Max loss | $3.50 (width − credit) | Per-contract, before commission |
 | Target DTE | 45 days | Days-to-expiration at entry |
-| Short strike OTM % | 3% | From current close price |
+| Short strike OTM % | **3% (1Day)** / **0.5% (5Min)** | Timeframe-adaptive — 3% in 1 hour is near-impossible |
 | Commission (round trip) | $2.60 | 4 legs × $0.65/contract |
 | Starting equity | $100,000 | Paper account starting balance |
 | Trade frequency | Every 45 bars | One trade per ticker at a time |
@@ -818,7 +818,7 @@ The dominant regime across all tickers is shown in the results breakdown table a
 |--------|---------|-------------------|
 | **Total Trades** | Count of all SimTrades | How many opportunities the strategy found |
 | **Win Rate** | Wins ÷ total trades × 100 | % of trades that hit profit target before strike breach |
-| **Profit Factor** | Gross wins ÷ gross losses | > 1.0 = net profitable; > 1.5 = strong edge |
+| **Profit Factor** | Gross wins ÷ gross losses | > 1.0 = net profitable; > 1.5 = strong edge; **∞** = no losses recorded |
 | **Max Drawdown %** | Largest peak-to-trough equity drop | Risk of ruin signal — keep below 20% |
 | **Sharpe Ratio** | Mean trade P&L ÷ std dev × √252 | Risk-adjusted return; > 1.0 is good |
 | **Avg Hold Days** | Mean bars between entry and exit | How long capital is tied up per trade |
@@ -875,6 +875,7 @@ The SMA-200 warmup consumes the first 200 trading days of data before a single t
 | No trades for a ticker despite long range | Regime stayed sideways; all attempts breached 3% band | Normal — try a different ticker or period |
 | 5Min timeframe is very slow | Downloads 78× more data | Switch to 1Day |
 | Results look too optimistic | Look-forward bias is minimal here (we use close-to-close) | Credit/loss are fixed, not real option prices — directional signal only |
+| **Profit Factor: ∞ / Sharpe: astronomical (5Min)** | Old code placed short strikes 3% OTM — SPY never moves 3% in 1 hour under normal conditions, so every trade was a win, gross loss = 0 → ∞ | Fixed: 5Min backtests now use 0.5% OTM (`INTRADAY_OTM_PCT`), which is breached regularly, producing realistic loss rates |
 
 ---
 
