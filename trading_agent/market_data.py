@@ -22,7 +22,7 @@ option snapshots from the Alpaca Market Data API.
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -37,9 +37,13 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Cache TTLs (seconds)
-PRICE_HISTORY_TTL = 14_400   # 4 hours — historical bars don't change intraday
-SNAPSHOT_TTL = 60            # 1 minute — real-time price
-OPTION_CHAIN_TTL = 180       # 3 minutes — Greeks move but not millisecond-fast
+PRICE_HISTORY_TTL = 14_400      # 4 hours — historical bars don't change intraday
+SNAPSHOT_TTL = 60               # 1 minute — real-time price
+OPTION_CHAIN_TTL = 180          # 3 minutes — Greeks move but not millisecond-fast
+INTRADAY_RETURN_TTL = 60        # 1 minute — 5-min bar return; long enough to
+                                # dedupe SPY/QQQ benchmark calls within one
+                                # cycle (~1-3 min), short enough to roll over
+                                # to the next bar between cycles
 
 # Max workers for parallel historical fetches
 _MAX_PREFETCH_WORKERS = 5
@@ -73,6 +77,11 @@ class MarketDataProvider:
 
         # option chain cache: "{underlying}_{expiry}_{type}" → (contracts, epoch)
         self._option_cache: Dict[str, Tuple[list, float]] = {}
+
+        # intraday 5-min return cache: ticker → (return, epoch float).
+        # Collapses the N-1 redundant SPY/QQQ benchmark fetches that the
+        # relative-strength calculation otherwise produces per cycle.
+        self._intraday_return_cache: Dict[str, Tuple[float, float]] = {}
 
     # ------------------------------------------------------------------
     # Yahoo Finance — historical OHLCV
@@ -441,6 +450,32 @@ class MarketDataProvider:
             logger.warning("[%s] Failed to fetch underlying bid/ask: %s", ticker, exc)
             return None
 
+    @staticmethod
+    def _last_completed_5min_end(reference: Optional[datetime] = None) -> str:
+        """
+        Return the RFC-3339 (UTC) timestamp representing the upper bound of
+        the most recently *completed* 5-minute bar.
+
+        We floor the wall-clock time to a 5-minute boundary and subtract
+        one second. Alpaca filters bars whose start timestamp is <= `end`,
+        so passing (boundary - 1s) guarantees the bar whose start equals
+        the current boundary (still forming) is excluded.
+
+        Example: at 10:37:12 UTC → boundary 10:35 → end = 10:34:59.
+        Bars returned: 10:30 (completed) and 10:25 (completed).
+        """
+        now = reference or datetime.now(timezone.utc)
+        # Ensure UTC; if a naive datetime was passed in, assume it's already UTC
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        floored_minute = (now.minute // 5) * 5
+        boundary = now.replace(minute=floored_minute, second=0, microsecond=0)
+        end = boundary - timedelta(seconds=1)
+        # RFC-3339 with trailing Z for UTC (Alpaca accepts both Z and +00:00)
+        return end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     def get_5min_return(self, ticker: str) -> Optional[float]:
         """
         Fetch the most recent 5-minute bar return for *ticker* from Alpaca.
@@ -448,9 +483,34 @@ class MarketDataProvider:
 
         Used for relative strength comparison: if a ticker's 5-min return
         exceeds the benchmark (SPY/QQQ), it is showing relative strength.
+
+        Only **completed** bars are requested — the `end` parameter is set
+        to (floor(now, 5min) - 1s), which excludes the bar that is still
+        forming at query time. Without this guard, bars[-1] can be a partial
+        bar and the return mixes half-a-window of data with a full window.
+
+        Results are cached for INTRADAY_RETURN_TTL seconds so that the
+        SPY/QQQ benchmark calls (invoked once per non-benchmark ticker by
+        RegimeClassifier) collapse to a single fetch per cycle. Failed
+        fetches (None) are not cached — the next caller retries.
         """
+        now = time.monotonic()
+        cached = self._intraday_return_cache.get(ticker)
+        if cached is not None:
+            cached_ret, cached_at = cached
+            if (now - cached_at) < INTRADAY_RETURN_TTL:
+                logger.debug("[%s] 5-min return cache HIT (%.4f%%)",
+                             ticker, cached_ret * 100)
+                return cached_ret
+
         url = f"{self.alpaca_data_url}/stocks/{ticker}/bars"
-        params = {"timeframe": "5Min", "limit": 2, "adjustment": "raw"}
+        params = {
+            "timeframe": "5Min",
+            "limit": 2,
+            "adjustment": "raw",
+            # Restrict to completed bars only — see _last_completed_5min_end
+            "end": self._last_completed_5min_end(),
+        }
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
                                 params=params, timeout=10)
@@ -465,6 +525,9 @@ class MarketDataProvider:
                 return None
             ret = (last_close / prev_close) - 1.0
             logger.debug("[%s] 5-min return=%.4f%%", ticker, ret * 100)
+            # Cache only successful results — failed fetches (None) stay
+            # uncached so the next caller retries.
+            self._intraday_return_cache[ticker] = (ret, time.monotonic())
             return ret
         except requests.RequestException as exc:
             logger.warning("[%s] 5-min bar fetch failed: %s", ticker, exc)

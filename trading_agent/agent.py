@@ -140,6 +140,7 @@ class TradingAgent:
             trade_plan_dir=config.logging.trade_plan_dir,
             dry_run=config.trading.dry_run,
             data_provider=self.data_provider,   # for live quote refresh on execution
+            max_risk_pct=config.trading.max_risk_pct,  # shared budget w/ RiskManager
         )
         self.position_monitor = PositionMonitor(
             api_key=config.alpaca.api_key,

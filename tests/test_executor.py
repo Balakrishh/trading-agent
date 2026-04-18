@@ -204,3 +204,89 @@ class TestLiveQuoteRefresh:
             executor.execute(_make_verdict(approved=True))
             # submit was still called despite refresh failure
             assert mock_submit.called
+
+
+# ------------------------------------------------------------------
+# Position sizing — unified MAX_RISK_PCT, no silent qty floor
+# ------------------------------------------------------------------
+
+def _make_sized_plan(spread_width=5.0, net_credit=0.40):
+    """Helper for _calculate_qty tests — only width/credit matter for sizing."""
+    plan = _make_plan()
+    plan.spread_width = spread_width
+    plan.net_credit = net_credit
+    return plan
+
+
+class TestPositionSizing:
+    def test_default_max_risk_pct_is_two_percent(self, tmp_path):
+        """Constructor default matches the RiskManager guardrail #4 default."""
+        executor = _make_executor(tmp_path)
+        assert executor.max_risk_pct == 0.02
+
+    def test_qty_uses_configured_max_risk_pct(self, tmp_path):
+        """Sizing budget = max_risk_pct × equity, NOT a hardcoded 1%."""
+        executor = OrderExecutor(
+            api_key="k", secret_key="s",
+            trade_plan_dir=str(tmp_path), dry_run=True,
+            max_risk_pct=0.02,
+        )
+        # width=5, credit=0.40 → max_loss_per_contract = $460
+        # budget = 0.02 × 100_000 = $2,000 → qty = floor(2000/460) = 4
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.40)
+        assert executor._calculate_qty(plan, account_balance=100_000) == 4
+
+    def test_qty_changes_with_max_risk_pct_setting(self, tmp_path):
+        """Same plan, different ceilings → proportionally different qty."""
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.40)
+        for pct, expected in [(0.01, 2), (0.02, 4), (0.03, 6)]:
+            ex = OrderExecutor(
+                api_key="k", secret_key="s",
+                trade_plan_dir=str(tmp_path), dry_run=True,
+                max_risk_pct=pct,
+            )
+            assert ex._calculate_qty(plan, 100_000) == expected, (
+                f"Expected qty={expected} for max_risk_pct={pct}")
+
+    def test_qty_returns_zero_when_one_contract_exceeds_budget(self, tmp_path):
+        """No silent floor-to-1: a contract over-budget yields qty=0."""
+        executor = OrderExecutor(
+            api_key="k", secret_key="s",
+            trade_plan_dir=str(tmp_path), dry_run=True,
+            max_risk_pct=0.02,
+        )
+        # width=5, credit=0.10 → max_loss_per_contract = $490
+        # budget on tiny account = 0.02 × $20_000 = $400 → 490 > 400 → qty=0
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.10)
+        assert executor._calculate_qty(plan, account_balance=20_000) == 0
+
+    def test_qty_returns_zero_for_invalid_inputs(self, tmp_path):
+        """Non-positive max_loss_per_contract or equity yields qty=0."""
+        executor = _make_executor(tmp_path)
+        # net_credit ≥ width → max_loss_per_contract ≤ 0
+        bad_plan = _make_sized_plan(spread_width=5.0, net_credit=5.0)
+        assert executor._calculate_qty(bad_plan, 100_000) == 0
+        # zero equity
+        good_plan = _make_sized_plan()
+        assert executor._calculate_qty(good_plan, 0.0) == 0
+
+    def test_submit_order_aborts_when_qty_is_zero(self, tmp_path):
+        """If sizing returns 0, the order is rejected — never submitted."""
+        executor = OrderExecutor(
+            api_key="k", secret_key="s",
+            trade_plan_dir=str(tmp_path), dry_run=False,
+            max_risk_pct=0.02,
+        )
+        # Plan whose single-contract loss exceeds the sizing budget
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.10)
+        verdict = _make_verdict(approved=True, plan=plan)
+        verdict.account_balance = 20_000  # tiny equity → qty=0
+
+        with patch("trading_agent.executor.requests.post") as mock_post:
+            result = executor.execute(verdict)
+            assert mock_post.called is False, (
+                "requests.post must NOT be called when qty=0 — "
+                "the floor-to-1 bypass is gone")
+
+        assert result["status"] == "rejected"
+        assert "qty=0" in result["reason"]

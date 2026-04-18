@@ -80,7 +80,8 @@ The agent is designed to complete a full cycle well within a 5-minute window:
 |---|---|---|
 | **Parallel price-history fetch** | `market_data.py` | All tickers' 200-day OHLCV fetched concurrently via `ThreadPoolExecutor` before the ticker loop starts |
 | **Batch snapshot call** | `market_data.py` | All current prices retrieved in **one** Alpaca API call (`?symbols=SPY,QQQ,…`) |
-| **TTL-based caches** | `market_data.py` | Historical prices (4 h), stock snapshots (60 s), option chains (3 min) — empty results are never cached |
+| **TTL-based caches** | `market_data.py` | Historical prices (4 h), stock snapshots (60 s), option chains (3 min), 5-min intraday returns (60 s) — empty/failed results are never cached |
+| **Benchmark dedupe** | `market_data.py` | `get_5min_return("SPY")` and `("QQQ")` are called once per non-benchmark ticker for relative strength; the 60 s intraday-return cache collapses the N-1 redundant calls to a single fetch per cycle |
 | **Hard timeout guard** | `agent.py` | A daemon timer fires at 270 s (4 min 30 s): logs a `cycle_timeout` event and calls `os._exit(1)` so the scheduler cleanly starts the next run |
 
 ### Live Quote Refresh at Execution
@@ -230,16 +231,16 @@ Signals that **bypass** debounce and close immediately:
 
 Debounce vote counts are persisted in `trade_plans/daily_state.json` and reset each calendar day.
 
-### Position Sizing — 1% Risk Rule
+### Position Sizing — Max-Risk Rule
 
-When submitting live orders, the executor calculates contract quantity dynamically:
+When submitting live orders, the executor calculates contract quantity using the **same** `MAX_RISK_PCT` budget the RiskManager enforces as guardrail #4. One ceiling, validated and sized against consistently:
 
 ```
 max_loss_per_contract = (spread_width − net_credit) × 100
-qty = floor(1% × account_equity / max_loss_per_contract),  minimum 1
+qty = floor(MAX_RISK_PCT × account_equity / max_loss_per_contract)
 ```
 
-This ensures no single trade risks more than 1% of total equity regardless of spread width or premium level.
+If `qty < 1` (one contract's max loss alone exceeds the budget), the executor **rejects the order with status `rejected` and reason `qty=0: …`** rather than silently flooring to one contract. Because the risk check and sizing now share the same percentage, under normal conditions qty is always ≥ 1 when a plan was approved; a `qty=0` rejection at submission time signals that the plan's economics changed materially between planning and execution (e.g., width / credit / equity moved against the trade) and the order should not go out.
 
 ---
 
@@ -431,6 +432,8 @@ Action values: `dry_run`, `submitted`, `rejected`, `skipped_by_llm`, `skipped_ex
 **Adjusted vs raw closes.** The live agent fetches Yahoo history with `auto_adjust=False` so its SMAs / Bollinger Bands are comparable to Alpaca's raw real-time price (`latestTrade.p`). The backtest UI (`streamlit/backtest_ui.py`) deliberately uses `auto_adjust=True` instead, because a P&L simulation needs total-return series that reflect dividends. Don't unify these — the mismatch is intentional.
 
 **Insufficient-data guard.** `fetch_historical_prices()` raises `InsufficientDataError` whenever Yahoo returns fewer bars than the caller requested (200 for classification). Without this guard, `sma_200.iloc[-1]` is `NaN` and `price > NaN` is `False`, which silently falls through to SIDEWAYS — a quiet misclassification on new or thinly-traded tickers. The agent catches this, logs a warning, and records the ticker with status `skipped` / `reason=insufficient_data` so it's visible in the journal without paging as an error.
+
+**Completed 5-min bars only.** `get_5min_return()` (the relative-strength signal) requests Alpaca bars with an explicit `end` timestamp set to the last completed 5-minute boundary minus one second (e.g., a request at 10:07:42 UTC ends at `10:04:59Z`). Without this, Alpaca returns the still-forming current bar, which would compare a partial 2-minute window against a fully-closed 5-minute one and produce noisy / inverted RS signals near boundaries.
 
 ---
 

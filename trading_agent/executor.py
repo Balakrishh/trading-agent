@@ -64,13 +64,18 @@ class OrderExecutor:
                  base_url: str = "https://paper-api.alpaca.markets/v2",
                  trade_plan_dir: str = "trade_plans",
                  dry_run: bool = True,
-                 data_provider: Optional["MarketDataProvider"] = None):
+                 data_provider: Optional["MarketDataProvider"] = None,
+                 max_risk_pct: float = 0.02):
         self.api_key = api_key
         self.secret_key = secret_key
         self.base_url = base_url
         self.trade_plan_dir = trade_plan_dir
         self.dry_run = dry_run
         self.data_provider = data_provider   # used for live quote refresh
+        # Same ceiling the RiskManager enforces as guardrail #4.  Sizing shares
+        # this budget so sizing and risk validation never disagree on the
+        # definition of "max loss per trade as fraction of equity".
+        self.max_risk_pct = max_risk_pct
         os.makedirs(self.trade_plan_dir, exist_ok=True)
 
     def _headers(self) -> Dict[str, str]:
@@ -123,17 +128,27 @@ class OrderExecutor:
 
     def _calculate_qty(self, plan: SpreadPlan, account_balance: float) -> int:
         """
-        1% Risk Rule: size contracts so max potential loss ≤ 1% of equity.
+        Size contracts so the position's total max loss stays within the
+        same budget the RiskManager validated against (``max_risk_pct ×
+        equity`` — guardrail #4).
 
-        max_loss_per_contract = (spread_width - net_credit) × 100
-        qty = floor(1% × equity / max_loss_per_contract), minimum 1
+        ::
+
+            max_loss_per_contract = (spread_width − net_credit) × 100
+            qty                    = floor(max_risk_pct × equity
+                                           / max_loss_per_contract)
+
+        Returns **0** when no integer quantity fits inside the budget (e.g.
+        a single contract's max loss alone exceeds the ceiling, or inputs
+        are non-positive).  The caller MUST treat 0 as "abort submission"
+        — never silently floor to 1, which would otherwise bypass the
+        guardrail.
         """
         max_loss_per_contract = (plan.spread_width - plan.net_credit) * 100
-        if max_loss_per_contract <= 0:
-            return 1
-        max_risk_dollars = account_balance * 0.01
-        qty = int(max_risk_dollars / max_loss_per_contract)
-        return max(1, qty)
+        if max_loss_per_contract <= 0 or account_balance <= 0:
+            return 0
+        max_risk_dollars = account_balance * self.max_risk_pct
+        return int(max_risk_dollars // max_loss_per_contract)
 
     def _submit_order(self, plan: SpreadPlan, plan_path: str,
                       run_id: str, account_balance: float = 0.0) -> Dict:
@@ -192,8 +207,31 @@ class OrderExecutor:
         limit_price_value = -abs(live_credit)
 
         qty = self._calculate_qty(plan, account_balance)
-        logger.info("[%s] Position size: %d contract(s) (1%% rule, equity=$%.2f)",
-                    plan.ticker, qty, account_balance)
+        if qty < 1:
+            max_loss_per_contract = (plan.spread_width - plan.net_credit) * 100
+            max_risk_dollars = account_balance * self.max_risk_pct
+            reason = (
+                f"qty=0: max_loss_per_contract ${max_loss_per_contract:.2f} "
+                f"> sizing budget ${max_risk_dollars:.2f} "
+                f"({self.max_risk_pct*100:.0f}% × ${account_balance:,.2f})"
+            )
+            logger.error(
+                "[%s] Position sizing produced qty=0 — %s. Aborting order "
+                "submission rather than silently flooring to 1 contract.",
+                plan.ticker, reason)
+            result = {
+                "status": "rejected",
+                "reason": reason,
+                "plan_file": plan_path,
+                "run_id": run_id,
+            }
+            self._append_to_plan(plan_path, run_id, {"order_result": result})
+            return result
+
+        logger.info(
+            "[%s] Position size: %d contract(s) "
+            "(max_risk_pct=%.0f%%, equity=$%.2f)",
+            plan.ticker, qty, self.max_risk_pct * 100, account_balance)
 
         order_payload = {
             "type": "limit",

@@ -210,6 +210,160 @@ class TestStrikeExtraction:
         assert MarketDataProvider._extract_strike("INVALID") == 0.0
 
 
+class TestLastCompleted5MinEnd:
+    """The RFC-3339 'end' timestamp we send to Alpaca must exclude the
+    currently-forming bar. Floor to 5-min boundary, subtract 1 second."""
+
+    def test_floors_to_previous_5min_boundary_minus_one_sec(self):
+        from datetime import datetime, timezone
+        ref = datetime(2026, 4, 18, 14, 37, 12, tzinfo=timezone.utc)
+        end = MarketDataProvider._last_completed_5min_end(ref)
+        assert end == "2026-04-18T14:34:59Z"
+
+    def test_exactly_on_boundary(self):
+        """At 14:35:00 the 14:35 bar just opened. end must be 14:34:59."""
+        from datetime import datetime, timezone
+        ref = datetime(2026, 4, 18, 14, 35, 0, tzinfo=timezone.utc)
+        end = MarketDataProvider._last_completed_5min_end(ref)
+        assert end == "2026-04-18T14:34:59Z"
+
+    def test_naive_datetime_treated_as_utc(self):
+        from datetime import datetime
+        ref = datetime(2026, 4, 18, 14, 37, 12)  # no tzinfo
+        end = MarketDataProvider._last_completed_5min_end(ref)
+        assert end == "2026-04-18T14:34:59Z"
+
+    def test_non_utc_datetime_converted(self):
+        """A tz-aware ET timestamp must be converted to UTC before flooring."""
+        from datetime import datetime, timezone, timedelta
+        # 10:37:12 ET (UTC-4 during DST) == 14:37:12 UTC
+        et = timezone(timedelta(hours=-4))
+        ref = datetime(2026, 4, 18, 10, 37, 12, tzinfo=et)
+        end = MarketDataProvider._last_completed_5min_end(ref)
+        assert end == "2026-04-18T14:34:59Z"
+
+
+class TestCompletedBarsRequest:
+    """get_5min_return must send an `end` parameter so Alpaca returns only
+    completed bars, not the partially-formed current one."""
+
+    def test_request_includes_end_param(self, monkeypatch):
+        from unittest.mock import MagicMock
+        provider = MarketDataProvider("k", "s")
+        captured = {}
+
+        def fake_get(url, headers, params, timeout):
+            captured["params"] = params
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = {
+                "bars": [{"c": 100.0}, {"c": 100.5}]
+            }
+            return resp
+
+        monkeypatch.setattr("requests.get", fake_get)
+        provider.get_5min_return("SPY")
+
+        assert "end" in captured["params"]
+        # Format: YYYY-MM-DDTHH:MM:SSZ — and the seconds must be 59
+        # (proof of the boundary - 1s construction)
+        end_val = captured["params"]["end"]
+        assert end_val.endswith("59Z")
+        # Minutes digit must end in 4 or 9 (one second before a :00 or :05 boundary)
+        minute_str = end_val[14:16]
+        assert minute_str[-1] in ("4", "9")
+
+
+class TestIntradayReturnCache:
+    """get_5min_return must dedupe redundant SPY/QQQ benchmark calls within
+    a cycle. Successful results cache; failed fetches do not."""
+
+    def _bars_response(self, prev_close: float, last_close: float):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {
+            "bars": [
+                {"c": prev_close},
+                {"c": last_close},
+            ]
+        }
+        return resp
+
+    def test_cache_hit_within_ttl(self, monkeypatch):
+        import time
+        provider = MarketDataProvider("k", "s")
+        provider._intraday_return_cache["SPY"] = (0.0042, time.monotonic() - 5)
+
+        # Any network call must raise — a cache hit must not reach requests
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("network must not be called on cache hit")),
+        )
+        ret = provider.get_5min_return("SPY")
+        assert ret == pytest.approx(0.0042)
+
+    def test_cache_miss_after_ttl(self, monkeypatch):
+        import time
+        from trading_agent.market_data import INTRADAY_RETURN_TTL
+        provider = MarketDataProvider("k", "s")
+        # Stale entry — must be ignored
+        provider._intraday_return_cache["SPY"] = (
+            0.0001, time.monotonic() - INTRADAY_RETURN_TTL - 5)
+
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **kw: self._bars_response(100.0, 100.5),
+        )
+        ret = provider.get_5min_return("SPY")
+        assert ret == pytest.approx(0.005)
+
+    def test_successful_fetch_populates_cache(self, monkeypatch):
+        provider = MarketDataProvider("k", "s")
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **kw: self._bars_response(200.0, 201.0),
+        )
+        provider.get_5min_return("QQQ")
+        assert "QQQ" in provider._intraday_return_cache
+        cached_ret, _ = provider._intraday_return_cache["QQQ"]
+        assert cached_ret == pytest.approx(0.005)
+
+    def test_failed_fetch_not_cached(self, monkeypatch):
+        """A network failure or insufficient-bars response must leave the
+        cache empty so the next caller can retry."""
+        from unittest.mock import MagicMock
+        provider = MarketDataProvider("k", "s")
+        # Only one bar returned → not enough for a return calc → returns None
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"bars": [{"c": 100.0}]}
+        monkeypatch.setattr("requests.get", lambda *a, **kw: resp)
+
+        ret = provider.get_5min_return("SPY")
+        assert ret is None
+        assert "SPY" not in provider._intraday_return_cache
+
+    def test_dedupes_repeated_calls_in_one_cycle(self, monkeypatch):
+        """Simulates the real call pattern: regime classifier asks for SPY's
+        5-min return once per non-benchmark ticker. Should fetch exactly once."""
+        provider = MarketDataProvider("k", "s")
+        call_count = {"n": 0}
+
+        def fake_get(*a, **kw):
+            call_count["n"] += 1
+            return self._bars_response(100.0, 100.5)
+
+        monkeypatch.setattr("requests.get", fake_get)
+
+        # Classifier loop: 5 non-benchmark tickers, each asks SPY once
+        for _ in range(5):
+            provider.get_5min_return("SPY")
+
+        assert call_count["n"] == 1
+
+
 class TestInsufficientDataGuard:
     """fetch_historical_prices must fail loud when too few bars are returned,
     so the regime classifier never silently misclassifies as SIDEWAYS."""
