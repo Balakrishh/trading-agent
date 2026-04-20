@@ -14,9 +14,12 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import requests
+
+if TYPE_CHECKING:
+    from trading_agent.config import IntelligenceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -298,3 +301,89 @@ class LLMClient:
                 return [m["id"] for m in resp.json().get("data", [])]
         except requests.RequestException:
             return []
+
+
+# ---------------------------------------------------------------------------
+# Role-based LLM factory
+# ---------------------------------------------------------------------------
+# One ``.env`` fans out to three differently-tuned LLM callers
+# (analyst / fingpt / verifier).  Each role has historically hard-coded
+# its own ``LLMConfig`` inside the consumer module — that produced
+# silent config drift where the ``.env`` said one thing and the code
+# another.  The factory centralises the per-role profile so the
+# intelligence modules only have to ask for ``make_llm_client("fingpt", cfg)``.
+#
+# Roles:
+#   "analyst"  — primary chain-of-thought trade approver.
+#                Uses LLM_*/llm_temperature from the general LLM section.
+#   "fingpt"   — finance-tuned specialist scoring news.
+#                Low temperature, short response, short timeout.
+#   "verifier" — reasoning model that cross-checks FinGPT claims.
+#                Longer timeout, larger response budget, provider may
+#                differ from the other two (e.g. cloud Claude vs local Ollama).
+
+_VALID_ROLES = {"analyst", "fingpt", "verifier"}
+
+
+def make_llm_client(role: str, cfg: "IntelligenceConfig") -> "LLMClient":
+    """
+    Build an ``LLMClient`` tuned for the given role from one
+    :class:`IntelligenceConfig`.
+
+    Raises ``ValueError`` for unknown roles so a typo surfaces immediately
+    instead of silently using analyst defaults.
+    """
+    if role not in _VALID_ROLES:
+        raise ValueError(
+            f"make_llm_client: unknown role {role!r} "
+            f"(valid: {sorted(_VALID_ROLES)})"
+        )
+
+    if role == "analyst":
+        return LLMClient(LLMConfig(
+            provider=cfg.llm_provider,
+            base_url=cfg.llm_base_url,
+            model=cfg.llm_model,
+            embedding_model=cfg.llm_embedding_model,
+            api_key=cfg.llm_api_key,
+            temperature=cfg.llm_temperature,
+            max_tokens=cfg.analyst_max_tokens,
+            timeout=cfg.analyst_timeout,
+        ))
+
+    if role == "fingpt":
+        # FinGPT currently only supports Ollama in practice — the GGUF
+        # weights referenced by ``fingpt_model`` are pulled into an
+        # Ollama registry.  We reuse the shared ``llm_base_url`` rather
+        # than adding a separate knob; deploy both models on the same
+        # local instance.
+        return LLMClient(LLMConfig(
+            provider="ollama",
+            base_url=cfg.llm_base_url,
+            model=cfg.fingpt_model,
+            embedding_model=cfg.llm_embedding_model,
+            api_key="",
+            temperature=cfg.fingpt_temperature,
+            max_tokens=cfg.fingpt_max_tokens,
+            timeout=cfg.fingpt_timeout,
+        ))
+
+    # verifier
+    # If provider=="anthropic" the caller (SentimentVerifier) will use
+    # the anthropic SDK directly — this LLMClient instance only serves
+    # the Ollama / OpenAI-compat paths.  We still build it so the
+    # fallback is ready when the anthropic SDK isn't installed.
+    provider = cfg.verifier_provider if cfg.verifier_provider != "anthropic" else "ollama"
+    return LLMClient(LLMConfig(
+        provider=provider,
+        base_url=cfg.llm_base_url,
+        model=cfg.verifier_model,
+        embedding_model=cfg.llm_embedding_model,
+        api_key=cfg.verifier_api_key,
+        temperature=cfg.verifier_temperature,
+        max_tokens=cfg.verifier_max_tokens,
+        timeout=cfg.verifier_timeout,
+    ))
+
+
+__all__ = ["LLMClient", "LLMConfig", "make_llm_client"]

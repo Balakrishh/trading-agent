@@ -45,12 +45,14 @@ Several concerns previously inlined in this file were extracted:
 The TradingAgent class is a thin orchestrator over those modules.
 """
 
+import contextlib
 import glob
 import json
 import logging
 import os
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -58,6 +60,12 @@ from trading_agent.config import AppConfig, load_config
 from trading_agent.journal_kb import JournalKB
 from trading_agent.logger_setup import setup_logging
 from trading_agent.market_data import MarketDataProvider, InsufficientDataError
+from trading_agent.ports import (
+    MarketDataPort,
+    ExecutionPort,
+    PositionsPort,
+    OrdersPort,
+)
 from trading_agent.regime import Regime, RegimeClassifier, RegimeAnalysis
 from trading_agent.strategy import StrategyPlanner, SpreadPlan
 from trading_agent.risk_manager import RiskManager, RiskVerdict
@@ -70,6 +78,10 @@ from trading_agent.llm_client import LLMClient, LLMConfig
 from trading_agent.trade_journal import TradeJournal
 from trading_agent.knowledge_base import KnowledgeBase
 from trading_agent.llm_analyst import LLMAnalyst, AnalystDecision
+from trading_agent.fingpt_analyser import FinGPTAnalyser, SentimentReport
+from trading_agent.news_aggregator import NewsAggregator
+from trading_agent.sentiment_verifier import SentimentVerifier, VerifiedSentimentReport
+from trading_agent.sentiment_pipeline import SentimentPipeline
 
 # --- Week 3-4 extractions ---
 from trading_agent.market_hours import (
@@ -107,10 +119,14 @@ class TradingAgent:
     def __init__(self, config: AppConfig):
         self.config = config
 
-        self.data_provider = MarketDataProvider(
+        # MarketDataProvider now satisfies both MarketDataPort and
+        # AccountPort (its get_account_info/is_market_open methods no
+        # longer accept base_url — the adapter owns its endpoint).
+        self.data_provider: MarketDataPort = MarketDataProvider(
             alpaca_api_key=config.alpaca.api_key,
             alpaca_secret_key=config.alpaca.secret_key,
             alpaca_data_url=config.alpaca.data_url,
+            alpaca_base_url=config.alpaca.base_url,
         )
         self.regime_classifier = RegimeClassifier(self.data_provider)
         self.strategy_planner = StrategyPlanner(
@@ -126,7 +142,11 @@ class TradingAgent:
             max_buying_power_pct=config.trading.max_buying_power_pct,
             margin_multiplier=config.trading.margin_multiplier,
         )
-        self.executor = OrderExecutor(
+        # The three broker-facing adapters are typed as ports so the
+        # agent core never reaches into vendor-specific internals.  The
+        # concrete classes still satisfy these Protocols via structural
+        # typing — no inheritance required.
+        self.executor: ExecutionPort = OrderExecutor(
             api_key=config.alpaca.api_key,
             secret_key=config.alpaca.secret_key,
             base_url=config.alpaca.base_url,
@@ -136,12 +156,12 @@ class TradingAgent:
             max_risk_pct=config.trading.max_risk_pct,            # shared w/ RiskManager #4
             min_credit_ratio=config.trading.min_credit_ratio,    # shared w/ RiskManager #2
         )
-        self.position_monitor = PositionMonitor(
+        self.position_monitor: PositionsPort = PositionMonitor(
             api_key=config.alpaca.api_key,
             secret_key=config.alpaca.secret_key,
             base_url=config.alpaca.base_url,
         )
-        self.order_tracker = OrderTracker(
+        self.order_tracker: OrdersPort = OrderTracker(
             api_key=config.alpaca.api_key,
             secret_key=config.alpaca.secret_key,
             base_url=config.alpaca.base_url,
@@ -166,6 +186,30 @@ class TradingAgent:
 
         # Intelligence layer (LLM + RAG + Journal) — optional
         self.llm_analyst = self._init_intelligence(config)
+
+        # Tiered sentiment pipeline (news → FinGPT → verifier) behind a
+        # single facade.  The facade owns a cycle-scoped ThreadPoolExecutor
+        # so the worker is always drained on cycle exit — no more
+        # instance-lifetime pool surviving a SIGTERM mid-call.  Short
+        # circuits (earnings calendar, content-hash cache) live inside
+        # the facade, not the agent, so the orchestration call site
+        # stays trivial.
+        self.sentiment_pipeline: Optional[SentimentPipeline] = (
+            SentimentPipeline.from_config(config.intelligence)
+            if config.intelligence else None
+        )
+        # Back-compat handles — a few tests and journal helpers still
+        # reach for these instance attributes by name.  Expose the
+        # underlying components without reintroducing ownership.
+        self.fingpt_analyser: Optional[FinGPTAnalyser] = (
+            self.sentiment_pipeline.fingpt if self.sentiment_pipeline else None
+        )
+        self.news_aggregator: Optional[NewsAggregator] = (
+            self.sentiment_pipeline.news_aggregator if self.sentiment_pipeline else None
+        )
+        self.sentiment_verifier: Optional[SentimentVerifier] = (
+            self.sentiment_pipeline.verifier if self.sentiment_pipeline else None
+        )
 
     def _init_intelligence(self, config: AppConfig):
         """Initialize the LLM intelligence layer if enabled."""
@@ -209,6 +253,11 @@ class TradingAgent:
             )
             return None
 
+    # Sentiment pipeline construction lives in
+    # ``SentimentPipeline.from_config`` (wired once in __init__).  The
+    # per-cycle call site is `_with_sentiment_pipeline()` below, which
+    # context-manages the facade's background pool.
+
     @classmethod
     def from_env(cls, env_path: str = None) -> "TradingAgent":
         """Factory: create agent from environment / .env file."""
@@ -249,8 +298,18 @@ class TradingAgent:
         # -----------------------------------------------------------------
 
         cycle_start = time.monotonic()
+        # Cycle-scope the sentiment pipeline's worker pool so its thread
+        # is drained cleanly on every exit path — including SIGTERM and
+        # uncaught exceptions.  The nullcontext fallback covers the
+        # case where intelligence is disabled entirely.
+        pipeline_ctx: contextlib.AbstractContextManager = (
+            self.sentiment_pipeline
+            if self.sentiment_pipeline is not None
+            else contextlib.nullcontext()
+        )
         try:
-            result = self._run_cycle_impl()
+            with pipeline_ctx:
+                result = self._run_cycle_impl()
         except Exception as exc:
             logger.exception("CYCLE FAILED with unhandled exception: %s", exc)
             self.journal_kb.log_cycle_error(
@@ -322,7 +381,7 @@ class TradingAgent:
         logger.info("=" * 70)
 
         # Pre-flight: fetch account info
-        account = self.data_provider.get_account_info(self.config.alpaca.base_url)
+        account = self.data_provider.get_account_info()
         if not account:
             msg = "Cannot fetch account info — aborting cycle."
             logger.error(msg)
@@ -336,7 +395,7 @@ class TradingAgent:
         account_balance = float(account.get("equity", 0))
         account_buying_power = float(account.get("buying_power", account_balance))
         account_type = "paper" if "paper" in self.config.alpaca.base_url else "live"
-        market_open = self.data_provider.is_market_open(self.config.alpaca.base_url)
+        market_open = self.data_provider.is_market_open()
 
         logger.info(
             "Account: balance=$%s, buying_power=$%s, type=%s, market_open=%s",
@@ -634,6 +693,22 @@ class TradingAgent:
                 "strategy_mode": "defense_first",
             }
 
+        # Launch tiered sentiment pipeline (Tier-0 earnings → Tier-1 cache →
+        # Tier-2 FinGPT + verifier) in the background immediately after
+        # Phase II so it runs concurrently with Phase III + IV, adding
+        # near-zero wall-clock latency when the Tier-0/1 short-circuit
+        # applies (the common case once the cache is warm).
+        fingpt_future: Optional[Future] = None
+        if self.sentiment_pipeline is not None:
+            fingpt_future = self.sentiment_pipeline.submit(
+                ticker,
+                analysis.regime.value,
+                analysis.current_price,
+                analysis.rsi_14,
+                getattr(analysis, "iv_rank", 0.0),
+                self._regime_to_strategy(analysis.regime),
+            )
+
         logger.info(
             "[%s] Phase III — PLAN (%s → %s)",
             ticker, analysis.regime.value,
@@ -649,12 +724,41 @@ class TradingAgent:
             account_buying_power=buying_power,
         )
 
+        # Resolve tiered sentiment pipeline result (earnings → cache →
+        # FinGPT + verifier).  Timeout is 60s: news fetching adds
+        # ~5-15s on top of inference; the Tier-0/1 short-circuits
+        # return in <100 ms so the typical case is effectively free.
+        #
+        # Efficiency gate: if Phase III/IV produced no tradeable
+        # candidate (invalid plan or risk rejection), the sentiment
+        # readout is not consumed downstream — cancel the future to
+        # skip the LLM calls entirely.
+        sentiment: Optional[VerifiedSentimentReport] = None
+        if fingpt_future is not None:
+            if not (plan.valid and verdict.approved):
+                # Best-effort cancellation — if the worker has already
+                # begun the LLM call, it'll finish; we just drop the
+                # result.  Either way we don't block the cycle.
+                fingpt_future.cancel()
+                logger.debug(
+                    "[%s] No tradeable candidate — sentiment future dropped",
+                    ticker,
+                )
+            else:
+                try:
+                    sentiment = fingpt_future.result(timeout=60)
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] Sentiment pipeline future failed: %s",
+                        ticker, exc,
+                    )
+
         # Phase V: LLM Analysis (if enabled)
         llm_decision = None
         if self.llm_analyst and plan.valid and verdict.approved:
             logger.info("[%s] Phase V  — LLM ANALYSIS", ticker)
             llm_decision = self.llm_analyst.analyze_trade(
-                ticker, analysis, plan, verdict)
+                ticker, analysis, plan, verdict, sentiment=sentiment)
 
             if llm_decision.action == "skip":
                 logger.warning(
@@ -718,6 +822,20 @@ class TradingAgent:
             result["llm_confidence"] = llm_decision.confidence
             result["llm_reasoning"] = llm_decision.reasoning
             result["llm_warnings"] = llm_decision.warnings
+
+        if sentiment:
+            # Use the SentimentReadout surface (verified_* fields exposed
+            # as plain attribute aliases) so the journal emits
+            # identical keys regardless of which pipeline tier produced
+            # the result (earnings short-circuit, cache hit, or full
+            # FinGPT + verifier chain).
+            result["fingpt_sentiment"] = sentiment.sentiment_score
+            result["fingpt_event_risk"] = sentiment.event_risk
+            result["fingpt_recommendation"] = sentiment.recommendation
+            result["fingpt_themes"] = sentiment.key_themes
+            result["fingpt_agreement"] = sentiment.agreement_score
+            result["fingpt_hallucination_flags"] = sentiment.hallucination_flags
+            result["fingpt_verified_by"] = sentiment.verifier_model
 
         return result
 
@@ -886,14 +1004,33 @@ class TradingAgent:
     # ==================================================================
 
     def _cached_price(self, ticker: str) -> float:
-        """Return cached price for *ticker* or 0.0 if unavailable."""
-        entry = self.data_provider._snapshot_cache.get(ticker)
-        if entry:
-            return entry[0]
-        cache = self.data_provider._price_cache.get(ticker)
-        if cache is not None and not cache.empty:
-            return float(cache["Close"].iloc[-1])
-        return 0.0
+        """Return cached price for *ticker* or 0.0 if unavailable.
+
+        Delegates to the MarketDataPort.get_cached_price method so the
+        agent never reaches into adapter-private caches.  Pre-week-5-6
+        this poked ``data_provider._snapshot_cache`` and
+        ``_price_cache`` directly, which was the classic "leaky
+        abstraction" symptom the port refactor eliminates.
+        """
+        price = self.data_provider.get_cached_price(ticker)
+        return float(price) if price is not None else 0.0
+
+    def _check_daily_drawdown(self, current_equity: float) -> bool:
+        """Thin wrapper for tests / legacy callers.
+
+        The canonical implementation is
+        :func:`trading_agent.daily_state.check_daily_drawdown`, which
+        was extracted during the week 3-4 refactor.  This method keeps
+        the pre-refactor instance-method shape so existing integration
+        tests (and anyone who held on to the previous surface) don't
+        have to rewire.  All real policy lives in daily_state.
+        """
+        return check_daily_drawdown(
+            self.daily_state,
+            current_equity=current_equity,
+            drawdown_limit=self.config.trading.daily_drawdown_limit,
+            journal_kb=self.journal_kb,
+        )
 
     def _learn_from_close(self, spread: SpreadPosition):
         """Run post-trade LLM analysis when a spread is closed."""

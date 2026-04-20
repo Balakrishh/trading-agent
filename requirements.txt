@@ -10,3 +10,9 @@ pytest>=7.4.0
 pytest-mock>=3.12.0
 streamlit>=1.42.0
 plotly>=6.0.0
+
+# --- Optional: FinGPT multi-source pipeline ---
+# Install the sources you want; each degrades gracefully if absent.
+# Reddit (r/wsb, r/stocks, r/options):   pip install praw>=7.7.0
+# Twitter / X cashtag stream:             pip install tweepy>=4.14.0
+# Claude verifier (VERIFIER_PROVIDER=anthropic): pip install anthropic>=0.40.0

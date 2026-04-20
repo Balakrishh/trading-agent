@@ -62,10 +62,26 @@ class MarketDataProvider:
     """Fetches and caches market data from Yahoo Finance and Alpaca."""
 
     def __init__(self, alpaca_api_key: str, alpaca_secret_key: str,
-                 alpaca_data_url: str = "https://data.alpaca.markets/v2"):
+                 alpaca_data_url: str = "https://data.alpaca.markets/v2",
+                 alpaca_base_url: str = "https://paper-api.alpaca.markets/v2"):
+        """
+        Parameters
+        ----------
+        alpaca_api_key, alpaca_secret_key
+            Alpaca credentials.
+        alpaca_data_url
+            Market-data endpoint (snapshots, bars, option chains).
+        alpaca_base_url
+            Trading/account endpoint (clock, account info).  Stored on
+            the instance so :meth:`get_account_info` and
+            :meth:`is_market_open` no longer need the caller to pass it
+            in on every invocation.  This is the week 5-6 fix for the
+            AccountPort base_url leak.
+        """
         self.alpaca_api_key = alpaca_api_key
         self.alpaca_secret_key = alpaca_secret_key
         self.alpaca_data_url = alpaca_data_url
+        self.alpaca_base_url = alpaca_base_url
 
         # price cache: ticker → DataFrame
         self._price_cache: Dict[str, pd.DataFrame] = {}
@@ -581,9 +597,46 @@ class MarketDataProvider:
             logger.warning("[%s] 5-min bar fetch failed: %s", ticker, exc)
             return None
 
-    def get_account_info(self, base_url: str) -> Optional[Dict]:
-        """Fetch paper trading account information from Alpaca."""
-        url = f"{base_url}/account"
+    # ------------------------------------------------------------------
+    # Cached-price query — AccountPort / MarketDataPort seam
+    # ------------------------------------------------------------------
+    def get_cached_price(self, ticker: str) -> Optional[float]:
+        """
+        Return the most recently observed price for *ticker*, or None if
+        the cache has never seen it.
+
+        This is the public replacement for the prior
+        ``provider._snapshot_cache.get(...)`` and
+        ``provider._price_cache.get(...)`` access that leaked across
+        the module boundary.  Callers (notably ``agent.py`` when
+        assembling underlying_prices for the position evaluator) should
+        use this method instead.
+
+        Lookup order:
+          1. Snapshot cache (fresh real-time price from Alpaca)
+          2. Most recent close from the historical price cache
+
+        No network calls are made — this is a pure in-memory query.
+        """
+        snap = self._snapshot_cache.get(ticker)
+        if snap is not None:
+            price, _ts = snap
+            return float(price)
+        frame = self._price_cache.get(ticker)
+        if frame is not None and not frame.empty:
+            return float(frame["Close"].iloc[-1])
+        return None
+
+    # ------------------------------------------------------------------
+    # AccountPort — no base_url parameter (adapter owns its endpoints)
+    # ------------------------------------------------------------------
+    def get_account_info(self) -> Optional[Dict]:
+        """Fetch paper trading account information from Alpaca.
+
+        Reads the trading endpoint from ``self.alpaca_base_url`` — the
+        caller no longer passes it in (week 5-6 AccountPort refactor).
+        """
+        url = f"{self.alpaca_base_url}/account"
         try:
             resp = requests.get(url, headers=self._alpaca_headers(), timeout=10)
             resp.raise_for_status()
@@ -592,9 +645,13 @@ class MarketDataProvider:
             logger.error("Failed to fetch account info: %s", exc)
             return None
 
-    def is_market_open(self, base_url: str) -> bool:
-        """Check if the market is currently open via Alpaca clock API."""
-        url = f"{base_url}/clock"
+    def is_market_open(self) -> bool:
+        """Check if the market is currently open via Alpaca clock API.
+
+        Reads the trading endpoint from ``self.alpaca_base_url`` — the
+        caller no longer passes it in (week 5-6 AccountPort refactor).
+        """
+        url = f"{self.alpaca_base_url}/clock"
         try:
             resp = requests.get(url, headers=self._alpaca_headers(), timeout=10)
             resp.raise_for_status()

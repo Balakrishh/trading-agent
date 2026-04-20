@@ -24,6 +24,8 @@ from trading_agent.knowledge_base import KnowledgeBase
 from trading_agent.regime import Regime, RegimeAnalysis
 from trading_agent.strategy import SpreadPlan
 from trading_agent.risk_manager import RiskVerdict
+from trading_agent.fingpt_analyser import SentimentReport
+from trading_agent.ports import SentimentReadout
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,8 @@ ANALYSIS_PROMPT_TEMPLATE = """## Proposed Trade
 - Expiration: {expiration} ({dte} DTE)
 
 **Risk Manager Verdict:** {risk_verdict}
+
+{sentiment_section}
 
 {similar_trades_section}
 
@@ -206,12 +210,20 @@ class LLMAnalyst:
     # ==================================================================
 
     def analyze_trade(self, ticker: str, analysis: RegimeAnalysis,
-                      plan: SpreadPlan, verdict: RiskVerdict) -> AnalystDecision:
+                      plan: SpreadPlan, verdict: RiskVerdict,
+                      sentiment: Optional[SentimentReadout] = None) -> AnalystDecision:
         """
         Review a proposed trade plan and decide: approve, modify, or skip.
 
         This runs AFTER the rule-based risk manager — if the risk manager
         rejected the trade, the analyst cannot override that.
+
+        Args:
+            sentiment: Optional FinGPT SentimentReport from the news layer.
+                       When provided, macro/event context is injected into
+                       the analysis prompt. A FinGPT "avoid" recommendation
+                       is escalated to a warning but does not override risk
+                       manager approval — it informs the LLM's own decision.
         """
         if not self.enabled:
             return self._passthrough_decision(verdict)
@@ -233,9 +245,10 @@ class LLMAnalyst:
         lessons = self._find_relevant_lessons(ticker, analysis)
         stats = self.journal.get_stats()
 
-        # Build the prompt
+        # Build the prompt (sentiment section injected when available)
         prompt = self._build_analysis_prompt(
-            ticker, analysis, plan, verdict, similar_trades, lessons, stats)
+            ticker, analysis, plan, verdict, similar_trades, lessons, stats,
+            sentiment=sentiment)
 
         # Query the LLM
         messages = [
@@ -444,8 +457,9 @@ class LLMAnalyst:
         return self.kb.get_relevant_lessons(query, top_k=3)
 
     def _build_analysis_prompt(self, ticker, analysis, plan, verdict,
-                                similar_trades, lessons, stats) -> str:
-        """Build the full analysis prompt with RAG context."""
+                                similar_trades, lessons, stats,
+                                sentiment: Optional[SentimentReadout] = None) -> str:
+        """Build the full analysis prompt with RAG context and optional FinGPT sentiment."""
 
         # Similar trades section
         if similar_trades:
@@ -493,6 +507,17 @@ class LLMAnalyst:
         except Exception:
             dte = 30
 
+        # FinGPT sentiment section (empty string when not available)
+        if sentiment:
+            sentiment_section = sentiment.to_prompt_section()
+            if sentiment.recommendation == "avoid":
+                sentiment_section += (
+                    "\n\n> ⚠️ FinGPT flags HIGH EVENT RISK — strongly consider skipping "
+                    "this trade regardless of technical signals."
+                )
+        else:
+            sentiment_section = "## FinGPT Sentiment Analysis\nNot available (disabled or no headlines)."
+
         return ANALYSIS_PROMPT_TEMPLATE.format(
             ticker=ticker,
             strategy_name=plan.strategy_name,
@@ -511,6 +536,7 @@ class LLMAnalyst:
             expiration=plan.expiration,
             dte=dte,
             risk_verdict="APPROVED" if verdict.approved else "REJECTED",
+            sentiment_section=sentiment_section,
             similar_trades_section=similar_section,
             lessons_section=lessons_section,
             performance_stats_section=stats_section,

@@ -289,8 +289,9 @@ def _fetch_account(config) -> Dict:
             alpaca_api_key=config.alpaca.api_key,
             alpaca_secret_key=config.alpaca.secret_key,
             alpaca_data_url=config.alpaca.data_url,
+            alpaca_base_url=config.alpaca.base_url,
         )
-        return provider.get_account_info(config.alpaca.base_url) or {}
+        return provider.get_account_info() or {}
     except Exception as exc:
         st.warning(f"Account fetch failed: {exc}")
         return {}
@@ -340,8 +341,9 @@ def _is_market_open(config) -> Optional[bool]:
             alpaca_api_key=config.alpaca.api_key,
             alpaca_secret_key=config.alpaca.secret_key,
             alpaca_data_url=config.alpaca.data_url,
+            alpaca_base_url=config.alpaca.base_url,
         )
-        return provider.is_market_open(config.alpaca.base_url)
+        return provider.is_market_open()
     except Exception:
         return None
 

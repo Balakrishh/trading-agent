@@ -1,86 +1,84 @@
 """
-market_hours — NYSE trading-hours guard
-=======================================
+market_hours — trading-hours guard, parameterised by a MarketProfile
+====================================================================
 
-Extracted from agent.py during the week 3-4 modularization so that
-market-hours logic can be unit-tested in isolation and reused by
-components outside the core agent (e.g. the Streamlit UI, the backtester
-validation hooks).
-
-Scope
------
-US equity / option markets only — per the current strategy's charter.
-When the vendor-agnostic refactor (week 5-6) lands, these constants will
-move into a ``MarketProfile`` dataclass injected via configuration and
-this module will become the US-specific implementation of that port.
+Previously this module hardcoded NYSE constants at module scope.  As
+part of the week 5-6 vendor-agnostic refactor the constants moved into
+:class:`trading_agent.market_profile.MarketProfile`; this module now
+reads them from a profile passed in (or from ``US_MARKET_PROFILE`` by
+default) so the same guard can be reused for future venues without
+touching the core.
 
 Behavior
 --------
-``is_within_market_hours()`` returns True iff:
-  • today is an NYSE regular-session trading day, AND
-  • the current Eastern time is within
-    [09:25, 16:05] ET — a 5-minute buffer on each side.
+``is_within_market_hours(now, profile)`` returns True iff:
+  • ``profile.is_trading_day(now.date())`` — regular-session day, AND
+  • current time in the profile's timezone is within
+    [open_time, close_time] inclusive.
 
-The buffer exists so a cron job scheduled at :30 past the hour (or
-exactly on 9:30 / 16:00) can complete the cycle it already started
-without being rejected.
+The 5-minute open/close buffers baked into :data:`US_MARKET_PROFILE`
+let a cron job scheduled exactly on the NYSE bell (09:30 / 16:00)
+complete the cycle it already started without being rejected by the
+next invocation.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
-from zoneinfo import ZoneInfo
 
-from trading_agent.calendar_utils import is_trading_day
+from trading_agent.market_profile import MarketProfile, US_MARKET_PROFILE
+
 
 # ---------------------------------------------------------------------------
-# US (NYSE) market calendar constants
+# Public API
 # ---------------------------------------------------------------------------
-EASTERN = ZoneInfo("America/New_York")
-
-# NYSE core session: 9:30 AM – 4:00 PM ET.
-# 5-minute buffers let a cron job scheduled exactly on the boundary
-# finish its current cycle before the next invocation would be blocked.
-MARKET_OPEN_HOUR, MARKET_OPEN_MINUTE   = 9, 25    # 5 min before 9:30
-MARKET_CLOSE_HOUR, MARKET_CLOSE_MINUTE = 16, 5    # 5 min after  16:00
-
-
-def market_window_str() -> str:
+def market_window_str(profile: MarketProfile = US_MARKET_PROFILE) -> str:
     """Human-readable window string for logs / journal context."""
-    return (
-        f"{MARKET_OPEN_HOUR:02d}:{MARKET_OPEN_MINUTE:02d}–"
-        f"{MARKET_CLOSE_HOUR:02d}:{MARKET_CLOSE_MINUTE:02d} ET "
-        f"Mon–Fri"
-    )
+    return f"{profile.session_window_str} Mon–Fri"
 
 
-def is_within_market_hours(now: Optional[datetime] = None) -> bool:
+def is_within_market_hours(now: Optional[datetime] = None,
+                           profile: MarketProfile = US_MARKET_PROFILE) -> bool:
     """
-    Return True if *now* (default: current moment) is within the NYSE
-    regular session with the configured buffers.
+    Return True if *now* (default: current moment in the profile's TZ)
+    is within the profile's regular session with its configured buffers.
 
-    Uses ``pandas_market_calendars`` (via calendar_utils) to correctly
-    skip weekends AND market holidays — the prior weekday-based check
-    incorrectly woke the agent on July 4th, MLK Day, Good Friday,
-    Thanksgiving, etc.
+    Uses ``profile.is_trading_day`` (NYSE via pandas_market_calendars by
+    default) to correctly skip weekends AND market holidays — the prior
+    weekday-based check incorrectly woke the agent on July 4th, MLK Day,
+    Good Friday, Thanksgiving, etc.
     """
-    now = now or datetime.now(EASTERN)
-    # Allow tests to pass a naive / non-Eastern datetime.
+    tz = profile.timezone
+    now = now or datetime.now(tz)
+    # Allow tests to pass a naive datetime in the profile's timezone.
     if now.tzinfo is None:
-        now = now.replace(tzinfo=EASTERN)
+        now = now.replace(tzinfo=tz)
     else:
-        now = now.astimezone(EASTERN)
+        now = now.astimezone(tz)
 
-    if not is_trading_day(now.date()):
+    if not profile.is_trading_day(now.date()):
         return False
 
     open_boundary = now.replace(
-        hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE,
+        hour=profile.open_hour, minute=profile.open_minute,
         second=0, microsecond=0,
     )
     close_boundary = now.replace(
-        hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE,
+        hour=profile.close_hour, minute=profile.close_minute,
         second=0, microsecond=0,
     )
     return open_boundary <= now <= close_boundary
+
+
+# ---------------------------------------------------------------------------
+# Back-compat module-level aliases
+# ---------------------------------------------------------------------------
+# Some internal callers and tests import the bare constants.  We re-export
+# the US values here so those imports keep working.  New code should read
+# them from :data:`US_MARKET_PROFILE` (or the injected profile) instead.
+EASTERN = US_MARKET_PROFILE.timezone
+MARKET_OPEN_HOUR = US_MARKET_PROFILE.open_hour
+MARKET_OPEN_MINUTE = US_MARKET_PROFILE.open_minute
+MARKET_CLOSE_HOUR = US_MARKET_PROFILE.close_hour
+MARKET_CLOSE_MINUTE = US_MARKET_PROFILE.close_minute
