@@ -23,6 +23,10 @@ module.  The spine of parity is:
 Residual drift (documented, not yet closed):
   • Regime classification still uses home-grown SMA (drift #1 / #14).
   • Sentiment / LLM gate absent — backtest skips the Tier-2 chain (drift #11).
+  • ETF macro signals (leadership Z + VIX gate, Items 1-3) are CLOSED:
+    use_macro_signals=True wires the same gates the live agent uses.
+    Residual: bar timescale (live=5min, backtest=whatever timeframe
+    selects); open-bar-skip not re-implemented per session day.
 
 Toggles are **opt-in** on the Backtester class (defaults = None/False so
 existing unit tests keep passing) and default-**on** in the Streamlit UI
@@ -59,6 +63,17 @@ from trading_agent.streamlit.components import (
 # into the backtester.  If any of these imports ever fail (e.g. the module
 # rename), we'd rather crash loudly than silently drift.
 from trading_agent.strategy import StrategyPlanner as _Planner
+from trading_agent.regime import (
+    LEADERSHIP_ANCHORS,
+    VIX_INHIBIT_ZSCORE,
+)
+from trading_agent.market_data import MarketDataProvider as _MDP
+
+# Z-score thresholds + window — sourced from the live agent so changes in
+# strategy.py / market_data.py automatically flow through to the backtester.
+RS_ZSCORE_THRESHOLD = _Planner.RS_ZSCORE_THRESHOLD
+LEADERSHIP_WINDOW_BARS = _MDP.LEADERSHIP_WINDOW_BARS
+VIX_WINDOW_BARS = _MDP.VIX_WINDOW_BARS
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +382,23 @@ class Backtester:
         # back to the synthetic σ-credit — the whole point of this mode
         # is apples-to-apples live parity.
         use_alpaca_historical: bool = False,
+        # --- ETF macro signals (parity with live agent's Items 1-3) ---
+        # When True, run() pre-loads anchor + ^VIX series via yfinance and
+        # applies the same z-scored gates the live regime classifier uses:
+        #   * leadership_z > RS_ZSCORE_THRESHOLD on a SIDEWAYS bar promotes
+        #     to BULLISH (parity with strategy.plan() Priority 3)
+        #   * vix_z > VIX_INHIBIT_ZSCORE on a BULLISH/SIDEWAYS bar demotes
+        #     to BEARISH (parity with strategy.plan() Priority 2)
+        # Default False so the existing test suite stays apples-to-apples
+        # with the pre-patch backtester; the Streamlit UI default-enables
+        # so interactive runs stay aligned with the live agent.
+        #
+        # Caveat: the live agent computes these z-scores on rolling 5-min
+        # bars.  When the backtest timeframe is "1Day" the same arithmetic
+        # is applied to daily return diffs — directionally aligned with
+        # the live signal but at a different timescale.  Set timeframe
+        # = "5Min" for true parity (subject to yfinance's 30-day limit).
+        use_macro_signals: bool = False,
     ) -> None:
         self.starting_equity = starting_equity
         self.spread_width = spread_width
@@ -390,6 +422,7 @@ class Backtester:
         self._alpaca_secret_key = alpaca_secret_key or os.getenv("ALPACA_SECRET_KEY", "")
         self._alpaca_data_url = alpaca_data_url or os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets/v2")
         self.use_alpaca_historical = bool(use_alpaca_historical)
+        self.use_macro_signals = bool(use_macro_signals)
         # Option chain cache: {(ticker, expiry, type): (contracts, epoch)}
         self._option_cache: Dict[Tuple[str, str, str], Tuple[List[Dict], float]] = {}
         # Alpaca API call counters surfaced to the diagnostics expander.
@@ -401,6 +434,11 @@ class Backtester:
         # Per-run detailed diagnostics — filled by _record_rejection.
         self._rejection_samples: List[RejectionRecord] = []
         self._funnel = PhaseFunnel()
+        # ETF macro signal counters — surfaced as informational metrics
+        # in the diagnostics panel.  They count *gate firings*, not trades:
+        # a vix_inhibited bar still flows through to Bear-Call simulation.
+        self.leadership_biased = 0     # SIDEWAYS → BULLISH promotions
+        self.vix_inhibited = 0         # BULLISH/SIDEWAYS → BEARISH demotions
 
     # ── Agent-parity helpers ────────────────────────────────────────────────
 
@@ -1697,6 +1735,196 @@ class Backtester:
             "sideways": "Iron Condor",
         }.get(regime, "Iron Condor")
 
+    # ── ETF macro signals (parity with regime.py / market_data.py) ─────────
+
+    @staticmethod
+    def _zscore_last(values: List[float]) -> Optional[float]:
+        """
+        Population-stdev Z-score of the *last* element of ``values`` against
+        the entire series.  Mirrors the math in
+        ``MarketDataProvider.get_leadership_zscore`` /
+        ``get_vix_zscore`` — population (not sample) variance because we
+        treat the rolling window as the full intraday distribution.
+
+        Returns ``None`` for series shorter than 2 or with degenerate
+        (≤1e-9) stdev to match the live no-signal branch.
+        """
+        n = len(values)
+        if n < 2:
+            return None
+        mean = sum(values) / n
+        var = sum((v - mean) ** 2 for v in values) / n
+        std = var ** 0.5
+        if std <= 1e-9:
+            return None
+        return (values[-1] - mean) / std
+
+    @staticmethod
+    def _leadership_zscore_at(ticker_prices: pd.Series,
+                              anchor_prices: pd.Series,
+                              idx: int,
+                              window: int = LEADERSHIP_WINDOW_BARS,
+                              ) -> Optional[Tuple[float, float]]:
+        """
+        Compute ``(raw_diff, zscore)`` of (ticker - anchor) returns at
+        bar ``idx``, using a trailing ``window``-bar window.  Returns
+        ``None`` when either series lacks data at ``idx`` or the window
+        is too short.
+
+        Tail-aligned to the shorter of the two windows after intersecting
+        on timestamps (anchor data may have gaps the ticker doesn't,
+        e.g. a missing 5-min bar).
+        """
+        if idx <= 0:
+            return None
+        # Start at idx - window (inclusive of the entry bar itself)
+        start_idx = max(0, idx - window)
+        ticker_slice = ticker_prices.iloc[start_idx: idx + 1]
+        # Align anchor to the same timestamps the ticker has.
+        try:
+            anchor_slice = anchor_prices.reindex(ticker_slice.index).dropna()
+        except Exception:
+            return None
+        # Re-align ticker to anchor's surviving timestamps so both share
+        # the exact same index when we diff returns.
+        ticker_slice = ticker_slice.reindex(anchor_slice.index).dropna()
+        if len(ticker_slice) < 2 or len(anchor_slice) < 2:
+            return None
+        t_returns = ticker_slice.pct_change().dropna().tolist()
+        a_returns = anchor_slice.pct_change().dropna().tolist()
+        n = min(len(t_returns), len(a_returns))
+        if n < 2:
+            return None
+        diffs = [t - a for t, a in zip(t_returns[-n:], a_returns[-n:])]
+        z = Backtester._zscore_last(diffs)
+        if z is None:
+            return None
+        return (diffs[-1], z)
+
+    @staticmethod
+    def _vix_zscore_at(vix_close: pd.Series,
+                       ts,
+                       window: int = VIX_WINDOW_BARS,
+                       ) -> Optional[Tuple[float, float]]:
+        """
+        Z-score the latest VIX 5-min *level change* (point delta, not %)
+        in a trailing ``window``-bar window ending at ``ts`` (inclusive).
+        Mirrors ``MarketDataProvider.get_vix_zscore`` semantics.
+
+        Returns ``(raw_change, zscore)`` or ``None`` when the window is
+        too short or the stdev degenerates to zero.
+        """
+        if vix_close is None or vix_close.empty:
+            return None
+        # Slice up to and including ts.  Use searchsorted-equivalent via
+        # boolean mask so this works for both DatetimeIndex and date.
+        try:
+            mask = vix_close.index <= ts
+        except TypeError:
+            return None
+        sub = vix_close.loc[mask].tail(window)
+        if len(sub) < 2:
+            return None
+        closes = sub.astype(float).tolist()
+        diffs = [b - a for a, b in zip(closes, closes[1:])]
+        z = Backtester._zscore_last(diffs)
+        if z is None:
+            return None
+        return (diffs[-1], z)
+
+    @staticmethod
+    def _load_anchor_series(tickers: List[str],
+                            start: date,
+                            end: date,
+                            yf_interval: str,
+                            ) -> Dict[str, pd.Series]:
+        """
+        Pre-download the *unique anchors* for the given tickers in a
+        single yfinance batch and return a {anchor → Close series} dict.
+
+        Used by ``run()`` to avoid repeating per-bar downloads.  yfinance
+        is called with ``auto_adjust=False`` for parity with the agent
+        ``MarketDataProvider`` (raw closes, not split/dividend-adjusted).
+        Failures are silently dropped — the caller should treat a missing
+        anchor as "no leadership signal available for this ticker".
+        """
+        anchors_needed = sorted({
+            LEADERSHIP_ANCHORS[t] for t in tickers if t in LEADERSHIP_ANCHORS
+        })
+        out: Dict[str, pd.Series] = {}
+        if not anchors_needed:
+            return out
+        try:
+            raw = yf.download(
+                anchors_needed,
+                start=start.isoformat(),
+                end=end.isoformat(),
+                interval=yf_interval,
+                progress=False,
+                auto_adjust=False,
+                group_by="ticker",
+            )
+        except Exception as exc:
+            logger.warning("Anchor download failed (%s) — leadership "
+                           "signal disabled for this run", exc)
+            return out
+        if raw is None or raw.empty:
+            return out
+        # yf returns either a flat DataFrame (single ticker) or a
+        # MultiIndex(columns=[ticker, field]) DataFrame (multi-ticker).
+        for anchor in anchors_needed:
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    sub = raw[anchor] if anchor in raw.columns.get_level_values(0) else None
+                    if sub is None or sub.empty:
+                        continue
+                    series = sub["Close"].dropna()
+                else:
+                    series = raw["Close"].dropna()
+                if not series.empty:
+                    out[anchor] = series
+            except Exception:
+                continue
+        return out
+
+    @staticmethod
+    def _load_vix_series(start: date,
+                        end: date,
+                        yf_interval: str,
+                        ) -> Optional[pd.Series]:
+        """
+        Pre-download the ^VIX close series for the backtest window.
+
+        Returns ``None`` when yfinance has no data for the requested
+        range (5m intraday is capped at the last ~30 days; daily covers
+        the full history).  Caller treats ``None`` as "no VIX gate
+        available — bar passes through with vix_inhibit=False".
+        """
+        try:
+            raw = yf.download(
+                "^VIX",
+                start=start.isoformat(),
+                end=end.isoformat(),
+                interval=yf_interval,
+                progress=False,
+                auto_adjust=False,
+            )
+        except Exception as exc:
+            logger.warning("VIX download failed (%s) — VIX gate disabled "
+                           "for this run", exc)
+            return None
+        if raw is None or raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            try:
+                raw = raw.xs("^VIX", axis=1, level=1)
+            except Exception:
+                pass
+            raw.columns = [c[0] if isinstance(c, tuple) else c for c in raw.columns]
+        if "Close" not in raw.columns:
+            return None
+        return raw["Close"].dropna()
+
     # ── Outcome simulation ──────────────────────────────────────────────────
 
     def _simulate(
@@ -1849,6 +2077,28 @@ class Backtester:
 
         skipped: List[str] = warnings.copy()
 
+        # ── ETF macro signals: pre-load anchor + VIX series once ────────
+        # Live agent fetches these once per cycle from Alpaca/yfinance.
+        # In the backtester we batch-download the entire window so the
+        # per-bar lookups are O(1) slices rather than network calls.
+        anchor_series_by_anchor: Dict[str, pd.Series] = {}
+        vix_series: Optional[pd.Series] = None
+        if self.use_macro_signals:
+            anchor_series_by_anchor = self._load_anchor_series(
+                tickers, start, end, yf_interval,
+            )
+            vix_series = self._load_vix_series(start, end, yf_interval)
+            if not anchor_series_by_anchor:
+                skipped.append(
+                    "macro signals: no anchor data available "
+                    "(yfinance returned empty) — leadership gate disabled."
+                )
+            if vix_series is None:
+                skipped.append(
+                    "macro signals: no ^VIX data available "
+                    "(yfinance returned empty) — VIX gate disabled."
+                )
+
         for ticker in tickers:
             try:
                 # auto_adjust=False mirrors market_data.MarketDataProvider
@@ -1903,6 +2153,41 @@ class Backtester:
                     break
 
                 regime = self._classify_bars(prices, i, warmup_bars)
+
+                # ── ETF macro signals (Items 1-3 parity) ───────────────
+                # Apply the same gate ordering the live planner uses:
+                # VIX inhibit (Priority 2) before leadership bias
+                # (Priority 3) so a fear spike can demote a "leading"
+                # SIDEWAYS to BEARISH.  Both gates are no-ops when
+                # use_macro_signals is False or when the underlying
+                # series isn't loaded.
+                if self.use_macro_signals:
+                    bar_ts = prices.index[i]
+                    # VIX inter-market gate
+                    if vix_series is not None:
+                        vix_z_pair = self._vix_zscore_at(vix_series, bar_ts)
+                        if (vix_z_pair is not None
+                                and vix_z_pair[1] > VIX_INHIBIT_ZSCORE
+                                and regime in ("bullish", "sideways")):
+                            regime = "bearish"
+                            self.vix_inhibited += 1
+                    # Leadership bias (only meaningful when the regime
+                    # would otherwise have been SIDEWAYS — bullish/bearish
+                    # already have a directional signal so the live planner
+                    # doesn't override them on RS alone).
+                    if (regime == "sideways"
+                            and ticker in LEADERSHIP_ANCHORS):
+                        anchor = LEADERSHIP_ANCHORS[ticker]
+                        anchor_series = anchor_series_by_anchor.get(anchor)
+                        if anchor_series is not None:
+                            lead_pair = self._leadership_zscore_at(
+                                prices, anchor_series, i,
+                            )
+                            if (lead_pair is not None
+                                    and lead_pair[1] > RS_ZSCORE_THRESHOLD):
+                                regime = "bullish"
+                                self.leadership_biased += 1
+
                 strategy = self._strategy(regime)
 
                 # --- Strike + credit: use option chain if available, else sigma/fixed ---
@@ -2460,6 +2745,7 @@ def _run_cached(
     use_earnings_gate: bool = False,
     earnings_lookahead_days: int = AGENT_EARNINGS_LOOKAHEAD,
     use_alpaca_historical: bool = False,
+    use_macro_signals: bool = False,
 ) -> BacktestResult:
     return Backtester(
         sigma_mult=sigma_mult,
@@ -2472,6 +2758,7 @@ def _run_cached(
         use_earnings_gate=use_earnings_gate,
         earnings_lookahead_days=earnings_lookahead_days,
         use_alpaca_historical=use_alpaca_historical,
+        use_macro_signals=use_macro_signals,
     ).run(list(tickers), start, end, timeframe, use_alpaca)
 
 
@@ -2672,7 +2959,10 @@ def render_backtest_ui() -> None:
                 "(ExitMonitor)\n"
                 "• Skip entries inside the earnings-calendar lookahead\n"
                 "• Skip entries when IV-rank > 95 "
-                "(RegimeClassifier.high_iv_warning)"
+                "(RegimeClassifier.high_iv_warning)\n"
+                "• Apply leadership Z-score bias (>+1.5σ) and VIX "
+                "inter-market gate (>+2σ) — Items 1-3 of the ETF macro "
+                "patch (Backtester.use_macro_signals)"
             ),
         )
         if agent_parity:
@@ -2683,6 +2973,7 @@ def render_backtest_ui() -> None:
             use_iv_gate_val = True
             use_earnings_gate_val = True
             earnings_lookahead_val = AGENT_EARNINGS_LOOKAHEAD
+            use_macro_signals_val = True
         else:
             min_credit_ratio_val = None
             max_delta_val = None
@@ -2691,6 +2982,7 @@ def render_backtest_ui() -> None:
             use_iv_gate_val = False
             use_earnings_gate_val = False
             earnings_lookahead_val = AGENT_EARNINGS_LOOKAHEAD
+            use_macro_signals_val = False
 
         st.divider()
         run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
@@ -2730,6 +3022,7 @@ def render_backtest_ui() -> None:
                 use_earnings_gate=use_earnings_gate_val,
                 earnings_lookahead_days=earnings_lookahead_val,
                 use_alpaca_historical=use_alpaca_historical,
+                use_macro_signals=use_macro_signals_val,
             )
             st.session_state["backtest_result"] = result
             st.session_state["backtest_timeframe"] = timeframe

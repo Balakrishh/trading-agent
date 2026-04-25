@@ -718,6 +718,33 @@ The backtester now mirrors the live agent's **executor._refresh_limit_price()** 
 
 **Configuration**: Enable by setting `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` in your `.env` file. The backtester will automatically use live quotes when available, falling back to simulated quotes when the API is unavailable.
 
+#### Backtester ETF Macro Signals (parity with live Items 1-3)
+
+The backtester now applies the **same z-scored leadership and VIX inter-market gates** the live `RegimeClassifier` uses, closing the largest pre-patch live-vs-backtest drift item.
+
+| Live agent | Backtester equivalent |
+|---|---|
+| `MarketDataProvider.get_leadership_zscore(ticker, anchor)` (5-min Alpaca bars, last 21 bars, OPEN_BAR_SKIP=2) | `Backtester._leadership_zscore_at(ticker_prices, anchor_prices, idx)` (per-bar slice of pre-loaded yfinance close series) |
+| `MarketDataProvider.get_vix_zscore()` (5-min ^VIX from yfinance, last 21 bars) | `Backtester._vix_zscore_at(vix_series, ts)` (per-bar slice of pre-loaded yfinance ^VIX series) |
+| `StrategyPlanner.plan()` Priority 2 — VIX inhibit demotes Bull Put / Iron Condor → Bear Call | Same gate fires in `Backtester.run()` per-bar loop (counted in `Backtester.vix_inhibited`) |
+| `StrategyPlanner.plan()` Priority 3 — Leadership-z bias picks Bull Put when `z > 1.5σ` | Same gate fires per-bar (counted in `Backtester.leadership_biased`); applied only when the regime would otherwise have been SIDEWAYS to keep the legacy bullish/bearish paths unchanged |
+
+**Enabling**: pass `use_macro_signals=True` to `Backtester(...)`. Default is `False` to keep the existing test suite green; the Streamlit UI default-enables for interactive runs.
+
+**Constants reused** (single source of truth — change once in `regime.py` / `market_data.py` / `strategy.py` and the backtester picks it up):
+
+- `LEADERSHIP_ANCHORS` (anchor map)
+- `VIX_INHIBIT_ZSCORE = 2.0`
+- `RS_ZSCORE_THRESHOLD = 1.5`
+- `LEADERSHIP_WINDOW_BARS = 21`
+- `VIX_WINDOW_BARS = 21`
+
+**Documented residual drift** (parity caveats not yet closed):
+
+1. **Bar timescale** — live z-scores fire on 5-minute bars. The backtester runs the same arithmetic on whatever bar interval `timeframe` selects; for `timeframe="1Day"` the gates compare daily return diffs (directionally aligned with the live signal but at a different timescale). For true 5-min parity, use `timeframe="5Min"` (yfinance caps this at the last ~30 days).
+2. **Open-bar skip** — the live `MarketDataProvider` drops the first 2 bars after the 9:30 ET open to suppress the open-print spike. The backtester does not currently re-implement this trim per session day; rolling z-scores on intraday data therefore include those bars. Impact: marginally higher stdev → slightly conservative z-scores (gate fires less, not more, vs live).
+3. **Anchor data source** — live agent fetches from Alpaca; backtester fetches from yfinance. Close-vs-close they align within fractions of a basis point on liquid ETFs, but corporate-action edge cases differ.
+
 ---
 
 ## Signal Journal Format (`signals.jsonl`)

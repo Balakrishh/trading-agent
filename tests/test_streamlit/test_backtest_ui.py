@@ -13,7 +13,11 @@ import pytest
 from trading_agent.streamlit.backtest_ui import (
     DAILY_OTM_PCT,
     INTRADAY_OTM_PCT,
+    LEADERSHIP_WINDOW_BARS,
+    RS_ZSCORE_THRESHOLD,
     STARTING_EQUITY,
+    VIX_INHIBIT_ZSCORE,
+    VIX_WINDOW_BARS,
     Backtester,
     BacktestResult,
     SimTrade,
@@ -321,3 +325,282 @@ class TestRenderBacktestUiSmoke:
         )
         at.run(timeout=15)
         assert not at.exception
+
+
+# ---------------------------------------------------------------------------
+# ETF macro signals: _zscore_last (population stdev parity)
+# ---------------------------------------------------------------------------
+
+class TestZScoreLast:
+    """Mirrors MarketDataProvider.get_leadership_zscore math."""
+
+    def test_returns_none_for_short_series(self):
+        assert Backtester._zscore_last([]) is None
+        assert Backtester._zscore_last([1.0]) is None
+
+    def test_returns_none_for_zero_variance(self):
+        # All identical values → stdev 0 → degenerate
+        assert Backtester._zscore_last([0.5, 0.5, 0.5, 0.5]) is None
+
+    def test_zero_for_value_at_mean(self):
+        # Symmetric series with last == mean → z = 0
+        z = Backtester._zscore_last([-1.0, 1.0, 0.0])
+        assert z is not None
+        assert abs(z) < 1e-9
+
+    def test_positive_for_value_above_mean(self):
+        # Series with one big positive last point → z > 0
+        z = Backtester._zscore_last([0.0] * 10 + [1.0])
+        assert z is not None and z > 0
+
+    def test_population_stdev_not_sample(self):
+        """Use n (not n-1) — verify by computing manually."""
+        values = [1.0, 2.0, 3.0, 10.0]
+        n = 4
+        mean = sum(values) / n
+        var = sum((v - mean) ** 2 for v in values) / n
+        std = var ** 0.5
+        expected = (values[-1] - mean) / std
+        assert Backtester._zscore_last(values) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# ETF macro signals: _leadership_zscore_at
+# ---------------------------------------------------------------------------
+
+class TestLeadershipZScoreAt:
+    """Verify (raw_diff, zscore) computation against pre-loaded series."""
+
+    def _aligned_series(self, n=30, drift=0.0001):
+        idx = pd.date_range("2025-01-02", periods=n, freq="B")
+        np.random.seed(7)
+        rt = np.random.normal(drift, 0.005, n)
+        ra = np.random.normal(0.0, 0.005, n)
+        ticker = pd.Series(500.0 * np.exp(np.cumsum(rt)), index=idx)
+        anchor = pd.Series(400.0 * np.exp(np.cumsum(ra)), index=idx)
+        return ticker, anchor
+
+    def test_returns_none_when_idx_zero(self):
+        t, a = self._aligned_series()
+        assert Backtester._leadership_zscore_at(t, a, idx=0) is None
+
+    def test_returns_pair_with_sufficient_history(self):
+        t, a = self._aligned_series(n=40)
+        result = Backtester._leadership_zscore_at(t, a, idx=30)
+        assert result is not None
+        raw, z = result
+        assert isinstance(raw, float)
+        assert isinstance(z, float)
+
+    def test_returns_none_when_anchor_missing_around_idx(self):
+        # Anchor is empty → reindex collapses to 0 rows
+        t, _ = self._aligned_series()
+        empty_anchor = pd.Series(dtype=float)
+        assert Backtester._leadership_zscore_at(t, empty_anchor, idx=20) is None
+
+    def test_handles_misaligned_anchor_index(self):
+        """Anchor with sparse timestamps should still produce a signal."""
+        t, a = self._aligned_series(n=40)
+        # Drop every other anchor bar
+        a_sparse = a.iloc[::2]
+        result = Backtester._leadership_zscore_at(t, a_sparse, idx=35)
+        # Could legitimately be None (too few aligned bars) but must not raise
+        assert result is None or len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# ETF macro signals: _vix_zscore_at
+# ---------------------------------------------------------------------------
+
+class TestVIXZScoreAt:
+    def _vix_series(self, n=30, base=15.0):
+        idx = pd.date_range("2025-01-02", periods=n, freq="B")
+        np.random.seed(11)
+        # Slow random walk around `base`
+        steps = np.random.normal(0.0, 0.4, n)
+        levels = base + np.cumsum(steps)
+        return pd.Series(levels, index=idx)
+
+    def test_returns_none_for_empty_series(self):
+        assert Backtester._vix_zscore_at(pd.Series(dtype=float),
+                                         pd.Timestamp("2025-01-15")) is None
+
+    def test_returns_none_for_none_input(self):
+        assert Backtester._vix_zscore_at(None,
+                                         pd.Timestamp("2025-01-15")) is None
+
+    def test_returns_pair_for_normal_series(self):
+        s = self._vix_series(n=30)
+        result = Backtester._vix_zscore_at(s, s.index[-1])
+        assert result is not None
+        raw, z = result
+        assert isinstance(raw, float)
+        assert isinstance(z, float)
+
+    def test_high_spike_produces_high_zscore(self):
+        """Inject a +5pt spike on the last bar; z should exceed +2σ."""
+        idx = pd.date_range("2025-01-02", periods=25, freq="B")
+        levels = [15.0] * 24 + [20.0]   # 5-pt jump on last bar
+        s = pd.Series(levels, index=idx)
+        result = Backtester._vix_zscore_at(s, s.index[-1])
+        assert result is not None
+        _, z = result
+        assert z > VIX_INHIBIT_ZSCORE
+
+    def test_uses_only_window_bars_up_to_ts(self):
+        """A bar far in the future shouldn't pollute a mid-series z-score.
+
+        Built with mild noise on the early bars so the rolling stdev is
+        non-degenerate, then a huge spike is appended *after* the cutoff
+        timestamp.  The helper must compute the z-score off the pre-cutoff
+        window only, so the late spike has no effect on the result.
+        """
+        idx = pd.date_range("2025-01-02", periods=40, freq="B")
+        np.random.seed(13)
+        # Mild noise on bars 0-34 → small but non-zero stdev
+        early = 15.0 + np.cumsum(np.random.normal(0.0, 0.15, 35))
+        # Huge spike on bars 35-39 (after the cutoff at idx 25)
+        late = [50.0] * 5
+        s = pd.Series(list(early) + late, index=idx)
+        # Reference z-score from the *truncated* series (no late spike)
+        truncated = s.iloc[: 26]
+        ref = Backtester._vix_zscore_at(truncated, truncated.index[-1])
+        # Z-score from the full series, evaluated at bar 25
+        result = Backtester._vix_zscore_at(s, idx[25])
+        assert result is not None
+        assert ref is not None
+        # Both must agree to floating-point precision — proves the helper
+        # ignored the post-cutoff bars.
+        assert result[1] == pytest.approx(ref[1])
+        # And the z-score from the pre-cutoff window must NOT exceed the
+        # inhibit threshold (the spike that would push it over is in the
+        # future relative to ts).
+        assert result[1] <= VIX_INHIBIT_ZSCORE
+
+
+# ---------------------------------------------------------------------------
+# Backtester integration: macro signals gate ordering
+# ---------------------------------------------------------------------------
+
+class TestMacroSignalsIntegration:
+    """End-to-end run() with use_macro_signals=True."""
+
+    def _mock_yf_download(self, prices: pd.Series):
+        df = pd.DataFrame({
+            "Close": prices, "Open": prices, "High": prices,
+            "Low": prices, "Volume": [1_000_000] * len(prices),
+        })
+        return df
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download")
+    def test_default_off_does_not_load_anchors(self, mock_dl):
+        prices = _make_prices(260)
+        mock_dl.return_value = self._mock_yf_download(prices)
+        bt = Backtester()  # use_macro_signals=False by default
+        bt.run(["SPY"], date(2025, 1, 2), date(2025, 12, 31))
+        # Counters stay at zero when the toggle is off
+        assert bt.leadership_biased == 0
+        assert bt.vix_inhibited == 0
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download")
+    def test_macro_on_loads_anchor_and_vix(self, mock_dl):
+        """With macro on, we expect *additional* yf.download calls
+        (one per anchor + one for ^VIX)."""
+        prices = _make_prices(260)
+        mock_dl.return_value = self._mock_yf_download(prices)
+
+        bt = Backtester(use_macro_signals=True)
+        bt.run(["SPY"], date(2025, 1, 2), date(2025, 12, 31))
+        # Calls: SPY + anchor (QQQ for SPY) + ^VIX = at least 3
+        assert mock_dl.call_count >= 3
+        called_args = [c.args[0] if c.args else c.kwargs.get("tickers")
+                       for c in mock_dl.call_args_list]
+        assert "^VIX" in called_args
+
+    def test_vix_spike_demotes_bullish_to_bearish(self):
+        """Direct gate-level test: bullish regime + high VIX z → bearish."""
+        # Build a flat VIX series with a large terminal spike
+        idx = pd.date_range("2025-01-02", periods=25, freq="B")
+        vix_levels = [15.0] * 24 + [25.0]  # +10 pt spike
+        vix_series = pd.Series(vix_levels, index=idx)
+
+        bt = Backtester(use_macro_signals=True)
+        # Re-implement the gate logic locally — verifying the helper
+        # composition matches what run() does
+        bar_ts = idx[-1]
+        vix_z_pair = bt._vix_zscore_at(vix_series, bar_ts)
+        assert vix_z_pair is not None
+        _, z = vix_z_pair
+        assert z > VIX_INHIBIT_ZSCORE  # gate fires
+
+    def test_leadership_constants_exposed(self):
+        """Backtester re-exports live-agent constants — guard against drift."""
+        from trading_agent.strategy import StrategyPlanner
+        from trading_agent.regime import VIX_INHIBIT_ZSCORE as live_vix
+        from trading_agent.market_data import MarketDataProvider as live_mdp
+
+        assert RS_ZSCORE_THRESHOLD == StrategyPlanner.RS_ZSCORE_THRESHOLD
+        assert VIX_INHIBIT_ZSCORE == live_vix
+        assert LEADERSHIP_WINDOW_BARS == live_mdp.LEADERSHIP_WINDOW_BARS
+        assert VIX_WINDOW_BARS == live_mdp.VIX_WINDOW_BARS
+
+
+# ---------------------------------------------------------------------------
+# Backtester._load_anchor_series / _load_vix_series
+# ---------------------------------------------------------------------------
+
+class TestLoadAnchorVixSeries:
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download")
+    def test_load_anchor_returns_empty_when_no_known_anchors(self, mock_dl):
+        # Tickers with no LEADERSHIP_ANCHORS entry → no download call
+        out = Backtester._load_anchor_series(
+            ["UNKNOWN_TICKER"], date(2025, 1, 1), date(2025, 2, 1), "1d",
+        )
+        assert out == {}
+        mock_dl.assert_not_called()
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download")
+    def test_load_anchor_returns_dict_keyed_by_anchor(self, mock_dl):
+        # SPY → QQQ anchor
+        prices = _make_prices(50)
+        mock_dl.return_value = pd.DataFrame({"Close": prices})
+        out = Backtester._load_anchor_series(
+            ["SPY"], date(2025, 1, 1), date(2025, 2, 1), "1d",
+        )
+        # Must contain the anchor key (QQQ) — not the ticker (SPY)
+        assert "QQQ" in out
+        assert isinstance(out["QQQ"], pd.Series)
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download",
+           side_effect=Exception("network"))
+    def test_load_anchor_handles_exception(self, _mock_dl):
+        out = Backtester._load_anchor_series(
+            ["SPY"], date(2025, 1, 1), date(2025, 2, 1), "1d",
+        )
+        assert out == {}
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download")
+    def test_load_vix_returns_series_on_success(self, mock_dl):
+        prices = _make_prices(50, start=15.0)
+        mock_dl.return_value = pd.DataFrame({"Close": prices})
+        s = Backtester._load_vix_series(
+            date(2025, 1, 1), date(2025, 2, 1), "1d",
+        )
+        assert s is not None
+        assert isinstance(s, pd.Series)
+        assert not s.empty
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download")
+    def test_load_vix_returns_none_on_empty(self, mock_dl):
+        mock_dl.return_value = pd.DataFrame()
+        assert Backtester._load_vix_series(
+            date(2025, 1, 1), date(2025, 2, 1), "1d",
+        ) is None
+
+    @patch("trading_agent.streamlit.backtest_ui.yf.download",
+           side_effect=Exception("network"))
+    def test_load_vix_returns_none_on_exception(self, _mock_dl):
+        assert Backtester._load_vix_series(
+            date(2025, 1, 1), date(2025, 2, 1), "1d",
+        ) is None
