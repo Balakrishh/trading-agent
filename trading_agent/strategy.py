@@ -97,9 +97,18 @@ class StrategyPlanner:
     # Minimum relative strength differential (vs SPY or QQQ) to trigger bias
     RS_THRESHOLD = 0.001   # 0.1% outperformance in 5-min window
 
-    SPREAD_WIDTH = 5.0          # standardised width — controls buying-power usage
-    TARGET_DTE = 45             # bias toward upper DTE range to reduce gamma risk
-    DTE_RANGE = (35, 50)        # tightened window; upper bound slows gamma impact
+    # Legacy fixed width — retained as a floor; the active width is now
+    # computed per-underlying by ``_pick_spread_width`` below.  At spot=$200
+    # this floor matches the legacy behavior; at spot=$700 (SPY/QQQ) the
+    # adaptive width takes over and produces ~$15-20 wide spreads, which
+    # is what's needed to clear the 1/3-of-width credit target on a
+    # 30-40 DTE 0.20-delta short put.
+    SPREAD_WIDTH = 5.0
+    # Theta capture is concentrated in the 25-40 DTE band; the prior
+    # 45 DTE / (35,50) range was too far out, leaving credits thin and
+    # forcing the credit/width gate into perpetual fail mode.
+    TARGET_DTE = 35
+    DTE_RANGE = (28, 45)
     # Delta targeting window for the short leg: maximises POP while capping risk.
     # Lowered from 0.20 to 0.15 to preserve a meaningful sweet-spot range when
     # max_delta is 0.20 (default). With MIN_DELTA == max_delta the band would
@@ -366,14 +375,68 @@ class StrategyPlanner:
                      abs(fallback[0]["delta"]))
         return fallback[0]
 
+    @staticmethod
+    def _strike_grid_step(contracts: List[Dict]) -> float:
+        """
+        Infer the strike-grid step size from the chain by taking the
+        modal gap between consecutive sorted strikes.
+
+        SPY/QQQ trade on a $5 grid for far-dated expirations and a $1
+        grid near the money; this returns whichever is dominant.  For
+        IWM and most equities the grid is $1 or $2.50.  Returns 1.0 as
+        a conservative floor if the chain is too thin to infer a grid.
+        """
+        strikes = sorted({float(c["strike"]) for c in contracts if c.get("strike")})
+        if len(strikes) < 3:
+            return 1.0
+        gaps: Dict[float, int] = {}
+        for a, b in zip(strikes, strikes[1:]):
+            gap = round(b - a, 2)
+            if gap > 0:
+                gaps[gap] = gaps.get(gap, 0) + 1
+        if not gaps:
+            return 1.0
+        # Modal gap (most common spacing).
+        return max(gaps, key=lambda g: gaps[g])
+
+    def _pick_spread_width(self, contracts: List[Dict],
+                           sold_strike: float) -> float:
+        """
+        Compute an adaptive spread width that scales with spot, the
+        underlying's strike grid, and the legacy floor.
+
+        Three constraints, take the maximum:
+          1. ``SPREAD_WIDTH`` (legacy floor — never go narrower than this)
+          2. ``3 × strike_grid_step``  (span at least 3 strikes so the
+             two legs aren't priced almost identically)
+          3. ``2.5% × spot``  (roughly the move size that makes the
+             1/3-of-width credit math work at 25-40 DTE / 0.20 delta)
+
+        The result is then snapped UP to the strike grid so a contract
+        actually exists at that distance.
+        """
+        grid = self._strike_grid_step(contracts)
+        # Use the sold-leg strike as the spot proxy — it's the closest
+        # we have without re-piping the underlying price down here, and
+        # for a 0.20-delta short the strike is within ~2 σ of spot.
+        spot_proxy = sold_strike
+        # Hold-strikes-far-apart constraint
+        candidate = max(self.SPREAD_WIDTH, 3 * grid, 0.025 * spot_proxy)
+        # Snap UP to the grid so a real strike sits at this distance
+        snapped = grid * max(1, int(round(candidate / grid + 0.4999)))
+        return float(snapped)
+
     def _find_bought_strike(self, contracts: List[Dict],
                             sold_strike: float,
                             direction: str) -> Optional[Dict]:
         """
-        Find the protective leg ~SPREAD_WIDTH away in the right direction.
+        Find the protective leg an adaptive width away in the right
+        direction.  Width is computed by :meth:`_pick_spread_width`
+        based on the chain's strike grid and the sold-leg strike.
         """
-        target = (sold_strike - self.SPREAD_WIDTH if direction == "lower"
-                  else sold_strike + self.SPREAD_WIDTH)
+        width = self._pick_spread_width(contracts, sold_strike)
+        target = (sold_strike - width if direction == "lower"
+                  else sold_strike + width)
 
         candidates = sorted(contracts, key=lambda c: abs(c["strike"] - target))
         for c in candidates:

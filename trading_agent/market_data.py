@@ -19,7 +19,9 @@ option snapshots from the Alpaca Market Data API.
    tickers in a single Alpaca API call instead of N separate calls.
 """
 
+import json
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -47,6 +49,15 @@ INTRADAY_RETURN_TTL = 60        # 1 minute — 5-min bar return; long enough to
 
 # Max workers for parallel historical fetches
 _MAX_PREFETCH_WORKERS = 5
+
+
+def _truncate_json(obj: object, limit: int = 400) -> str:
+    """Compact, length-capped JSON repr for log lines — diagnostic only."""
+    try:
+        text = json.dumps(obj, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        text = repr(obj)
+    return text if len(text) <= limit else text[:limit] + f"…(+{len(text)-limit}ch)"
 
 
 class InsufficientDataError(ValueError):
@@ -205,12 +216,19 @@ class MarketDataProvider:
         API call and populate the snapshot cache.
 
         Returns a dict of {ticker: price}.
+
+        ``feed`` is read from the ``ALPACA_STOCKS_FEED`` env var
+        (default ``iex``).  Free/basic accounts cannot read SIP and the
+        endpoint silently returns 403 without an explicit feed; IEX is
+        the correct free-tier choice.  Operators on a paid SIP plan can
+        override via the env var.
         """
         if not tickers:
             return {}
 
         url = f"{self.alpaca_data_url}/stocks/snapshots"
-        params = {"symbols": ",".join(tickers)}
+        feed = os.getenv("ALPACA_STOCKS_FEED", "iex").strip() or "iex"
+        params = {"symbols": ",".join(tickers), "feed": feed}
         now = time.monotonic()
 
         try:
@@ -253,7 +271,8 @@ class MarketDataProvider:
                 return cached_price
 
         url = f"{self.alpaca_data_url}/stocks/snapshots"
-        params = {"symbols": ticker}
+        feed = os.getenv("ALPACA_STOCKS_FEED", "iex").strip() or "iex"
+        params = {"symbols": ticker, "feed": feed}
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
                                 params=params, timeout=10)
@@ -383,6 +402,25 @@ class MarketDataProvider:
         """
         Fetch option chain snapshot from Alpaca (cached OPTION_CHAIN_TTL s).
         Returns a list of option contract dicts with Greeks.
+
+        Notes
+        -----
+        * ``limit`` is raised to 1000 (Alpaca's max) so wide SPY/QQQ chains
+          aren't truncated to 100 — which would drop the OTM wings where
+          the 0.15-0.20 delta target sits.
+        * ``feed`` is set explicitly. Free/basic accounts must use
+          ``indicative`` or the endpoint silently returns an empty
+          snapshots dict. Accounts with the OPRA real-time subscription
+          can override via the ``ALPACA_OPTIONS_FEED`` env var.
+        * If the exact ``expiration_date`` yields zero contracts, the
+          request is retried with ``expiration_date_gte``/``_lte`` set
+          to the same date. Some Alpaca endpoint revisions treat these
+          filters more leniently than the exact-match ``expiration_date``
+          (e.g. off-by-one around weekly settlement conventions).
+        * When the chain is empty, the raw response body and the
+          effective URL are logged at WARNING so the operator can see
+          whether the endpoint returned ``snapshots: {}`` (data-plan
+          issue), ``snapshots: null``, or something entirely different.
         """
         cache_key = f"{underlying}_{expiration_date}_{option_type}"
         now = time.monotonic()
@@ -395,46 +433,151 @@ class MarketDataProvider:
 
         url = (f"https://data.alpaca.markets/v1beta1"
                f"/options/snapshots/{underlying}")
-        params = {
+        feed = os.getenv("ALPACA_OPTIONS_FEED", "indicative").strip() or "indicative"
+        base_params = {
             "type": option_type,
-            "expiration_date": expiration_date,
-            "limit": 100,
+            "feed": feed,
+            "limit": 1000,
         }
-        logger.info("Fetching %s option chain for %s exp %s",
-                     option_type, underlying, expiration_date)
-        try:
-            resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            snapshots = data.get("snapshots", {})
-            contracts = []
-            for symbol, snap in snapshots.items():
-                greeks = snap.get("greeks", {})
-                quote = snap.get("latestQuote", {})
-                contracts.append({
+        logger.info("Fetching %s option chain for %s exp %s (feed=%s)",
+                     option_type, underlying, expiration_date, feed)
+
+        def _parse_snapshots(snapshots: Dict) -> List[Dict]:
+            parsed: List[Dict] = []
+            for symbol, snap in (snapshots or {}).items():
+                if not isinstance(snap, dict):
+                    continue
+                greeks = snap.get("greeks") or {}
+                quote = snap.get("latestQuote") or {}
+                bid = float(quote.get("bp", 0) or 0)
+                ask = float(quote.get("ap", 0) or 0)
+                # Prefer the expiration extracted from the OCC symbol so
+                # fallback-retry paths (where the effective expiration
+                # may not equal ``expiration_date``) still stamp the real
+                # listed date on the contract dict.
+                sym_exp = self._extract_expiration(symbol) or expiration_date
+                parsed.append({
                     "symbol": symbol,
-                    "bid": quote.get("bp", 0),
-                    "ask": quote.get("ap", 0),
-                    "mid": round(
-                        (quote.get("bp", 0) + quote.get("ap", 0)) / 2, 2),
-                    "delta": greeks.get("delta", 0),
-                    "theta": greeks.get("theta", 0),
-                    "vega": greeks.get("vega", 0),
-                    "gamma": greeks.get("gamma", 0),
-                    "iv": greeks.get("impliedVolatility", 0),
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": round((bid + ask) / 2, 4),
+                    "delta": float(greeks.get("delta", 0) or 0),
+                    "theta": float(greeks.get("theta", 0) or 0),
+                    "vega": float(greeks.get("vega", 0) or 0),
+                    "gamma": float(greeks.get("gamma", 0) or 0),
+                    "iv": float(greeks.get("impliedVolatility", 0) or 0),
                     "strike": self._extract_strike(symbol),
-                    "expiration": expiration_date,
+                    "expiration": sym_exp,
                     "type": option_type,
                 })
-            logger.info("Received %d %s contracts for %s",
-                        len(contracts), option_type, underlying)
-            if contracts:   # never cache empty results — allow a fresh retry
-                self._option_cache[cache_key] = (contracts, time.monotonic())
-            return contracts
-        except requests.RequestException as exc:
-            logger.error("Alpaca option chain request failed: %s", exc)
+            return parsed
+
+        def _request(extra_params: Dict) -> Tuple[Optional[List[Dict]], Optional[Dict], Optional[str]]:
+            """Single GET, returns (contracts, raw_body, effective_url)."""
+            params = {**base_params, **extra_params}
+            try:
+                resp = requests.get(url, headers=self._alpaca_headers(),
+                                    params=params, timeout=15)
+                resp.raise_for_status()
+                data = resp.json() if resp.content else {}
+                snaps = data.get("snapshots") if isinstance(data, dict) else None
+                parsed = _parse_snapshots(snaps or {})
+                return parsed, data, resp.url
+            except requests.RequestException as exc:
+                logger.error("Alpaca option chain request failed: %s", exc)
+                return None, None, None
+
+        # Primary: exact expiration_date match
+        contracts, body, effective_url = _request(
+            {"expiration_date": expiration_date}
+        )
+
+        # Fallback: same day via _gte/_lte window
+        if contracts == [] and body is not None:
+            logger.warning(
+                "[%s] exact expiration_date=%s returned 0 %s snapshots; "
+                "retrying with _gte/_lte window. Raw body (truncated): %s",
+                underlying, expiration_date, option_type,
+                _truncate_json(body),
+            )
+            retry_contracts, retry_body, retry_url = _request({
+                "expiration_date_gte": expiration_date,
+                "expiration_date_lte": expiration_date,
+            })
+            if retry_contracts:
+                logger.info(
+                    "[%s] _gte/_lte retry recovered %d %s contracts "
+                    "(effective_url=%s)",
+                    underlying, len(retry_contracts), option_type, retry_url,
+                )
+                contracts = retry_contracts
+            elif retry_contracts == [] and retry_body is not None:
+                logger.warning(
+                    "[%s] _gte/_lte retry also empty. effective_url=%s body=%s",
+                    underlying, retry_url, _truncate_json(retry_body),
+                )
+
+        # Final fallback: ask the contracts catalogue what's actually
+        # listed near the target date, then refetch the snapshot using
+        # the nearest real expiration.  This saves us when the indicative
+        # feed doesn't publish some weekly expirations even though they
+        # exist — a case we've hit empirically on free-tier accounts.
+        if contracts == []:
+            alt_exp = self._nearest_listed_expiration(
+                underlying, expiration_date, option_type
+            )
+            if alt_exp and alt_exp != expiration_date:
+                logger.warning(
+                    "[%s] Requested expiration %s not available in %s feed; "
+                    "swapping to nearest listed expiration %s",
+                    underlying, expiration_date, feed, alt_exp,
+                )
+                alt_contracts, _alt_body, alt_url = _request(
+                    {"expiration_date": alt_exp}
+                )
+                if alt_contracts:
+                    logger.info(
+                        "[%s] Catalog fallback recovered %d %s contracts "
+                        "at %s (effective_url=%s)",
+                        underlying, len(alt_contracts), option_type,
+                        alt_exp, alt_url,
+                    )
+                    # Stamp every dict with the effective expiration so
+                    # downstream risk-check / assemble logic references
+                    # the actual listed date, not the originally-requested
+                    # (unavailable) one.
+                    for c in alt_contracts:
+                        c["expiration"] = (
+                            self._extract_expiration(c["symbol"]) or alt_exp
+                        )
+                    contracts = alt_contracts
+                else:
+                    logger.warning(
+                        "[%s] Catalog fallback: listed expiration %s also "
+                        "returned no snapshots (feed=%s).",
+                        underlying, alt_exp, feed,
+                    )
+
+        if contracts is None:
             return None
+
+        logger.info("Received %d %s contracts for %s",
+                    len(contracts), option_type, underlying)
+
+        if not contracts and effective_url:
+            logger.warning(
+                "[%s] Empty option chain from Alpaca. "
+                "effective_url=%s — check (a) account has options data "
+                "entitlement, (b) expiration_date is a real listed "
+                "expiration, (c) ALPACA_OPTIONS_FEED env var "
+                "(current=%s) matches your subscription (free→indicative, "
+                "paid→opra).",
+                underlying, effective_url, feed,
+            )
+
+        if contracts:   # never cache empty results — allow a fresh retry
+            self._option_cache[cache_key] = (contracts, time.monotonic())
+        return contracts
 
     @staticmethod
     def _extract_strike(option_symbol: str) -> float:
@@ -443,6 +586,105 @@ class MarketDataProvider:
             return int(option_symbol[-8:]) / 1000.0
         except (ValueError, IndexError):
             return 0.0
+
+    @staticmethod
+    def _extract_expiration(option_symbol: str) -> Optional[str]:
+        """
+        Extract the expiration date from an OCC option symbol.
+
+        OCC format is ``ROOT + YYMMDD + C/P + STRIKE*1000`` (21 chars
+        total for common equity options).  The 6-char date lives at
+        positions ``[-15:-9]``.  Returns an ISO ``YYYY-MM-DD`` string or
+        ``None`` if parsing fails.
+        """
+        try:
+            yymmdd = option_symbol[-15:-9]
+            yy, mm, dd = int(yymmdd[:2]), int(yymmdd[2:4]), int(yymmdd[4:6])
+            # 2-digit year → assume 2000-2099 window (fine until 2100).
+            return f"20{yy:02d}-{mm:02d}-{dd:02d}"
+        except (ValueError, IndexError):
+            return None
+
+    def _nearest_listed_expiration(
+        self, underlying: str, target_date: str, option_type: str = "put",
+    ) -> Optional[str]:
+        """
+        Query Alpaca's ``/v2/options/contracts`` catalog and return the
+        listed expiration nearest to ``target_date``.
+
+        Falls back gracefully to ``None`` on any error — callers should
+        treat ``None`` as "no alternative found, keep original behavior".
+
+        This endpoint is on the trading tier, not the market-data tier,
+        so it works on free/basic accounts even when the snapshot
+        endpoint's ``indicative`` feed is sparse.
+        """
+        try:
+            target = datetime.strptime(target_date, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return None
+
+        # ±14-day window around the requested expiration captures weekly
+        # and monthly neighbours without pulling the whole catalogue.
+        lo = (target - timedelta(days=14)).isoformat()
+        hi = (target + timedelta(days=14)).isoformat()
+        url = f"{self.alpaca_base_url}/options/contracts"
+        params = {
+            "underlying_symbols": underlying,
+            "expiration_date_gte": lo,
+            "expiration_date_lte": hi,
+            "status": "active",
+            "type": option_type,
+            "limit": 10000,
+        }
+        try:
+            resp = requests.get(url, headers=self._alpaca_headers(),
+                                params=params, timeout=15)
+            resp.raise_for_status()
+            body = resp.json() or {}
+        except requests.RequestException as exc:
+            logger.warning(
+                "[%s] Options catalog lookup failed (%s..%s): %s",
+                underlying, lo, hi, exc,
+            )
+            return None
+
+        listed = set()
+        for c in (body.get("option_contracts") or []):
+            exp = c.get("expiration_date")
+            if exp:
+                listed.add(exp)
+        if not listed:
+            logger.warning(
+                "[%s] Options catalog returned no active contracts "
+                "in %s..%s — check underlying_symbols filter.",
+                underlying, lo, hi,
+            )
+            return None
+
+        best: Optional[str] = None
+        best_diff = 10**9
+        for exp in listed:
+            try:
+                d = datetime.strptime(exp, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if d < target:                     # prefer ≥ target, fallback to closest
+                diff = (target - d).days + 1000
+            else:
+                diff = (d - target).days
+            if diff < best_diff:
+                best_diff = diff
+                best = exp
+        if best:
+            logger.info(
+                "[%s] Catalog lookup: %d listed expirations in %s..%s "
+                "(sample: %s); nearest to %s = %s",
+                underlying, len(listed), lo, hi,
+                ",".join(sorted(listed)[:6]) + ("…" if len(listed) > 6 else ""),
+                target_date, best,
+            )
+        return best
 
     def fetch_option_quotes(self, symbols: List[str]) -> Dict[str, Dict]:
         """
@@ -462,12 +704,13 @@ class MarketDataProvider:
             return {}
 
         url = "https://data.alpaca.markets/v1beta1/options/snapshots"
-        params = {"symbols": ",".join(symbols)}
+        feed = os.getenv("ALPACA_OPTIONS_FEED", "indicative").strip() or "indicative"
+        params = {"symbols": ",".join(symbols), "feed": feed}
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
                                 params=params, timeout=10)
             resp.raise_for_status()
-            snapshots = resp.json().get("snapshots", {})
+            snapshots = resp.json().get("snapshots", {}) or {}
             quotes = {}
             for sym, snap in snapshots.items():
                 q = snap.get("latestQuote", {})
@@ -494,7 +737,8 @@ class MarketDataProvider:
         bid/ask spread is below the configured threshold.
         """
         url = f"{self.alpaca_data_url}/stocks/snapshots"
-        params = {"symbols": ticker}
+        feed = os.getenv("ALPACA_STOCKS_FEED", "iex").strip() or "iex"
+        params = {"symbols": ticker, "feed": feed}
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
                                 params=params, timeout=10)
@@ -568,10 +812,15 @@ class MarketDataProvider:
                 return cached_ret
 
         url = f"{self.alpaca_data_url}/stocks/{ticker}/bars"
+        feed = os.getenv("ALPACA_STOCKS_FEED", "iex").strip() or "iex"
         params = {
             "timeframe": "5Min",
             "limit": 2,
             "adjustment": "raw",
+            # Free/basic Alpaca subscriptions cannot read SIP — they get
+            # 403 on stock bars without an explicit feed. IEX is the
+            # correct free-tier choice; paid SIP users override via env.
+            "feed": feed,
             # Restrict to completed bars only — see _last_completed_5min_end
             "end": self._last_completed_5min_end(),
         }

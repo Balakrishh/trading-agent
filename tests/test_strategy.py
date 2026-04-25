@@ -101,16 +101,19 @@ class TestPickExpiration:
         assert lo <= dte <= hi, f"DTE={dte} is outside range {lo}-{hi}"
 
     def test_both_valid_fridays_picks_further_one(self):
-        """When both adjacent Fridays are within DTE_RANGE, pick the further one
-        (higher DTE = less gamma risk) — capital retainment DTE bias update."""
+        """When multiple adjacent Fridays are within DTE_RANGE, pick the
+        highest-DTE one (more theta runway, less gamma risk near expiry).
+        Reflects the post-patch defaults: TARGET_DTE=35, DTE_RANGE=(28,45).
+        """
         from datetime import datetime, date
         from unittest.mock import patch
 
         planner = self._planner()
-        # fake_today = April 2, 2026 → TARGET_DTE=45 → target = May 17 (Sunday)
-        # next_friday = May 22 (DTE=50, at max boundary) — VALID
-        # prev_friday = May 15 (DTE=43)                 — VALID
-        # Both in DTE_RANGE (35, 50) → prefer further = May 22
+        # fake_today = April 2, 2026 (Thu) → TARGET_DTE=35 → target = May 7 (Thu)
+        # this_friday = May 8  (DTE=36) — VALID
+        # next_friday = May 15 (DTE=43) — VALID
+        # prev_friday = May 1  (DTE=29) — VALID
+        # All three in DTE_RANGE (28, 45) → pick max DTE = May 15
         fake_today = date(2026, 4, 2)
         with patch("trading_agent.strategy.datetime") as mock_dt:
             mock_dt.now.return_value.date.return_value = fake_today
@@ -118,8 +121,8 @@ class TestPickExpiration:
 
         exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
         assert exp_date.weekday() == 4, "Expiry must be a Friday"
-        assert exp_date == date(2026, 5, 22), "Should prefer the higher-DTE Friday"
-        assert (exp_date - fake_today).days == 50  # exactly at DTE_RANGE upper bound
+        assert exp_date == date(2026, 5, 15), "Should prefer the higher-DTE Friday"
+        assert (exp_date - fake_today).days == 43  # within DTE_RANGE upper bound
 
     def test_only_prev_friday_valid_picks_prev(self):
         """When next_friday exceeds max DTE, fall back to prev_friday."""
@@ -256,6 +259,95 @@ class TestRelativeStrengthBias:
         )
         plan = planner.plan("SPY", analysis)
         assert plan.strategy_name == "Iron Condor"
+
+
+class TestStrikeGridInference:
+    """``_strike_grid_step`` infers the modal spacing of the chain so
+    the adaptive width snap-up logic always lands on a real strike."""
+
+    def _planner(self):
+        return StrategyPlanner(MagicMock(), max_delta=0.20, min_credit_ratio=0.33)
+
+    def test_dollar_grid(self):
+        chain = [{"strike": s} for s in (480, 481, 482, 483, 484, 485)]
+        assert StrategyPlanner._strike_grid_step(chain) == 1.0
+
+    def test_five_dollar_grid(self):
+        chain = [{"strike": s} for s in (470, 475, 480, 485, 490)]
+        assert StrategyPlanner._strike_grid_step(chain) == 5.0
+
+    def test_two_fifty_grid(self):
+        chain = [{"strike": s} for s in (100.0, 102.5, 105.0, 107.5, 110.0)]
+        assert StrategyPlanner._strike_grid_step(chain) == 2.5
+
+    def test_thin_chain_returns_floor(self):
+        """Fewer than 3 strikes → fall back to $1.00 floor (don't crash)."""
+        chain = [{"strike": 100.0}]
+        assert StrategyPlanner._strike_grid_step(chain) == 1.0
+        chain2 = [{"strike": 100.0}, {"strike": 101.0}]
+        assert StrategyPlanner._strike_grid_step(chain2) == 1.0
+
+    def test_modal_gap_when_grid_is_mixed(self):
+        """Near-the-money $1 wings + far-OTM $5 wings — pick the dominant one."""
+        # 5 single-dollar gaps, 2 five-dollar gaps → mode = 1.0
+        strikes = [100, 101, 102, 103, 104, 105, 110, 115]
+        chain = [{"strike": float(s)} for s in strikes]
+        assert StrategyPlanner._strike_grid_step(chain) == 1.0
+
+
+class TestAdaptiveSpreadWidth:
+    """``_pick_spread_width`` = max(legacy floor, 3×grid, 2.5%×spot)
+    snapped UP to the strike grid."""
+
+    def _planner(self):
+        return StrategyPlanner(MagicMock(), max_delta=0.20, min_credit_ratio=0.33)
+
+    def test_low_spot_uses_legacy_floor(self):
+        """Spot $80 on $1 grid: max($5, $3, $2) = $5 (floor wins)."""
+        planner = self._planner()
+        chain = [{"strike": float(s)} for s in range(70, 91)]   # $1 grid
+        width = planner._pick_spread_width(chain, sold_strike=80.0)
+        assert width == 5.0
+
+    def test_high_spot_scales_up(self):
+        """SPY-style: spot $700 on $5 grid: max($5, $15, $17.50) = $17.50,
+        snapped UP to $20 (next $5 strike)."""
+        planner = self._planner()
+        chain = [{"strike": float(s)} for s in range(600, 800, 5)]  # $5 grid
+        width = planner._pick_spread_width(chain, sold_strike=700.0)
+        assert width == 20.0
+
+    def test_fine_grid_drives_three_strike_minimum(self):
+        """Spot $200 on $2.50 grid: max($5, $7.50, $5) = $7.50,
+        snapped UP to $7.50 (already on grid)."""
+        planner = self._planner()
+        chain = [{"strike": float(s) / 2.0}
+                 for s in range(380, 440)]  # $0.50 grid
+        # override grid via cleaner chain
+        chain = [{"strike": float(s)} for s in
+                 [195.0, 197.5, 200.0, 202.5, 205.0, 207.5, 210.0]]
+        width = planner._pick_spread_width(chain, sold_strike=200.0)
+        # max($5, 3×2.5=$7.50, 2.5%×200=$5) = $7.50
+        assert width == 7.5
+
+    def test_width_always_snaps_to_grid(self):
+        """The returned width must be an integer multiple of the grid step
+        so a real strike sits at sold_strike ± width."""
+        planner = self._planner()
+        # $5 grid, spot 633: 2.5% × 633 = $15.83 → snap UP to $20
+        chain = [{"strike": float(s)} for s in range(550, 720, 5)]
+        width = planner._pick_spread_width(chain, sold_strike=633.0)
+        assert width % 5.0 == 0
+        assert width >= 15.0
+
+
+class TestDTEBand:
+    """Theta capture is concentrated in 25-40 DTE; the planner targets
+    a 35-DTE Friday and accepts anything in (28, 45)."""
+
+    def test_constants(self):
+        assert StrategyPlanner.TARGET_DTE == 35
+        assert StrategyPlanner.DTE_RANGE == (28, 45)
 
 
 class TestPlanSerialization:

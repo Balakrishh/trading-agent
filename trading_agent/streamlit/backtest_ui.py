@@ -4,27 +4,81 @@ backtest_ui.py — Backtesting tab.
 Provides a Backtester class that simulates credit-spread P&L on
 historical prices, then renders the results with metrics, charts,
 a sortable trade log, and CSV/JSON/Journal export.
+
+Agent-parity contract
+---------------------
+The backtester is intentionally a *subset* of the live-agent decision
+path, but every entry filter and exit rule it implements MUST use the
+same defaults and same comparison semantics as the corresponding agent
+module.  The spine of parity is:
+
+   SPREAD_WIDTH, TARGET_DTE   ← imported from strategy.StrategyPlanner
+   min_credit_ratio = 0.33    ← strategy.StrategyPlanner default
+   max_delta        = 0.20    ← strategy.StrategyPlanner default (≈80% POP)
+   max_risk_pct     = 0.02    ← risk_manager.RiskManager default
+   hard_stop × 3.0 OR stop_loss_pct × 0.50  ← position_monitor.ExitMonitor
+   EarningsCalendar lookahead = 7 days      ← sentiment_pipeline Tier-0
+   auto_adjust=False                         ← market_data.MarketDataProvider
+
+Residual drift (documented, not yet closed):
+  • Regime classification still uses home-grown SMA (drift #1 / #14).
+  • Sentiment / LLM gate absent — backtest skips the Tier-2 chain (drift #11).
+
+Toggles are **opt-in** on the Backtester class (defaults = None/False so
+existing unit tests keep passing) and default-**on** in the Streamlit UI
+so interactive runs are apples-to-apples with the live agent.
 """
 
+import collections
 import json
+import logging
+import os
+import threading
+import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import date, datetime, timedelta
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
+from scipy.stats import percentileofscore
 
+from trading_agent.config import load_config
 from trading_agent.streamlit.components import (
     drawdown_chart,
     equity_curve_chart,
     regime_bar_chart,
 )
 
+# --- Shared agent constants -------------------------------------------------
+# Import the live-agent defaults rather than re-declaring them so a future
+# change in strategy.py / risk_manager.py / position_monitor.py flows straight
+# into the backtester.  If any of these imports ever fail (e.g. the module
+# rename), we'd rather crash loudly than silently drift.
+from trading_agent.strategy import StrategyPlanner as _Planner
+
+logger = logging.getLogger(__name__)
+
+# Option chain cache TTL (seconds) - matches market_data.py
+OPTION_CHAIN_TTL = 180  # 3 minutes
+
 STARTING_EQUITY = 100_000.0
-SPREAD_WIDTH = 5.0
+SPREAD_WIDTH = _Planner.SPREAD_WIDTH                     # 5.0
 COMMISSION_ROUND_TRIP = 2.60  # 4 legs × $0.65
+
+# Agent-parity defaults (read via _Planner / hand-coded where the agent uses
+# runtime config instead of a class constant):
+AGENT_MIN_CREDIT_RATIO = 0.33       # strategy.StrategyPlanner(__init__ default)
+AGENT_MAX_DELTA        = 0.20       # strategy.StrategyPlanner(__init__ default)
+AGENT_MAX_RISK_PCT     = 0.02       # risk_manager.RiskManager(__init__ default)
+AGENT_HARD_STOP_MULT   = 3.0        # position_monitor.ExitMonitor default
+AGENT_STOP_LOSS_PCT    = 0.50       # position_monitor.ExitMonitor default
+AGENT_PROFIT_TARGET    = 0.50       # position_monitor.ExitMonitor default
+AGENT_HIGH_IV_THRESH   = 95.0       # regime.RegimeClassifier._compute_iv_rank
+AGENT_EARNINGS_LOOKAHEAD = 7        # IntelligenceConfig default
 
 DEFAULT_TICKERS = ["SPY", "QQQ", "IWM"]
 DEFAULT_START = date.today() - timedelta(days=365)   # needs 200+ bars for SMA warmup
@@ -91,12 +145,162 @@ class SimTrade:
 
 
 @dataclass
+class RejectionRecord:
+    """Per-candidate diagnostic capture when a gate rejects an entry.
+
+    The goal is to let the user answer "why was *that specific bar* on *that
+    specific ticker* rejected?" without re-running the backtest — the same
+    question you'd ask of a live-agent log line.  We cap how many records we
+    keep per gate (``REJECTION_SAMPLE_CAP`` below) so long backtests don't
+    explode memory.
+    """
+    ticker: str
+    entry_date: date
+    gate: str              # rejection reason token ("iv_rank>threshold", etc.)
+    phase: str             # pipeline phase label ("2. Event-risk gate", …)
+    price: float
+    regime: str
+    strategy: str
+    # Gate-specific measurement + threshold (both floats when meaningful,
+    # else None).  Example for iv_rank: measured=87.4, threshold=95.0
+    measured: Optional[float] = None
+    threshold: Optional[float] = None
+    # Free-form one-line explanation
+    reason: str = ""
+
+
+# Cap number of rejection records kept per gate.  Aggregate counts are
+# *always* exact; only the detailed records are subsampled.
+REJECTION_SAMPLE_CAP = 50
+
+
+@dataclass
+class PhaseFunnel:
+    """
+    Candidate-survival funnel, phase-by-phase, mirroring the live agent's
+    decision path.  Each entry is a ``(phase_label, surviving_count)`` pair.
+    """
+    considered: int = 0
+    after_earnings: int = 0
+    after_iv_rank: int = 0
+    after_max_delta: int = 0
+    after_credit_ratio: int = 0
+    after_max_risk: int = 0
+    simulated: int = 0
+    # Phase → gate skipped (e.g. "credit_ratio" skipped under σ-path).
+    skipped_phases: List[str] = field(default_factory=list)
+
+    def as_rows(self) -> List[Dict]:
+        """Serialize as ordered rows for the UI funnel table."""
+        rows = [
+            ("1. Candidates considered",     self.considered),
+            ("2. After earnings gate",       self.after_earnings),
+            ("3. After IV-rank gate",        self.after_iv_rank),
+            ("4. After max-Δ gate",          self.after_max_delta),
+            ("5. After credit-ratio gate",   self.after_credit_ratio),
+            ("6. After max-risk gate",       self.after_max_risk),
+            ("7. Trades simulated",          self.simulated),
+        ]
+        out = []
+        prev = None
+        for label, count in rows:
+            dropped = None if prev is None else max(0, prev - count)
+            out.append({"phase": label, "surviving": count, "dropped": dropped})
+            prev = count
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Alpaca rate limiter — 60-second sliding-window token bucket
+# ---------------------------------------------------------------------------
+#
+# Alpaca Market Data API caps standard accounts at **200 req/min** (per
+# account, shared across endpoints).  Without a limiter, a multi-ticker
+# backtest blows the budget in seconds and Alpaca replies with 429.  This
+# class enforces a soft budget (default 180/min — 10 % headroom) by
+# blocking the caller until the window has a free slot.
+#
+# Module-level singleton so multiple Backtester instances (e.g. Streamlit
+# reruns during a session) share the same budget instead of each
+# independently hammering the limit.
+
+# Default soft budget.  The Alpaca docs state standard is 200 rpm;
+# override via ALPACA_MAX_RPM env var when on a higher tier.
+DEFAULT_ALPACA_MAX_RPM = 180
+
+
+class AlpacaRateLimiter:
+    """
+    Sliding-window rate limiter: keeps timestamps of the last ``max_rpm``
+    requests inside a 60-second window and blocks ``acquire()`` callers
+    until a slot frees.  Thread-safe.
+    """
+
+    def __init__(self, max_rpm: int = DEFAULT_ALPACA_MAX_RPM):
+        self.max_rpm = max(1, int(max_rpm))
+        self._window: Deque[float] = collections.deque()
+        self._lock = threading.Lock()
+        # Diagnostics counters (read by the UI expander).
+        self.sleep_count = 0
+        self.total_sleep_s = 0.0
+        self.requests_total = 0
+
+    def set_budget(self, max_rpm: int) -> None:
+        with self._lock:
+            self.max_rpm = max(1, int(max_rpm))
+
+    def acquire(self) -> None:
+        """Block until a request slot is available in the 60-s window."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                # Drop timestamps older than 60 s.
+                while self._window and now - self._window[0] >= 60.0:
+                    self._window.popleft()
+                if len(self._window) < self.max_rpm:
+                    self._window.append(now)
+                    self.requests_total += 1
+                    return
+                # Compute the wait needed for the oldest slot to age out.
+                wait = 60.0 - (now - self._window[0]) + 0.05
+            self.sleep_count += 1
+            self.total_sleep_s += wait
+            logger.info(
+                "Alpaca rate limiter: sleeping %.2fs (budget %d/min full)",
+                wait, self.max_rpm,
+            )
+            time.sleep(max(0.05, wait))
+
+    def stats(self) -> Dict[str, float]:
+        with self._lock:
+            return {
+                "requests_total": self.requests_total,
+                "sleep_count": self.sleep_count,
+                "total_sleep_s": round(self.total_sleep_s, 2),
+                "budget_rpm": self.max_rpm,
+                "in_window": len(self._window),
+            }
+
+
+# Module-level singleton.  Env override: ALPACA_MAX_RPM=9000 for Algo
+# Trader Plus subscribers.
+_ALPACA_RATE_LIMITER = AlpacaRateLimiter(
+    max_rpm=int(os.getenv("ALPACA_MAX_RPM", str(DEFAULT_ALPACA_MAX_RPM)))
+)
+
+
+@dataclass
 class BacktestResult:
     trades: pd.DataFrame
     equity_curve: pd.DataFrame
     metrics: Dict
     regime_stats: pd.DataFrame
     skipped: List[str] = field(default_factory=list)
+    # Decision-path diagnostics (populated by run()); default-empty so
+    # existing callers that only read trades/metrics keep working.
+    funnel: PhaseFunnel = field(default_factory=PhaseFunnel)
+    rejection_counts: Dict[str, int] = field(default_factory=dict)
+    rejection_samples: List[RejectionRecord] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +329,8 @@ class Backtester:
         starting_equity: float = STARTING_EQUITY,
         spread_width: float = SPREAD_WIDTH,
         credit_pct: float = 0.30,
-        target_dte: int = 45,
-        profit_target_pct: float = 0.50,
+        target_dte: int = _Planner.TARGET_DTE,
+        profit_target_pct: float = AGENT_PROFIT_TARGET,
         commission: float = COMMISSION_ROUND_TRIP,
         # --- New (delta-proxy / loss-cut) knobs ---
         # When ``sigma_mult`` is None the legacy fixed-% OTM path is used and
@@ -138,6 +342,31 @@ class Backtester:
         # When ``loss_cut_multiplier`` is None, breaches pay full max-loss.
         # When it is a positive float k, breaches pay only ``-k × credit``.
         loss_cut_multiplier: Optional[float] = None,
+        # --- Agent-parity gates (opt-in; default None/False to keep the
+        # existing test suite green; the Streamlit UI default-enables them
+        # so interactive runs are apples-to-apples with the live agent). ---
+        min_credit_ratio: Optional[float] = None,
+        max_delta: Optional[float] = None,
+        max_risk_pct: Optional[float] = None,
+        stop_loss_pct: Optional[float] = None,
+        use_iv_gate: bool = False,
+        iv_high_threshold: float = AGENT_HIGH_IV_THRESH,
+        use_earnings_gate: bool = False,
+        earnings_lookahead_days: int = AGENT_EARNINGS_LOOKAHEAD,
+        earnings_calendar=None,            # injectable for tests
+        # --- Option chain support (uses config if not explicitly provided) ---
+        alpaca_api_key: Optional[str] = None,
+        alpaca_secret_key: Optional[str] = None,
+        alpaca_data_url: Optional[str] = None,
+        # --- Real historical Alpaca option bars mode (30-day parity) ---
+        # When True, planning and exit use Alpaca's /options/contracts +
+        # historical /options/bars endpoints.  Only honest for dates
+        # inside Alpaca's options retention window (~30 days).  When the
+        # historical data isn't available for a given bar, that bar is
+        # skipped (counted in the funnel) rather than silently falling
+        # back to the synthetic σ-credit — the whole point of this mode
+        # is apples-to-apples live parity.
+        use_alpaca_historical: bool = False,
     ) -> None:
         self.starting_equity = starting_equity
         self.spread_width = spread_width
@@ -147,6 +376,163 @@ class Backtester:
         self.commission = commission
         self.sigma_mult = sigma_mult
         self.loss_cut_multiplier = loss_cut_multiplier
+        self.min_credit_ratio = min_credit_ratio
+        self.max_delta = max_delta
+        self.max_risk_pct = max_risk_pct
+        self.stop_loss_pct = stop_loss_pct
+        self.use_iv_gate = use_iv_gate
+        self.iv_high_threshold = iv_high_threshold
+        self.use_earnings_gate = use_earnings_gate
+        self.earnings_lookahead_days = earnings_lookahead_days
+        self._earnings_calendar = earnings_calendar
+        # Use config values if not explicitly provided
+        self._alpaca_api_key = alpaca_api_key or os.getenv("ALPACA_API_KEY", "")
+        self._alpaca_secret_key = alpaca_secret_key or os.getenv("ALPACA_SECRET_KEY", "")
+        self._alpaca_data_url = alpaca_data_url or os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets/v2")
+        self.use_alpaca_historical = bool(use_alpaca_historical)
+        # Option chain cache: {(ticker, expiry, type): (contracts, epoch)}
+        self._option_cache: Dict[Tuple[str, str, str], Tuple[List[Dict], float]] = {}
+        # Alpaca API call counters surfaced to the diagnostics expander.
+        self.alpaca_calls_made = 0
+        self.alpaca_429_hits = 0
+        self.alpaca_failures = 0
+        # Per-run rejection counters (surface to UI as skipped reasons)
+        self.rejections: Dict[str, int] = {}
+        # Per-run detailed diagnostics — filled by _record_rejection.
+        self._rejection_samples: List[RejectionRecord] = []
+        self._funnel = PhaseFunnel()
+
+    # ── Agent-parity helpers ────────────────────────────────────────────────
+
+    def _bump_rejection(self, reason: str) -> None:
+        """Legacy shim — counts only.  Prefer ``_record_rejection`` for new
+        call sites so we capture per-candidate context for the UI."""
+        self.rejections[reason] = self.rejections.get(reason, 0) + 1
+
+    def _record_rejection(
+        self,
+        *,
+        ticker: str,
+        entry_date: date,
+        gate: str,
+        phase: str,
+        price: float,
+        regime: str,
+        strategy: str,
+        measured: Optional[float] = None,
+        threshold: Optional[float] = None,
+        reason: str = "",
+    ) -> None:
+        """Record a candidate rejection with full context.
+
+        Always bumps the aggregate counter; additionally captures a
+        ``RejectionRecord`` until ``REJECTION_SAMPLE_CAP`` records have been
+        collected *for that gate*.  This keeps memory bounded on multi-year
+        backtests while still giving the user enough evidence to understand
+        why the gate fired.
+        """
+        self.rejections[gate] = self.rejections.get(gate, 0) + 1
+        # Per-gate sample cap so one chatty gate can't crowd others out
+        cap_reached = (
+            sum(1 for r in self._rejection_samples if r.gate == gate)
+            >= REJECTION_SAMPLE_CAP
+        )
+        if not cap_reached:
+            self._rejection_samples.append(RejectionRecord(
+                ticker=ticker,
+                entry_date=entry_date,
+                gate=gate,
+                phase=phase,
+                price=float(price),
+                regime=regime,
+                strategy=strategy,
+                measured=measured,
+                threshold=threshold,
+                reason=reason,
+            ))
+
+    @staticmethod
+    def _delta_from_sigma_distance(sigma_mult: float) -> float:
+        """
+        Approximate |Δ| for a short strike placed at ``sigma_mult`` × σ_hold.
+
+        Uses the standard normal-CDF identity: for a strike N standard
+        deviations OTM under a log-normal price model, |Δ| ≈ Φ(-N).  This is
+        the same heuristic the README (and the σ-mult slider help text) uses
+        to map "1.0σ ≈ 16Δ", "1.5σ ≈ 7Δ", "2.0σ ≈ 2Δ".
+
+        Returns 0.0 for non-positive sigma_mult.
+        """
+        if sigma_mult <= 0.0:
+            return 0.0
+        from math import erf, sqrt
+        # Φ(-x) = 0.5 * (1 - erf(x / √2))
+        return 0.5 * (1.0 - erf(sigma_mult / sqrt(2.0)))
+
+    @staticmethod
+    def _iv_rank_from_returns(close: pd.Series, idx: int, window: int = 20) -> float:
+        """
+        Mirror of regime.RegimeClassifier._compute_iv_rank for the backtest.
+
+        Uses ``scipy.stats.percentileofscore`` (kind='mean') over rolling
+        20-bar annualised realised vols sampled every 5 bars — this is the
+        exact formulation the live agent uses (regime.py:194), so the IV
+        rank a trade is gated on at backtest entry equals what the agent
+        would have computed at that same bar in production.
+
+        Returns 0.0 when there's not enough history.
+        """
+        if idx < window + 5:
+            return 0.0
+        sub = close.iloc[: idx + 1]
+        returns = sub.pct_change().dropna()
+        if len(returns) < window + 5:
+            return 0.0
+        current_vol = float(returns.tail(window).std() * np.sqrt(252)) * 100.0
+        hist_vols = []
+        for i in range(0, len(returns) - window, 5):
+            v = float(returns.iloc[i : i + window].std() * np.sqrt(252)) * 100.0
+            hist_vols.append(v)
+        if not hist_vols:
+            return 0.0
+        return float(percentileofscore(hist_vols, current_vol, kind="mean"))
+
+    def _earnings_blocks_entry(self, ticker: str, entry_dt: date) -> bool:
+        """
+        Return True iff ``ticker`` has scheduled earnings within
+        ``earnings_lookahead_days`` of ``entry_dt``.
+
+        Uses the live EarningsCalendar module so the same yfinance lookup,
+        the same caching policy, and the same lookahead-window semantics as
+        the agent's Tier-0 short-circuit (sentiment_pipeline._earnings_short_circuit)
+        apply to backtest entries too.
+        """
+        if not self.use_earnings_gate:
+            return False
+        if self._earnings_calendar is None:
+            try:
+                from trading_agent.earnings_calendar import EarningsCalendar
+                self._earnings_calendar = EarningsCalendar(
+                    enabled=True,
+                    lookahead_days=self.earnings_lookahead_days,
+                )
+            except Exception as exc:
+                logger.debug("EarningsCalendar unavailable for backtest (%s)", exc)
+                return False
+        # Note: EarningsCalendar.has_earnings_within compares against today,
+        # not the synthetic backtest entry_dt — but for a 7-day lookahead
+        # over a year of bars the per-ticker "is there an earnings event in
+        # the near future from the calendar fetch's perspective" gate still
+        # captures the dominant effect (no entries inside the issuer's known
+        # quiet period at *backtest run time*).  A fully-historical earnings
+        # filter would require a second yfinance call per bar, which is too
+        # heavy; this is a documented simplification.
+        try:
+            return bool(self._earnings_calendar.has_earnings_within(
+                ticker, days=self.earnings_lookahead_days,
+            ))
+        except Exception:
+            return False
 
     # ── Volatility & credit helpers (sigma-based strike model) ──────────────
 
@@ -205,6 +591,1069 @@ class Backtester:
         """
         return float(np.clip(0.45 - 0.15 * sigma_mult, min_frac, max_frac))
 
+    # ── Option chain helpers (Alpaca API) ──────────────────────────────────
+    #
+    # IMPORTANT HISTORICAL-DATA CAVEAT
+    # --------------------------------
+    # Alpaca's ``/v1beta1/options/snapshots/{underlying}`` endpoint and
+    # yfinance's ``tk.option_chain(expiry)`` BOTH return the *current*
+    # market snapshot — not a historical chain as-of ``entry_date``.
+    # That means this helper is only honest for recent entries (roughly
+    # today).  For multi-month daily backtests the same snapshot would
+    # be applied to every bar, which is a known drift we flag in logs.
+    #
+    # The proper 30-day parity path is in the alpaca_historical methods
+    # below (``_fetch_alpaca_option_contracts`` + ``_fetch_alpaca_option_bars``)
+    # which query Alpaca's ``/v2/options/contracts`` + historical
+    # ``/v1beta1/options/bars`` endpoints for real as-of-date pricing.
+
+    # Below this date-age threshold the current-snapshot path is a
+    # reasonable approximation of "as-of today"; above it, we log loudly
+    # so the user knows the credits they're seeing are snapshot-biased.
+    _SNAPSHOT_FRESH_DAYS = 3
+
+    def _alpaca_headers(self) -> Dict[str, str]:
+        """Return Alpaca API headers."""
+        return {
+            "APCA-API-KEY-ID": self._alpaca_api_key or "",
+            "APCA-API-SECRET-KEY": self._alpaca_secret_key or "",
+            "Accept": "application/json",
+        }
+
+    def _alpaca_request(
+        self,
+        url: str,
+        params: Optional[Dict] = None,
+        timeout: int = 15,
+        max_retries: int = 3,
+    ) -> Optional["requests.Response"]:
+        """
+        Rate-limited + retry-aware Alpaca GET.
+
+        • Blocks on the module-level ``_ALPACA_RATE_LIMITER`` so we never
+          exceed the 60-second request budget (default 180/min).
+        • On HTTP 429, reads ``Retry-After`` (seconds) and re-queues with
+          capped exponential backoff.
+        • Returns a ``requests.Response`` on success, or ``None`` if all
+          retries were exhausted (callers already handle None/raise).
+        """
+        delay = 1.0
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            _ALPACA_RATE_LIMITER.acquire()
+            self.alpaca_calls_made += 1
+            try:
+                resp = requests.get(
+                    url, headers=self._alpaca_headers(),
+                    params=params, timeout=timeout,
+                )
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt == max_retries:
+                    self.alpaca_failures += 1
+                    logger.warning(
+                        "Alpaca request failed (%s) — giving up after %d attempts",
+                        exc, attempt + 1,
+                    )
+                    return None
+                logger.info(
+                    "Alpaca request exception (%s) — retrying in %.1fs",
+                    exc, delay,
+                )
+                time.sleep(delay)
+                delay = min(30.0, delay * 2)
+                continue
+
+            if resp.status_code == 429:
+                self.alpaca_429_hits += 1
+                retry_after_raw = resp.headers.get("Retry-After")
+                try:
+                    retry_after = float(retry_after_raw) if retry_after_raw else delay
+                except ValueError:
+                    retry_after = delay
+                retry_after = min(60.0, max(1.0, retry_after))
+                logger.warning(
+                    "Alpaca 429 Too Many Requests (attempt %d/%d) — "
+                    "Retry-After=%.1fs (url=%s)",
+                    attempt + 1, max_retries + 1, retry_after, url,
+                )
+                if attempt == max_retries:
+                    self.alpaca_failures += 1
+                    return None
+                time.sleep(retry_after)
+                delay = min(30.0, delay * 2)
+                continue
+
+            return resp
+
+        # Unreachable under normal control flow, but keeps linters happy.
+        if last_exc is not None:
+            logger.warning("Alpaca request gave up after retries: %s", last_exc)
+        return None
+
+    def _fetch_option_chain(
+        self, underlying: str, expiration_date: str, option_type: str = "put"
+    ) -> Optional[List[Dict]]:
+        """
+        Fetch option chain snapshot from Alpaca (cached OPTION_CHAIN_TTL s).
+
+        Returns a list of option contract dicts with Greeks, or None on
+        HTTP failure.  An empty list is NOT cached so a transient 404
+        doesn't poison the whole session.
+        """
+        cache_key = (underlying, expiration_date, option_type)
+        now = time.monotonic()
+        if cache_key in self._option_cache:
+            contracts, cached_at = self._option_cache[cache_key]
+            if (now - cached_at) < OPTION_CHAIN_TTL:
+                logger.debug(
+                    "[%s] Option chain cache HIT (%s %s)",
+                    underlying, option_type, expiration_date
+                )
+                return contracts
+
+        # Data URL is https://data.alpaca.markets/v2 by env default; the
+        # options endpoints live under /v1beta1/options, so trim the /v2
+        # suffix to avoid doubled version path segments.
+        data_base = (self._alpaca_data_url or "").rstrip("/")
+        if data_base.endswith("/v2"):
+            data_base = data_base[: -len("/v2")]
+        url = f"{data_base}/v1beta1/options/snapshots/{underlying}"
+        params = {
+            "type": option_type,
+            "expiration_date": expiration_date,
+            # Alpaca default is 100; raising to 1000 avoids truncating
+            # wide SPY/QQQ chains that would otherwise miss OTM strikes.
+            "limit": 1000,
+        }
+        logger.info(
+            "Fetching %s option chain for %s exp %s",
+            option_type, underlying, expiration_date
+        )
+        try:
+            resp = self._alpaca_request(url, params=params, timeout=15)
+            if resp is None:
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+            snapshots = data.get("snapshots", {}) or {}
+            contracts: List[Dict] = []
+            for symbol, snap in snapshots.items():
+                greeks = snap.get("greeks") or {}
+                quote = snap.get("latestQuote") or {}
+                bid = float(quote.get("bp", 0) or 0)
+                ask = float(quote.get("ap", 0) or 0)
+                contracts.append({
+                    "symbol": symbol,
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": round((bid + ask) / 2, 4),
+                    "delta": float(greeks.get("delta", 0) or 0),
+                    "theta": float(greeks.get("theta", 0) or 0),
+                    "vega": float(greeks.get("vega", 0) or 0),
+                    "gamma": float(greeks.get("gamma", 0) or 0),
+                    "iv": float(greeks.get("impliedVolatility", 0) or 0),
+                    "strike": self._extract_strike(symbol),
+                    "expiration": expiration_date,
+                    "type": option_type,
+                })
+            logger.info(
+                "Received %d %s contracts for %s",
+                len(contracts), option_type, underlying
+            )
+            if contracts:   # never cache empty results — allow a fresh retry
+                self._option_cache[cache_key] = (contracts, time.monotonic())
+            return contracts
+        except requests.RequestException as exc:
+            logger.error("Alpaca option chain request failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _extract_strike(option_symbol: str) -> float:
+        """Extract the strike price from an OCC option symbol."""
+        try:
+            return int(option_symbol[-8:]) / 1000.0
+        except (ValueError, IndexError):
+            return 0.0
+
+    @staticmethod
+    def _yfinance_chain_to_contracts(
+        df: "pd.DataFrame", option_type: str, expiration_date: str,
+    ) -> List[Dict]:
+        """
+        Normalise a yfinance puts/calls DataFrame into the same list-of-dicts
+        shape ``_fetch_option_chain`` returns.  This lets the rest of the
+        backtester treat both sources uniformly and avoids the DataFrame
+        truth-value-is-ambiguous ValueError the previous code tripped over.
+        """
+        if df is None or df.empty:
+            return []
+        out: List[Dict] = []
+        for _, row in df.iterrows():
+            bid = float(row.get("bid", 0) or 0)
+            ask = float(row.get("ask", 0) or 0)
+            out.append({
+                "symbol": str(row.get("contractSymbol", "")),
+                "bid": bid,
+                "ask": ask,
+                "mid": round((bid + ask) / 2, 4),
+                # yfinance does not publish delta; downstream must estimate
+                # it from σ-distance rather than from an "inTheMoney" flag.
+                "delta": float("nan"),
+                "theta": 0.0,
+                "vega": 0.0,
+                "gamma": 0.0,
+                "iv": float(row.get("impliedVolatility", 0) or 0),
+                "strike": float(row.get("strike", 0) or 0),
+                "in_the_money": bool(row.get("inTheMoney", False)),
+                "expiration": expiration_date,
+                "type": option_type,
+            })
+        return out
+
+    def _get_option_chain_for_date(
+        self, ticker: str, entry_date: date, target_dte: int
+    ) -> Optional[Tuple[float, float, float]]:
+        """
+        Resolve a short-strike distance, credit, and |Δ| estimate for the
+        given (ticker, entry_date) using a *current-snapshot* chain.
+
+        Source precedence:
+          1. Alpaca /v1beta1/options/snapshots (real bid/ask + Greeks)
+          2. yfinance tk.option_chain(expiry) (real bid/ask, no Greeks)
+
+        CAVEAT — both sources return the CURRENT market snapshot, not a
+        historical as-of-``entry_date`` chain.  For honest historical
+        backtests, use the alpaca_historical mode (see
+        ``_fetch_alpaca_option_bars``).  We log loudly when ``entry_date``
+        is older than ``_SNAPSHOT_FRESH_DAYS`` so the user knows the
+        credit is today's snapshot applied to a past bar.
+
+        Returns ``(strike_distance_pct, credit, |delta|)`` or ``None``
+        when no usable chain could be resolved.
+        """
+        today = date.today()
+        age_days = (today - entry_date).days
+        if age_days > self._SNAPSHOT_FRESH_DAYS:
+            logger.warning(
+                "[%s] snapshot chain applied to %s (%d days stale) — "
+                "credits are current-market, NOT historical. Use the "
+                "alpaca_historical mode for honest 30-day parity.",
+                ticker, entry_date, age_days,
+            )
+
+        try:
+            tk = yf.Ticker(ticker)
+            # yfinance's `.options` is the canonical source of expiry
+            # strings — Alpaca's chain endpoints require one, too.
+            try:
+                expirations = list(tk.options or [])
+            except Exception as exc:
+                logger.warning("[%s] yfinance expirations unavailable: %s", ticker, exc)
+                return None
+            if not expirations:
+                logger.warning("[%s] No expirations available", ticker)
+                return None
+
+            # Pick the expiry whose DTE (from entry_date) is closest to target.
+            best_expiry: Optional[str] = None
+            best_diff = float("inf")
+            for expiry_str in expirations:
+                try:
+                    expiry_dt = date.fromisoformat(expiry_str)
+                except ValueError:
+                    continue
+                dte = (expiry_dt - entry_date).days
+                if dte <= 0:
+                    continue
+                diff = abs(dte - target_dte)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_expiry = expiry_str
+            if best_expiry is None:
+                logger.warning("[%s] No future expirations found", ticker)
+                return None
+
+            # ── Source 1: Alpaca snapshots ───────────────────────────
+            put_chain: List[Dict] = []
+            call_chain: List[Dict] = []
+            if self._alpaca_api_key and self._alpaca_secret_key:
+                alp_puts = self._fetch_option_chain(ticker, best_expiry, "put") or []
+                alp_calls = self._fetch_option_chain(ticker, best_expiry, "call") or []
+                put_chain = list(alp_puts)
+                call_chain = list(alp_calls)
+                if put_chain or call_chain:
+                    logger.info(
+                        "[%s] Alpaca snapshot: %d puts, %d calls (exp %s)",
+                        ticker, len(put_chain), len(call_chain), best_expiry,
+                    )
+
+            # ── Source 2: yfinance fallback (also current snapshot) ──
+            if not put_chain and not call_chain:
+                try:
+                    option_chain = tk.option_chain(best_expiry)
+                except Exception as exc:
+                    logger.warning("[%s] yfinance fallback failed: %s", ticker, exc)
+                    return None
+                put_chain = self._yfinance_chain_to_contracts(
+                    getattr(option_chain, "puts", None), "put", best_expiry,
+                )
+                call_chain = self._yfinance_chain_to_contracts(
+                    getattr(option_chain, "calls", None), "call", best_expiry,
+                )
+                logger.info(
+                    "[%s] yfinance snapshot: %d puts, %d calls (exp %s)",
+                    ticker, len(put_chain), len(call_chain), best_expiry,
+                )
+
+            if not put_chain and not call_chain:
+                logger.error("[%s] No option chains available", ticker)
+                return None
+
+            # Underlying price on entry_date (for strike-distance computation)
+            current_price = self._get_price_for_date(ticker, entry_date)
+            if not current_price or current_price <= 0:
+                logger.warning("[%s] No price data for %s", ticker, entry_date)
+                return None
+
+            # ── Short-strike selection ───────────────────────────────
+            # Pick the richer wing (more contracts) and take the OTM
+            # strike closest to spot — this is a conservative short
+            # leg that the σ-gate will reject when it's too close.
+            use_puts = len(put_chain) >= len(call_chain)
+            chain = put_chain if use_puts else call_chain
+            opt_type = "put" if use_puts else "call"
+
+            if opt_type == "put":
+                otm = [c for c in chain if c["strike"] > 0 and c["strike"] < current_price]
+                # Highest-OTM put strike = closest to spot from below.
+                otm.sort(key=lambda c: c["strike"], reverse=True)
+            else:
+                otm = [c for c in chain if c["strike"] > 0 and c["strike"] > current_price]
+                # Lowest-OTM call strike = closest to spot from above.
+                otm.sort(key=lambda c: c["strike"])
+
+            if not otm:
+                logger.warning("[%s] No OTM %ss available (spot=$%.2f)",
+                               ticker, opt_type, current_price)
+                return None
+            short_leg = otm[0]
+            strike = float(short_leg["strike"])
+            # Prefer the mid if both sides populated; fall back to bid
+            # (what we'd receive on a market sell order).
+            bid = float(short_leg.get("bid") or 0)
+            ask = float(short_leg.get("ask") or 0)
+            if bid > 0 and ask > 0:
+                credit = round((bid + ask) / 2, 4)
+            elif bid > 0:
+                credit = bid
+            else:
+                logger.warning(
+                    "[%s] Short %s strike $%.2f has no quote (bid=%.2f, ask=%.2f)",
+                    ticker, opt_type, strike, bid, ask,
+                )
+                return None
+
+            # ── |Delta| estimate ─────────────────────────────────────
+            # Prefer the broker-supplied delta (Alpaca).  When it's
+            # missing (yfinance) or zero, approximate from the strike
+            # distance expressed in σ-units — this is the same heuristic
+            # used by the σ-path and correctly places the short leg on
+            # the Φ(-N) curve instead of the old binary 0.5-or-0.0 hack.
+            delta_raw = short_leg.get("delta", float("nan"))
+            try:
+                delta_val = abs(float(delta_raw))
+            except (TypeError, ValueError):
+                delta_val = float("nan")
+            if not np.isfinite(delta_val) or delta_val == 0.0:
+                # Fall back to σ-distance proxy using the bar's own realised
+                # vol over the hold window.
+                try:
+                    close_px = float(current_price)
+                    sigma_guess = float(short_leg.get("iv") or 0.0)
+                    dte_days = max(1, (date.fromisoformat(best_expiry) - entry_date).days)
+                    if sigma_guess > 0 and close_px > 0:
+                        sigma_hold = sigma_guess * np.sqrt(dte_days / 252.0)
+                        n_sigma = abs(strike - close_px) / (close_px * sigma_hold)
+                        delta_val = self._delta_from_sigma_distance(n_sigma)
+                    else:
+                        delta_val = 0.15   # neutral default for OTM nearest-to-ATM
+                except Exception:
+                    delta_val = 0.15
+
+            strike_distance_pct = abs(strike - current_price) / current_price
+            logger.info(
+                "[%s] Selected short %s: strike $%.2f (dist %.2f%%, "
+                "credit $%.2f, |Δ| %.3f, source=%s)",
+                ticker, opt_type, strike, strike_distance_pct * 100.0,
+                credit, delta_val,
+                "alpaca" if put_chain and put_chain[0].get("delta", float("nan")) == put_chain[0].get("delta", float("nan")) and short_leg.get("delta") is not None else "yfinance",
+            )
+            return (strike_distance_pct, credit, delta_val)
+
+        except Exception as exc:
+            logger.error(
+                "Option chain fetch for %s on %s failed: %s",
+                ticker, entry_date, exc,
+            )
+            return None
+
+    def _refresh_live_quotes(
+        self,
+        ticker: str,
+        entry_date: date,
+        strategy: str,
+        strike_distance_pct: Optional[float],
+        credit: float,
+        approx_abs_delta: Optional[float],
+        equity: Optional[float] = None,
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], str]:
+        """
+        Refresh live option quotes immediately before trade execution.
+
+        Mirrors the live agent's executor._refresh_limit_price() pattern:
+        fetch fresh option chain from Alpaca, recalculate credit using
+        live bid/ask, and re-validate the two economics-bearing
+        guardrails before committing to the trade.
+
+        Parameters
+        ----------
+        equity: current account equity (used for the max-risk guardrail).
+            Defaults to ``self.starting_equity`` when the caller omits it
+            — but the backtest loop should always pass the *current*
+            equity so the budget rebase reflects compounded P&L.
+
+        Returns ``(strike_distance, credit, delta, status)``.  Statuses:
+            "success"               — fresh quote within drift threshold
+            "drift_warning"         — fresh quote differs ≥10 % from plan
+            "rejected_credit_ratio" — post-refresh credit/width < floor
+            "rejected_max_loss"     — post-refresh max-loss > risk budget
+            "failed" / "no_api_config" — refresh itself didn't complete
+        """
+        if not self._alpaca_api_key or not self._alpaca_secret_key:
+            return (strike_distance_pct, credit, approx_abs_delta, "no_api_config")
+
+        eq_for_budget = float(equity) if equity is not None else float(self.starting_equity)
+
+        try:
+            # Mirror the live agent: bust the chain cache for this ticker
+            # so the "refresh" is actually a fresh HTTP call rather than
+            # re-reading the same snapshot that planning just used.
+            stale_keys = [k for k in self._option_cache if k[0] == ticker]
+            for k in stale_keys:
+                self._option_cache.pop(k, None)
+
+            result = self._get_option_chain_for_date(ticker, entry_date, self.target_dte)
+            if result is None:
+                logger.warning(
+                    "[%s] Live quote refresh failed — no option chain for %s (DTE %d)",
+                    ticker, entry_date, self.target_dte,
+                )
+                return (strike_distance_pct, credit, approx_abs_delta, "failed")
+
+            new_strike_distance, new_credit, new_delta = result
+
+            drift = abs(new_credit - credit)
+            drift_pct = drift / credit if credit > 0 else 0.0
+            drift_warn_pct = 0.10  # 10 % threshold for warning
+
+            credit_to_width = new_credit / self.spread_width if self.spread_width else 0.0
+            max_loss = self.spread_width - new_credit
+
+            # Guardrail 1: credit-to-width ratio (same gate the planning
+            # phase enforces, re-checked against the refreshed quote).
+            if self.min_credit_ratio is not None and credit_to_width < self.min_credit_ratio:
+                logger.warning(
+                    "[%s] Live quote REJECTED: credit/width %.4f < %.2f floor "
+                    "(plan=%.2f → live=%.2f, width=%.2f)",
+                    ticker, credit_to_width, self.min_credit_ratio,
+                    credit, new_credit, self.spread_width,
+                )
+                return (new_strike_distance, new_credit, new_delta, "rejected_credit_ratio")
+
+            # Guardrail 2: max loss per contract ≤ risk budget
+            # (RiskManager.max_risk_pct × *current* equity — not starting).
+            if self.max_risk_pct is not None:
+                allowed_loss = eq_for_budget * self.max_risk_pct
+                if max_loss * 100.0 > allowed_loss:
+                    logger.warning(
+                        "[%s] Live quote REJECTED: max_loss $%.2f > $%.2f budget "
+                        "(%.1f%% of $%.2f equity)",
+                        ticker, max_loss * 100.0, allowed_loss,
+                        self.max_risk_pct * 100.0, eq_for_budget,
+                    )
+                    return (new_strike_distance, new_credit, new_delta, "rejected_max_loss")
+
+            if drift_pct > drift_warn_pct:
+                logger.warning(
+                    "[%s] Credit drifted %.1f%% since planning "
+                    "(plan=$%.2f → live=$%.2f)",
+                    ticker, drift_pct * 100.0, credit, new_credit,
+                )
+                return (new_strike_distance, new_credit, new_delta, "drift_warning")
+
+            logger.info(
+                "[%s] Live quote refreshed: credit $%.2f (plan was $%.2f)",
+                ticker, new_credit, credit,
+            )
+            return (new_strike_distance, new_credit, new_delta, "success")
+
+        except Exception as exc:
+            logger.warning(
+                "[%s] Live quote refresh exception: %s — using planned values",
+                ticker, exc,
+            )
+            return (strike_distance_pct, credit, approx_abs_delta, "failed")
+
+    def _get_price_for_date(self, ticker: str, entry_date: date) -> Optional[float]:
+        """
+        Return the underlying close on or immediately before ``entry_date``.
+
+        Used by the option-chain helpers for strike-distance arithmetic.
+        Caches nothing — call sites already sit inside the per-bar path of
+        ``run()``, which only invokes this once per entry.
+        """
+        try:
+            tk = yf.Ticker(ticker)
+            # A small window around the entry keeps the response tiny while
+            # tolerating weekends / holidays (no bar on the exact date).
+            start = (entry_date - timedelta(days=7)).isoformat()
+            end = (entry_date + timedelta(days=2)).isoformat()
+            df = tk.history(start=start, end=end, auto_adjust=False)
+            if df is None or df.empty:
+                return None
+            # Drop timezone so index.date comparisons against `entry_date`
+            # (a naive datetime.date) don't raise on tz-aware indexes.
+            if getattr(df.index, "tz", None) is not None:
+                df.index = df.index.tz_localize(None)
+            # Pick the most recent bar on-or-before entry_date — mirrors the
+            # live agent which uses the last-completed bar at decision time.
+            dates = np.array([d.date() for d in df.index])
+            mask = dates <= entry_date
+            if mask.any():
+                closest = df[mask].iloc[-1]
+            else:
+                # entry_date is earlier than the window's first bar — take
+                # the nearest future bar so downstream math doesn't div/0.
+                closest = df.iloc[0]
+            return float(closest["Close"])
+        except Exception as exc:
+            logger.debug("[%s] _get_price_for_date(%s) failed: %s",
+                         ticker, entry_date, exc)
+            return None
+
+    # ── Alpaca historical option bars (30-day live-parity mode) ────────────
+    #
+    # This path answers the user's "match live trading with real options
+    # data for the last 30 days" ask.  Unlike the snapshot path above,
+    # these methods query Alpaca's HISTORICAL bars endpoints so the
+    # credit at entry and the spread value at exit reflect real market
+    # prices as-of the backtest dates.
+    #
+    # Data flow per simulated trade:
+    #   1. ``/v2/options/contracts`` → list contracts for (ticker, target
+    #      expiry) with strike/type metadata
+    #   2. ``/v1beta1/options/bars`` → daily OHLCV for both legs over
+    #      [entry_date, exit_date]
+    #   3. Credit at entry ≈ short.close − long.close
+    #   4. Simulate exit via the live-agent's first-to-fire dual-stop
+    #      logic applied to the underlying, then mark-to-market the
+    #      spread using the *option* bars on the exit date.
+    #
+    # Alpaca retains historical options data for roughly the last 30–90
+    # days (depends on subscription).  Outside that window this path
+    # degrades to "no data" and the caller falls back.
+
+    # Alpaca's trading API hosts the contract catalogue; default to the
+    # paper endpoint used by .env.  Broker URL is derived by stripping
+    # "/v2" from the data_url and substituting the trading host, but we
+    # read ALPACA_BASE_URL directly to stay consistent with config.py.
+    _ALPACA_BROKER_URL_ENV = "ALPACA_BASE_URL"
+    _ALPACA_BROKER_URL_DEFAULT = "https://paper-api.alpaca.markets/v2"
+
+    def _alpaca_broker_url(self) -> str:
+        base = os.getenv(self._ALPACA_BROKER_URL_ENV, self._ALPACA_BROKER_URL_DEFAULT)
+        return base.rstrip("/")
+
+    def _alpaca_data_base(self) -> str:
+        """Return the Alpaca data host (without /v2 suffix) for /v1beta1/…"""
+        data = (self._alpaca_data_url or "").rstrip("/")
+        if data.endswith("/v2"):
+            data = data[: -len("/v2")]
+        return data
+
+    def _fetch_alpaca_option_contracts(
+        self,
+        underlying: str,
+        expiration_date: str,
+        option_type: Optional[str] = None,
+    ) -> List[Dict]:
+        """
+        List active option contracts for ``underlying`` expiring on
+        ``expiration_date``.  Returns ``[{symbol, strike, type,
+        expiration}]``.  Empty list on error.
+        """
+        url = f"{self._alpaca_broker_url()}/options/contracts"
+        params: Dict[str, object] = {
+            "underlying_symbols": underlying,
+            "expiration_date": expiration_date,
+            "status": "active",
+            "limit": 10000,
+        }
+        if option_type:
+            params["type"] = option_type
+        out: List[Dict] = []
+        try:
+            next_page_token: Optional[str] = None
+            for _ in range(10):   # bounded pagination
+                if next_page_token:
+                    params["page_token"] = next_page_token
+                resp = self._alpaca_request(url, params=params, timeout=15)
+                if resp is None:
+                    break
+                resp.raise_for_status()
+                data = resp.json() or {}
+                for c in data.get("option_contracts", []) or []:
+                    try:
+                        strike = float(c.get("strike_price") or 0)
+                    except (TypeError, ValueError):
+                        strike = 0.0
+                    out.append({
+                        "symbol": c.get("symbol", ""),
+                        "strike": strike,
+                        "type": (c.get("type") or "").lower(),  # "call" | "put"
+                        "expiration": c.get("expiration_date", expiration_date),
+                    })
+                next_page_token = data.get("next_page_token")
+                if not next_page_token:
+                    break
+            return out
+        except requests.RequestException as exc:
+            logger.warning(
+                "Alpaca /options/contracts failed for %s exp %s: %s",
+                underlying, expiration_date, exc,
+            )
+            return []
+
+    def _fetch_alpaca_option_bars(
+        self,
+        symbols: List[str],
+        start: date,
+        end: date,
+        timeframe: str = "1Day",
+    ) -> Dict[str, List[Dict]]:
+        """
+        Fetch historical OHLCV bars for a set of option contract symbols.
+        Returns ``{symbol: [{t, o, h, l, c, v}, …]}``.
+        Empty dict on error; missing symbols are simply absent from the
+        result map.
+        """
+        if not symbols:
+            return {}
+        # Alpaca allows ≤100 symbols per request — chunk defensively.
+        out: Dict[str, List[Dict]] = {}
+        url = f"{self._alpaca_data_base()}/v1beta1/options/bars"
+        chunk_size = 100
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i : i + chunk_size]
+            params = {
+                "symbols": ",".join(chunk),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "timeframe": timeframe,
+                "limit": 10000,
+            }
+            try:
+                resp = self._alpaca_request(url, params=params, timeout=30)
+                if resp is None:
+                    continue
+                resp.raise_for_status()
+                data = resp.json() or {}
+                bars_map = data.get("bars") or {}
+                for sym, bars in bars_map.items():
+                    if not bars:
+                        continue
+                    out.setdefault(sym, []).extend(bars)
+            except requests.RequestException as exc:
+                logger.warning(
+                    "Alpaca /options/bars failed for %d symbols "
+                    "(%s…%s): %s",
+                    len(chunk), start, end, exc,
+                )
+                # Continue with other chunks — partial data is still useful.
+                continue
+        return out
+
+    def _pick_alpaca_expiration(
+        self, ticker: str, entry_date: date, target_dte: int,
+    ) -> Optional[str]:
+        """
+        Pick the expiration date in Alpaca's contract catalogue closest
+        to ``entry_date + target_dte``.  Returns an ISO-date string or
+        ``None`` when the catalogue lookup fails.
+        """
+        # Alpaca's /options/contracts supports expiration_date_gte/_lte
+        # filters so we can pull just a small window around the target.
+        window_lo = entry_date + timedelta(days=max(1, target_dte - 10))
+        window_hi = entry_date + timedelta(days=target_dte + 20)
+        url = f"{self._alpaca_broker_url()}/options/contracts"
+        params = {
+            "underlying_symbols": ticker,
+            "expiration_date_gte": window_lo.isoformat(),
+            "expiration_date_lte": window_hi.isoformat(),
+            "status": "active",
+            "type": "put",  # only need the expiry set, one type is enough
+            "limit": 10000,
+        }
+        try:
+            resp = self._alpaca_request(url, params=params, timeout=15)
+            if resp is None:
+                return None
+            resp.raise_for_status()
+            data = resp.json() or {}
+        except requests.RequestException as exc:
+            logger.warning(
+                "[%s] Alpaca expiry lookup failed (%s..%s): %s",
+                ticker, window_lo, window_hi, exc,
+            )
+            return None
+
+        expiries: Set[str] = set()
+        for c in data.get("option_contracts", []) or []:
+            exp = c.get("expiration_date")
+            if exp:
+                expiries.add(exp)
+        if not expiries:
+            return None
+
+        target_dt = entry_date + timedelta(days=target_dte)
+        best: Optional[str] = None
+        best_diff = float("inf")
+        for exp in expiries:
+            try:
+                d = date.fromisoformat(exp)
+            except ValueError:
+                continue
+            if d <= entry_date:
+                continue
+            diff = abs((d - target_dt).days)
+            if diff < best_diff:
+                best_diff = diff
+                best = exp
+        return best
+
+    def _alpaca_historical_plan(
+        self,
+        ticker: str,
+        entry_date: date,
+        regime: str,
+        target_dte: int,
+        underlying_price: float,
+        sigma_annual: float,
+        effective_sigma_mult: float,
+    ) -> Optional[Dict]:
+        """
+        Build a real-data trade plan for (ticker, entry_date) using
+        Alpaca's historical contracts + bars endpoints.
+
+        Returns a dict with keys:
+            short_symbol, long_symbol, short_strike, long_strike,
+            expiration, option_type, credit, strike_distance_pct,
+            approx_abs_delta
+        or ``None`` when the data needed to form a plan isn't available.
+        """
+        if not self._alpaca_api_key or not self._alpaca_secret_key:
+            return None
+        if underlying_price <= 0:
+            return None
+
+        expiration = self._pick_alpaca_expiration(ticker, entry_date, target_dte)
+        if not expiration:
+            logger.info(
+                "[%s] alpaca_historical: no expiration near %s+%dd",
+                ticker, entry_date, target_dte,
+            )
+            return None
+
+        # Pull both sides for iron condor; for directional regimes we only
+        # need one but fetching both is cheap and simplifies logic.
+        contracts_p = self._fetch_alpaca_option_contracts(ticker, expiration, "put")
+        contracts_c = self._fetch_alpaca_option_contracts(ticker, expiration, "call")
+        if not contracts_p and not contracts_c:
+            logger.info(
+                "[%s] alpaca_historical: no contracts for exp %s",
+                ticker, expiration,
+            )
+            return None
+
+        # σ-distance target for the short leg (same math as sigma_path).
+        dte_days = max(1, (date.fromisoformat(expiration) - entry_date).days)
+        # Convert annualized σ to the expiry horizon, then scale by sigma_mult.
+        if sigma_annual > 0:
+            sigma_hold = sigma_annual * np.sqrt(dte_days / 252.0)
+        else:
+            sigma_hold = 0.01
+        target_distance = max(0.001, effective_sigma_mult * sigma_hold)
+        target_short_strike = (
+            underlying_price * (1 - target_distance)
+            if regime == "bullish"
+            else underlying_price * (1 + target_distance)
+            if regime == "bearish"
+            else underlying_price * (1 - target_distance)  # IC: use put wing
+        )
+        option_type = "call" if regime == "bearish" else "put"
+
+        pool = contracts_c if option_type == "call" else contracts_p
+        if not pool:
+            logger.info(
+                "[%s] alpaca_historical: no %ss for exp %s",
+                ticker, option_type, expiration,
+            )
+            return None
+
+        # Pick the strike closest to target on the OTM side.
+        if option_type == "put":
+            otm = [c for c in pool if 0 < c["strike"] <= underlying_price]
+            otm.sort(key=lambda c: abs(c["strike"] - target_short_strike))
+        else:
+            otm = [c for c in pool if c["strike"] >= underlying_price]
+            otm.sort(key=lambda c: abs(c["strike"] - target_short_strike))
+        if not otm:
+            logger.info(
+                "[%s] alpaca_historical: no OTM %ss near target strike %.2f",
+                ticker, option_type, target_short_strike,
+            )
+            return None
+        short_leg = otm[0]
+        short_strike = float(short_leg["strike"])
+
+        # Long strike is ``spread_width`` further OTM.
+        long_strike_target = (
+            short_strike - self.spread_width
+            if option_type == "put"
+            else short_strike + self.spread_width
+        )
+        # Find the contract whose strike is closest to long_strike_target.
+        long_pool = pool
+        long_candidates = sorted(
+            long_pool, key=lambda c: abs(c["strike"] - long_strike_target),
+        )
+        long_leg = None
+        for c in long_candidates:
+            if option_type == "put" and c["strike"] < short_strike:
+                long_leg = c
+                break
+            if option_type == "call" and c["strike"] > short_strike:
+                long_leg = c
+                break
+        if long_leg is None:
+            logger.info(
+                "[%s] alpaca_historical: no long %s strike near %.2f",
+                ticker, option_type, long_strike_target,
+            )
+            return None
+
+        # Fetch entry-day bars for both legs to price the credit.
+        bars = self._fetch_alpaca_option_bars(
+            [short_leg["symbol"], long_leg["symbol"]],
+            start=entry_date,
+            end=entry_date + timedelta(days=1),
+        )
+        short_bars = bars.get(short_leg["symbol"]) or []
+        long_bars = bars.get(long_leg["symbol"]) or []
+        if not short_bars or not long_bars:
+            logger.info(
+                "[%s] alpaca_historical: no bars on %s for %s / %s",
+                ticker, entry_date, short_leg["symbol"], long_leg["symbol"],
+            )
+            return None
+
+        # Use the first bar on-or-after entry_date.  Alpaca returns UTC
+        # timestamps so the entry-day bar is normally index 0.
+        short_close = float(short_bars[0].get("c") or 0)
+        long_close = float(long_bars[0].get("c") or 0)
+        if short_close <= 0 or long_close < 0:
+            logger.info(
+                "[%s] alpaca_historical: degenerate bar close "
+                "(short=%.4f, long=%.4f)",
+                ticker, short_close, long_close,
+            )
+            return None
+        credit = max(0.0, short_close - long_close)
+        if credit <= 0.0:
+            logger.info(
+                "[%s] alpaca_historical: non-positive credit %.4f on %s "
+                "(short=%.4f, long=%.4f)",
+                ticker, credit, entry_date, short_close, long_close,
+            )
+            return None
+
+        strike_distance_pct = abs(short_strike - underlying_price) / underlying_price
+        # Estimate |Δ| from the chosen σ-distance (matches the σ-path).
+        n_sigma = (
+            effective_sigma_mult if sigma_hold > 0 and target_distance > 0
+            else 1.0
+        )
+        approx_abs_delta = self._delta_from_sigma_distance(n_sigma)
+
+        return {
+            "short_symbol": short_leg["symbol"],
+            "long_symbol": long_leg["symbol"],
+            "short_strike": short_strike,
+            "long_strike": float(long_leg["strike"]),
+            "expiration": expiration,
+            "option_type": option_type,
+            "credit": credit,
+            "strike_distance_pct": strike_distance_pct,
+            "approx_abs_delta": approx_abs_delta,
+        }
+
+    def _simulate_alpaca_historical(
+        self,
+        plan: Dict,
+        entry_date: date,
+        hold_bars: int,
+        underlying_prices: pd.Series,
+        entry_idx: int,
+        loss_cut_multiplier: Optional[float],
+        stop_loss_pct: Optional[float],
+    ) -> Tuple[str, float, int]:
+        """
+        Walk forward with real Alpaca option bars to compute the realistic
+        P&L of the planned spread.
+
+        Exit logic mirrors ``_simulate``:
+          * First breach of short_strike → exit at that day's spread value,
+            capped by the smaller of (loss_cut_multiplier × credit) and
+            (stop_loss_pct × max_loss), then max-loss.
+          * No breach before hold ends → exit at the last bar; if that's
+            the expiry we use the intrinsic value.
+        """
+        short_sym = plan["short_symbol"]
+        long_sym = plan["long_symbol"]
+        short_strike = float(plan["short_strike"])
+        long_strike = float(plan["long_strike"])
+        opt_type = plan["option_type"]
+        credit = float(plan["credit"])
+        expiration = date.fromisoformat(plan["expiration"])
+
+        # Exit window = min(hold_bars days after entry, expiration)
+        end_idx = min(entry_idx + hold_bars, len(underlying_prices) - 1)
+        window_end = min(
+            expiration,
+            underlying_prices.index[end_idx].date()
+            if hasattr(underlying_prices.index[end_idx], "date")
+            else expiration,
+        )
+        # Pull both legs' daily bars for the whole hold window up-front.
+        bars_by_sym = self._fetch_alpaca_option_bars(
+            [short_sym, long_sym],
+            start=entry_date,
+            end=window_end + timedelta(days=1),
+        )
+        short_bars = {
+            self._bar_date(b): b for b in (bars_by_sym.get(short_sym) or [])
+        }
+        long_bars = {
+            self._bar_date(b): b for b in (bars_by_sym.get(long_sym) or [])
+        }
+
+        # Underlying prices over the hold window.
+        fwd = underlying_prices.iloc[entry_idx : end_idx + 1]
+        entry_p = float(underlying_prices.iloc[entry_idx])
+
+        # Breach detection uses the real short strike from the plan — not
+        # a σ-distance synthetic — so losses reflect real market moves.
+        if opt_type == "put":
+            breach_mask = (fwd < short_strike).to_numpy()
+        else:
+            breach_mask = (fwd > short_strike).to_numpy()
+        breach_positions = np.flatnonzero(breach_mask)
+        max_loss = self.spread_width - credit
+
+        def _spread_value_on(dt: date) -> Optional[float]:
+            sb = short_bars.get(dt)
+            lb = long_bars.get(dt)
+            if not sb or not lb:
+                return None
+            s_close = float(sb.get("c") or 0)
+            l_close = float(lb.get("c") or 0)
+            # Spread value to CLOSE the trade = short_close - long_close
+            # (we buy back the short leg, sell back the long).
+            return max(0.0, s_close - l_close)
+
+        def _intrinsic_at_expiry(under_px: float) -> float:
+            if opt_type == "put":
+                short_intrinsic = max(0.0, short_strike - under_px)
+                long_intrinsic = max(0.0, long_strike - under_px)
+            else:
+                short_intrinsic = max(0.0, under_px - short_strike)
+                long_intrinsic = max(0.0, under_px - long_strike)
+            return max(0.0, short_intrinsic - long_intrinsic)
+
+        def _pnl_from_spread_value(close_value: float) -> float:
+            # We RECEIVED credit upfront; we PAY close_value to exit.
+            # Net cashflow per share of underlying = credit - close_value.
+            # × 100 for contract multiplier, minus round-trip commissions.
+            return (credit - close_value) * 100.0 - self.commission
+
+        if breach_positions.size == 0:
+            # No breach → hold to the last bar in the window.
+            last_idx = end_idx
+            last_dt = (
+                underlying_prices.index[last_idx].date()
+                if hasattr(underlying_prices.index[last_idx], "date")
+                else expiration
+            )
+            close_val = _spread_value_on(last_dt)
+            if close_val is None:
+                # No option bar at the last day → assume expiration value.
+                under_px = float(underlying_prices.iloc[last_idx])
+                close_val = _intrinsic_at_expiry(under_px)
+            pnl = _pnl_from_spread_value(close_val)
+            outcome = "win" if pnl > 0 else "loss"
+            return outcome, round(pnl, 2), last_idx - entry_idx
+
+        # Breach → exit on the first breach day, applying the live-agent
+        # dual-stop "first to fire" rule in *dollar* space.
+        breach_bar = int(breach_positions[0])
+        breach_idx = entry_idx + breach_bar
+        breach_dt = (
+            underlying_prices.index[breach_idx].date()
+            if hasattr(underlying_prices.index[breach_idx], "date")
+            else entry_date
+        )
+        close_val = _spread_value_on(breach_dt)
+        if close_val is None:
+            under_px = float(underlying_prices.iloc[breach_idx])
+            close_val = _intrinsic_at_expiry(under_px)
+
+        raw_loss = max(0.0, close_val - credit) * 100.0
+        candidates: List[float] = [raw_loss]
+        if loss_cut_multiplier is not None and loss_cut_multiplier > 0:
+            candidates.append(loss_cut_multiplier * credit * 100.0)
+        if stop_loss_pct is not None and 0.0 < stop_loss_pct < 1.0:
+            candidates.append(stop_loss_pct * max_loss * 100.0)
+        candidates.append(max_loss * 100.0)
+        effective_loss = min(candidates)
+        pnl = -effective_loss - self.commission
+        return "loss", round(pnl, 2), breach_bar
+
+    @staticmethod
+    def _bar_date(bar: Dict) -> Optional[date]:
+        """Normalise an Alpaca bar's timestamp field ``t`` to a date."""
+        t = bar.get("t")
+        if not t:
+            return None
+        try:
+            # RFC3339 → strip "Z" / offset, take date portion.
+            return datetime.fromisoformat(str(t).replace("Z", "+00:00")).date()
+        except Exception:
+            try:
+                return date.fromisoformat(str(t)[:10])
+            except Exception:
+                return None
+
     # ── Regime helpers ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -255,6 +1704,7 @@ class Backtester:
         hold_bars: int = None, otm_pct: float = DAILY_OTM_PCT,
         strike_distance_pct: Optional[float] = None,
         loss_cut_multiplier: Optional[float] = None,
+        stop_loss_pct: Optional[float] = None,
     ) -> tuple:
         """
         Walk forward from ``entry_idx`` and return ``(outcome, pnl, hold_count)``.
@@ -265,14 +1715,18 @@ class Backtester:
           is the sigma-based placement supplied by ``run()``.
         - Otherwise the legacy fixed-% OTM model applies (preserves tests).
 
-        Loss model
-        ----------
-        - If ``loss_cut_multiplier`` is None, a breach pays the full max-loss
-          of ``-(width − credit) × 100`` (legacy behavior).
-        - If set to k, the first breached bar closes the position at
-          ``-k × credit × 100``. ``hold_count`` is the bar index at breach,
-          not the full hold window — so "Avg Hold" also reports the true
-          time-to-exit rather than always the max.
+        Loss model (matches position_monitor.ExitMonitor "first to fire")
+        ---------------------------------------------------------------
+        On the first bar that breaches the short strike, two stops are
+        evaluated:
+
+           A. hard_stop = ``loss_cut_multiplier × credit × 100``  (≈ 3× credit)
+           B. legacy   = ``stop_loss_pct × max_loss × 100``       (≈ 50% max-loss)
+
+        The smaller of A and B is the effective dollar loss, mirroring the
+        live agent which exits at whichever threshold trips first.  When a
+        knob is None it's treated as +∞ (i.e. ignored).  Both None → fall
+        back to full max-loss payoff (legacy backtester behaviour).
         """
         if hold_bars is None:
             hold_bars = self.target_dte
@@ -302,12 +1756,21 @@ class Backtester:
             pnl = credit * 100.0 * self.profit_target_pct - self.commission
             return "win", round(pnl, 2), full_hold
 
-        # Loser — close at the first breach
+        # Loser — close at the first breach using "first to fire" semantics.
         breach_bar = int(breach_positions[0])
+        max_loss_dollars = (self.spread_width - credit) * 100.0
+
+        # Build candidate stops (in dollar loss terms, positive number).
+        candidates: List[float] = []
         if loss_cut_multiplier is not None and loss_cut_multiplier > 0:
-            pnl = -(loss_cut_multiplier * credit * 100.0) - self.commission
-        else:
-            pnl = -(self.spread_width * 100.0 - credit * 100.0) - self.commission
+            candidates.append(loss_cut_multiplier * credit * 100.0)
+        if stop_loss_pct is not None and 0.0 < stop_loss_pct < 1.0:
+            candidates.append(stop_loss_pct * max_loss_dollars)
+        # Always cap at max-loss — you can't lose more than the spread allows.
+        candidates.append(max_loss_dollars)
+
+        effective_loss = min(candidates)
+        pnl = -effective_loss - self.commission
         return "loss", round(pnl, 2), breach_bar
 
     # ── Main run ────────────────────────────────────────────────────────────
@@ -369,6 +1832,17 @@ class Backtester:
         # A value ≤ 0 disables the sigma path → legacy fixed-% OTM model.
         use_sigma_path = effective_sigma_mult > 0.0
 
+        # One-shot notice when parity's credit-ratio gate would be
+        # structurally incompatible with the synthetic credit model.
+        if use_sigma_path and self.min_credit_ratio is not None:
+            logger.info(
+                "Agent-parity credit-ratio floor (%.2f) skipped: backtester "
+                "uses synthetic _credit_from_sigma model, which produces "
+                "credits below 0.33 for σ>0.8. Other parity gates remain "
+                "active (earnings, IV-rank, max_delta, max_risk_pct).",
+                self.min_credit_ratio,
+            )
+
         all_trades: List[SimTrade] = []
         equity = self.starting_equity
         equity_curve: List[Dict] = [{"timestamp": pd.Timestamp(start), "account_balance": equity}]
@@ -377,13 +1851,18 @@ class Backtester:
 
         for ticker in tickers:
             try:
+                # auto_adjust=False mirrors market_data.MarketDataProvider
+                # (task #2) — the live agent reasons on raw closes, not
+                # dividend-/split-adjusted closes, so the backtester must
+                # do the same to stay apples-to-apples around corporate
+                # actions.
                 raw = yf.download(
                     ticker,
                     start=start.isoformat(),
                     end=end.isoformat(),
                     interval=yf_interval,
                     progress=False,
-                    auto_adjust=True,
+                    auto_adjust=False,
                 )
                 if raw.empty:
                     skipped.append(
@@ -426,9 +1905,113 @@ class Backtester:
                 regime = self._classify_bars(prices, i, warmup_bars)
                 strategy = self._strategy(regime)
 
-                # --- Strike + credit: sigma-based when enabled, else fixed ---
+                # --- Strike + credit: use option chain if available, else sigma/fixed ---
                 strike_distance_pct: Optional[float] = None
-                if use_sigma_path:
+                credit: float = 0.0
+                approx_abs_delta: Optional[float] = None
+                alpaca_historical_plan: Optional[Dict] = None
+
+                # Try to fetch option chain for this entry date
+                raw_date = prices.index[i]
+                entry_dt = (
+                    raw_date.date()
+                    if hasattr(raw_date, "date") else start
+                )
+
+                # ── Alpaca historical (30-day live parity) ─────────────
+                # When this mode is enabled, fetch a REAL historical
+                # option chain + bars for this (ticker, entry_dt) and
+                # derive the credit / strike / delta from actual Alpaca
+                # data.  If the data isn't available (outside the
+                # retention window, illiquid strike, etc.) we SKIP the
+                # bar entirely — falling back to the synthetic σ-credit
+                # would defeat the purpose of the mode.
+                if self.use_alpaca_historical:
+                    sigma_annual = self._realized_vol_annual(
+                        prices, i, vol_window, bars_per_year,
+                    )
+                    underlying_px = float(prices.iloc[i])
+                    alpaca_historical_plan = self._alpaca_historical_plan(
+                        ticker=ticker,
+                        entry_date=entry_dt,
+                        regime=regime,
+                        target_dte=hold_bars if not is_intraday else self.target_dte,
+                        underlying_price=underlying_px,
+                        sigma_annual=sigma_annual,
+                        effective_sigma_mult=(
+                            effective_sigma_mult if effective_sigma_mult > 0 else 1.0
+                        ),
+                    )
+                    if alpaca_historical_plan is None:
+                        # Record the skip in the funnel so the UI shows
+                        # why this bar produced no trade.
+                        self._funnel.considered += 1
+                        self._record_rejection(
+                            ticker=ticker, entry_date=entry_dt,
+                            gate="alpaca_historical_no_data",
+                            phase="1. Real-data availability",
+                            price=underlying_px, regime=regime,
+                            strategy=strategy,
+                            measured=None, threshold=None,
+                            reason=(
+                                "Alpaca has no historical option contracts "
+                                "or bars for this (ticker, date) — outside "
+                                "the ~30-day options retention window or "
+                                "illiquid expiry/strike."
+                            ),
+                        )
+                        continue
+                    strike_distance_pct = alpaca_historical_plan["strike_distance_pct"]
+                    credit = alpaca_historical_plan["credit"]
+                    approx_abs_delta = alpaca_historical_plan["approx_abs_delta"]
+                    logger.info(
+                        "[%s] alpaca_historical: %s short=$%.2f long=$%.2f "
+                        "credit=$%.2f |Δ|=%.3f (exp %s)",
+                        ticker, alpaca_historical_plan["option_type"],
+                        alpaca_historical_plan["short_strike"],
+                        alpaca_historical_plan["long_strike"],
+                        credit, approx_abs_delta,
+                        alpaca_historical_plan["expiration"],
+                    )
+                    option_chain_data = (strike_distance_pct, credit, approx_abs_delta)
+                else:
+                    option_chain_data = None
+
+                option_chain_error = None
+
+                if (
+                    alpaca_historical_plan is None
+                    and self._alpaca_api_key and self._alpaca_secret_key
+                    and not self.use_alpaca_historical   # snapshot-only when not in historical mode
+                    and (date.today() - entry_dt).days <= self._SNAPSHOT_FRESH_DAYS
+                ):
+                    # Only use the current-snapshot chain for recent bars
+                    # where "today's quotes" are a reasonable proxy for
+                    # "as-of entry_dt quotes".  For older dates, stick
+                    # with the σ-path to avoid applying today's IV to a
+                    # months-old trade.
+                    try:
+                        option_chain_data = self._get_option_chain_for_date(
+                            ticker, entry_dt, hold_bars
+                         )
+                        if option_chain_data is None:
+                            option_chain_error = "Alpaca API returned None"
+                    except Exception as exc:
+                        option_chain_error = f"Alpaca API exception: {exc}"
+                        logger.warning(
+                            "[%s] Option chain fetch failed: %s — using sigma-based fallback",
+                            ticker, option_chain_error
+                         )
+
+                if option_chain_data:
+                    # Use real option chain data from Alpaca
+                    strike_distance_pct, credit, approx_abs_delta = option_chain_data
+                    logger.debug(
+                        "[%s] Real option chain: strike_dist=%.2f%%, credit=%.2f, delta=%.3f",
+                        ticker, strike_distance_pct * 100, credit, approx_abs_delta
+                    )
+                elif use_sigma_path:
+                    # Use sigma-based calculation when API fails
                     sigma_annual = self._realized_vol_annual(
                         prices, i, vol_window, bars_per_year
                     )
@@ -441,19 +2024,266 @@ class Backtester:
                     if strike_distance_pct <= 0.0:
                         strike_distance_pct = None
                         credit = self.spread_width * self.credit_pct
+                        logger.debug(
+                            "[%s] Degenerate σ (flat prices) — using fixed credit %.2f",
+                            ticker, credit
+                         )
                     else:
                         credit_frac = self._credit_from_sigma(effective_sigma_mult)
                         credit = self.spread_width * credit_frac
+                        approx_abs_delta = self._delta_from_sigma_distance(
+                            effective_sigma_mult
+                         )
+                        logger.debug(
+                            "[%s] Sigma-based: σ=%.2f, strike_dist=%.2f%%, credit=%.2f, delta=%.3f",
+                            ticker, sigma_annual, strike_distance_pct * 100, credit, approx_abs_delta
+                         )
                 else:
+                    # Legacy fixed-% OTM (only when sigma_path is disabled)
                     credit = self.spread_width * self.credit_pct
+                    logger.warning(
+                        "[%s] Using legacy fixed-% OTM (credit=%.2f) — Alpaca API unavailable "
+                         "and sigma_path disabled",
+                        ticker, credit
+                     )
 
                 max_loss = self.spread_width - credit
-                otm_pct = INTRADAY_OTM_PCT if is_intraday else DAILY_OTM_PCT
-                outcome, pnl, hold_count = self._simulate(
-                    prices, i, regime, credit, hold_bars, otm_pct,
-                    strike_distance_pct=strike_distance_pct,
-                    loss_cut_multiplier=self.loss_cut_multiplier,
+
+                # ── Agent-parity entry gates (in the agent's own order) ────
+                # Each gate below mirrors a specific live-agent phase.  The
+                # ``_record_rejection`` calls capture per-candidate context
+                # so the UI can show *why* a bar was dropped, not just a
+                # count.  Phase labels below align with the live agent's
+                # pipeline:
+                #
+                #   1. Candidate considered          (every bar past warmup)
+                #   2. Event-risk gate               (EarningsCalendar Tier-0)
+                #   3. IV-rank gate                  (RegimeClassifier.high_iv)
+                #   4. Max-Δ gate                    (StrategyPlanner.max_delta)
+                #   5. Credit-ratio gate             (StrategyPlanner.min_credit_ratio)
+                #   6. Max-risk gate                 (RiskManager.max_risk_pct)
+                #   7. Position simulated            (→ ExitMonitor loop)
+                self._funnel.considered += 1
+
+                raw_date_for_gate = prices.index[i]
+                entry_dt = (
+                    raw_date_for_gate.date()
+                    if hasattr(raw_date_for_gate, "date") else start
                 )
+                cur_price = float(prices.iloc[i])
+
+                # 2. Event risk: earnings calendar (sentiment_pipeline Tier-0).
+                if self._earnings_blocks_entry(ticker, entry_dt):
+                    self._record_rejection(
+                        ticker=ticker, entry_date=entry_dt,
+                        gate="earnings_window",
+                        phase="2. Event-risk gate (EarningsCalendar)",
+                        price=cur_price, regime=regime, strategy=strategy,
+                        measured=None,
+                        threshold=float(self.earnings_lookahead_days),
+                        reason=(
+                            f"Scheduled earnings for {ticker} within "
+                            f"{self.earnings_lookahead_days} trading days — "
+                            "matches live agent's Tier-0 short-circuit."
+                        ),
+                    )
+                    continue
+                self._funnel.after_earnings += 1
+
+                # 3. IV-rank high-vol guard (regime.high_iv_warning).
+                if self.use_iv_gate:
+                    iv_rank = self._iv_rank_from_returns(prices, i, vol_window)
+                    if iv_rank > self.iv_high_threshold:
+                        self._record_rejection(
+                            ticker=ticker, entry_date=entry_dt,
+                            gate="iv_rank>threshold",
+                            phase="3. IV-rank gate (RegimeClassifier)",
+                            price=cur_price, regime=regime, strategy=strategy,
+                            measured=float(iv_rank),
+                            threshold=float(self.iv_high_threshold),
+                            reason=(
+                                f"Realized-vol percentile {iv_rank:.1f} > "
+                                f"{self.iv_high_threshold:.1f} threshold — "
+                                "live agent suppresses entries when "
+                                "RegimeAnalysis.high_iv_warning fires."
+                            ),
+                        )
+                        continue
+                self._funnel.after_iv_rank += 1
+
+                # 4. Max-delta clamp on short leg (StrategyPlanner + RiskManager).
+                if (
+                    self.max_delta is not None
+                    and approx_abs_delta is not None
+                    and approx_abs_delta > self.max_delta
+                ):
+                    self._record_rejection(
+                        ticker=ticker, entry_date=entry_dt,
+                        gate="|delta|>max_delta",
+                        phase="4. Max-Δ gate (StrategyPlanner)",
+                        price=cur_price, regime=regime, strategy=strategy,
+                        measured=float(approx_abs_delta),
+                        threshold=float(self.max_delta),
+                        reason=(
+                            f"Estimated |Δ|={approx_abs_delta:.3f} > "
+                            f"{self.max_delta:.2f} → short strike too close "
+                            f"to spot (σ-distance too small) to hit the "
+                            "agent's POP≥80% target."
+                        ),
+                    )
+                    continue
+                self._funnel.after_max_delta += 1
+
+                # 5. Credit-to-width ratio floor (StrategyPlanner.min_credit_ratio).
+                #
+                # IMPORTANT parity caveat — this gate is designed to reject
+                # *bad real Alpaca quotes* (stale chains, wide spreads,
+                # missing data).  When the backtester is using its synthetic
+                # `_credit_from_sigma` model, the credit is a deterministic
+                # function of σ-distance and *cannot* exhibit the data-
+                # quality failures the gate exists to catch.  Worse, the
+                # model's calibration (0.45 − 0.15·σ) puts credits below the
+                # 0.33 agent floor for any σ ≳ 0.8 — so leaving the gate on
+                # silently rejects nearly every candidate.
+                #
+                # Resolution: skip the gate when credit is synthetic, but
+                # keep it active when the user opts into a fixed-credit
+                # backtest (use_sigma_model=False) where credit_pct *is* a
+                # quote-like input the user might mis-set.
+                credit_to_width = credit / self.spread_width if self.spread_width else 0.0
+                if self.min_credit_ratio is not None and use_sigma_path:
+                    # Record the skip exactly once per run so the funnel
+                    # reflects that the gate is intentionally bypassed.
+                    if "credit_ratio" not in self._funnel.skipped_phases:
+                        self._funnel.skipped_phases.append("credit_ratio")
+                if (
+                    self.min_credit_ratio is not None
+                    and not use_sigma_path           # synthetic credit ⇒ skip
+                    and credit_to_width < self.min_credit_ratio
+                ):
+                    self._record_rejection(
+                        ticker=ticker, entry_date=entry_dt,
+                        gate="credit_ratio<floor",
+                        phase="5. Credit-ratio gate (StrategyPlanner)",
+                        price=cur_price, regime=regime, strategy=strategy,
+                        measured=float(credit_to_width),
+                        threshold=float(self.min_credit_ratio),
+                        reason=(
+                            f"Credit/width {credit_to_width:.3f} < "
+                            f"{self.min_credit_ratio:.2f} floor — "
+                            "live agent rejects quotes with insufficient "
+                            "premium relative to max-loss."
+                        ),
+                    )
+                    continue
+                self._funnel.after_credit_ratio += 1
+
+                # 6. Max-risk-per-trade (RiskManager.max_risk_pct × equity).
+                if self.max_risk_pct is not None:
+                    allowed_loss = equity * self.max_risk_pct
+                    if max_loss * 100.0 > allowed_loss:
+                        self._record_rejection(
+                            ticker=ticker, entry_date=entry_dt,
+                            gate="max_loss>risk_budget",
+                            phase="6. Max-risk gate (RiskManager)",
+                            price=cur_price, regime=regime, strategy=strategy,
+                            measured=float(max_loss * 100.0),
+                            threshold=float(allowed_loss),
+                            reason=(
+                                f"Max-loss ${max_loss*100:.2f} > "
+                                f"{self.max_risk_pct*100:.1f}% of ${equity:.2f} "
+                                f"equity (=${allowed_loss:.2f}) — live agent "
+                                "sizes trades against this same cap."
+                            ),
+                        )
+                        continue
+                self._funnel.after_max_risk += 1
+
+                otm_pct = INTRADAY_OTM_PCT if is_intraday else DAILY_OTM_PCT
+                
+                # ── Live Quote Refresh (Phase VI) ─────────────────────
+                # Mirror the live agent's executor._refresh_limit_price() pattern:
+                # fetch fresh option quotes immediately before execution and
+                # re-validate economics-bearing guardrails.  This prevents
+                # simulating trades on stale quotes that would be rejected
+                # in live trading.
+                if self._alpaca_api_key and self._alpaca_secret_key:
+                    (
+                        refreshed_strike_distance,
+                        refreshed_credit,
+                        refreshed_delta,
+                        refresh_status,
+                    ) = self._refresh_live_quotes(
+                        ticker=ticker,
+                        entry_date=entry_dt,
+                        strategy=strategy,
+                        strike_distance_pct=strike_distance_pct,
+                        credit=credit,
+                        approx_abs_delta=approx_abs_delta,
+                        equity=equity,
+                    )
+                    
+                    if refresh_status in ("rejected_credit_ratio", "rejected_max_loss"):
+                        # Guardrail failed — skip this trade
+                        self._record_rejection(
+                            ticker=ticker,
+                            entry_date=entry_dt,
+                            gate=f"live_quote_{refresh_status}",
+                            phase="6. Live Quote Refresh (Executor)",
+                            price=cur_price,
+                            regime=regime,
+                            strategy=strategy,
+                            measured=refreshed_credit if refreshed_credit else None,
+                            threshold=(
+                                self.min_credit_ratio * self.spread_width
+                                if refresh_status == "rejected_credit_ratio"
+                                else equity * self.max_risk_pct
+                            ),
+                            reason=(
+                                f"Live quote refresh {refresh_status} — "
+                                f"trade would be rejected in live trading"
+                            ),
+                        )
+                        continue
+                    elif refresh_status == "drift_warning":
+                        # Log significant drift but continue with refreshed values
+                        logger.info(
+                            "[%s] Live quote drift detected: %s — using refreshed values",
+                            ticker, refresh_status,
+                        )
+                    
+                    # Use refreshed values if available
+                    if refreshed_credit is not None:
+                        credit = refreshed_credit
+                        if refreshed_strike_distance is not None:
+                            strike_distance_pct = refreshed_strike_distance
+                        if refreshed_delta is not None:
+                            approx_abs_delta = refreshed_delta
+                    
+                    logger.debug(
+                        "[%s] Live quote refresh: %s (credit: $%.2f→$%.2f)",
+                        ticker, refresh_status, credit, credit,
+                    )
+                
+                if alpaca_historical_plan is not None:
+                    # Real-data simulation — use Alpaca option bars for
+                    # the exit value instead of the synthetic payoff model.
+                    outcome, pnl, hold_count = self._simulate_alpaca_historical(
+                        plan=alpaca_historical_plan,
+                        entry_date=entry_dt,
+                        hold_bars=hold_bars,
+                        underlying_prices=prices,
+                        entry_idx=i,
+                        loss_cut_multiplier=self.loss_cut_multiplier,
+                        stop_loss_pct=self.stop_loss_pct,
+                    )
+                else:
+                    outcome, pnl, hold_count = self._simulate(
+                        prices, i, regime, credit, hold_bars, otm_pct,
+                        strike_distance_pct=strike_distance_pct,
+                        loss_cut_multiplier=self.loss_cut_multiplier,
+                        stop_loss_pct=self.stop_loss_pct,
+                    )
                 equity = round(equity + pnl, 2)
                 last_entry_idx = i
 
@@ -478,6 +2308,47 @@ class Backtester:
                 equity_curve.append(
                     {"timestamp": pd.Timestamp(raw_date), "account_balance": equity}
                 )
+                self._funnel.simulated += 1
+
+        # Patch the funnel for gates that were intentionally skipped this
+        # run (e.g. credit_ratio under σ-path).  Without this, the UI
+        # funnel would show an artificial drop from max_delta → credit_ratio
+        # of zero "survivors" even though no rejection happened.
+        if "credit_ratio" in self._funnel.skipped_phases:
+            self._funnel.after_credit_ratio = self._funnel.after_max_delta
+
+        # Surface rejection counts so the UI can show why candidates were
+        # dropped by the agent-parity gates.  Keeps "skipped" human-readable.
+        for reason, n in sorted(self.rejections.items()):
+            skipped.append(f"{n} candidate(s) rejected by gate: {reason}")
+
+        # Surface rate-limit / call-volume stats so the user can tell
+        # at a glance whether the run was throttled.
+        limiter_stats = _ALPACA_RATE_LIMITER.stats()
+        skipped.append(
+            f"Alpaca calls: {self.alpaca_calls_made} "
+            f"(429 retries: {self.alpaca_429_hits}, "
+            f"rate-limit sleeps: {limiter_stats['sleep_count']} "
+            f"totaling {limiter_stats['total_sleep_s']:.1f}s, "
+            f"failures after retry: {self.alpaca_failures}, "
+            f"budget: {limiter_stats['budget_rpm']}/min)"
+        )
+
+        # Snapshot diagnostics for the result.  Copy (not alias) so a
+        # subsequent .run() on the same Backtester instance doesn't mutate
+        # an already-returned BacktestResult.
+        rejection_counts_snap = dict(self.rejections)
+        rejection_samples_snap = list(self._rejection_samples)
+        funnel_snap = PhaseFunnel(
+            considered=self._funnel.considered,
+            after_earnings=self._funnel.after_earnings,
+            after_iv_rank=self._funnel.after_iv_rank,
+            after_max_delta=self._funnel.after_max_delta,
+            after_credit_ratio=self._funnel.after_credit_ratio,
+            after_max_risk=self._funnel.after_max_risk,
+            simulated=self._funnel.simulated,
+            skipped_phases=list(self._funnel.skipped_phases),
+        )
 
         if not all_trades:
             empty_trades = pd.DataFrame(
@@ -493,6 +2364,9 @@ class Backtester:
                 metrics=self._metrics([], self.starting_equity),
                 regime_stats=pd.DataFrame(columns=["regime", "pnl", "trade_count"]),
                 skipped=skipped,
+                funnel=funnel_snap,
+                rejection_counts=rejection_counts_snap,
+                rejection_samples=rejection_samples_snap,
             )
 
         trades_df = pd.DataFrame([vars(t) for t in all_trades])
@@ -504,6 +2378,9 @@ class Backtester:
             metrics=self._metrics(all_trades, self.starting_equity),
             regime_stats=self._regime_stats(trades_df),
             skipped=skipped,
+            funnel=funnel_snap,
+            rejection_counts=rejection_counts_snap,
+            rejection_samples=rejection_samples_snap,
         )
 
     # ── Stats helpers ───────────────────────────────────────────────────────
@@ -574,10 +2451,27 @@ def _run_cached(
     use_alpaca: bool,
     sigma_mult: Optional[float] = None,
     loss_cut_multiplier: Optional[float] = None,
+    # --- Agent-parity gates (propagated from the UI panel) ---
+    min_credit_ratio: Optional[float] = None,
+    max_delta: Optional[float] = None,
+    max_risk_pct: Optional[float] = None,
+    stop_loss_pct: Optional[float] = None,
+    use_iv_gate: bool = False,
+    use_earnings_gate: bool = False,
+    earnings_lookahead_days: int = AGENT_EARNINGS_LOOKAHEAD,
+    use_alpaca_historical: bool = False,
 ) -> BacktestResult:
     return Backtester(
         sigma_mult=sigma_mult,
         loss_cut_multiplier=loss_cut_multiplier,
+        min_credit_ratio=min_credit_ratio,
+        max_delta=max_delta,
+        max_risk_pct=max_risk_pct,
+        stop_loss_pct=stop_loss_pct,
+        use_iv_gate=use_iv_gate,
+        use_earnings_gate=use_earnings_gate,
+        earnings_lookahead_days=earnings_lookahead_days,
+        use_alpaca_historical=use_alpaca_historical,
     ).run(list(tickers), start, end, timeframe, use_alpaca)
 
 
@@ -670,8 +2564,31 @@ def render_backtest_ui() -> None:
             "Use Alpaca Data",
             value=False,
             key="bt_use_alpaca",
-            help="Prefer Alpaca historical bars over yfinance (requires live API key).",
+            help="Prefer Alpaca historical bars over yfinance (requires ALPACA_API_KEY and ALPACA_SECRET_KEY in .env).",
         )
+
+        use_alpaca_historical = st.toggle(
+            "Match live trading (real Alpaca options, ~30d)",
+            value=False,
+            key="bt_use_alpaca_historical",
+            help=(
+                "Use REAL historical Alpaca option bars for both entry "
+                "credit AND exit P&L. Mirrors live-trading economics "
+                "exactly for dates inside Alpaca's options retention "
+                "window (~30 days).\n\n"
+                "When this is ON, the synthetic σ-credit model is "
+                "bypassed. Bars that don't have Alpaca option data are "
+                "skipped and reported in the funnel as "
+                "'alpaca_historical_no_data' — that's expected for dates "
+                "outside the retention window.\n\n"
+                "Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in .env."
+            ),
+        )
+        if use_alpaca_historical:
+            st.caption(
+                "Real-data mode: set Start Date within the last ~30 days "
+                "for meaningful coverage."
+            )
 
         # ── Strategy-realism knobs ────────────────────────────────────────
         st.markdown("**Strategy Realism**")
@@ -719,12 +2636,61 @@ def render_backtest_ui() -> None:
             loss_cut_value: Optional[float] = st.slider(
                 "Loss-cut multiplier (× credit)",
                 min_value=1.0, max_value=4.0,
-                value=float(DEFAULT_LOSS_CUT_MULTIPLIER), step=0.25,
+                value=float(AGENT_HARD_STOP_MULT), step=0.25,
                 key="bt_loss_cut_mult",
-                help="1.0 = breakeven cut, 2.0 = standard, 4.0 ≈ full max-loss.",
+                help=(
+                    f"Matches the agent's hard_stop_multiplier (default "
+                    f"{AGENT_HARD_STOP_MULT:.1f}×). The legacy "
+                    f"{DEFAULT_LOSS_CUT_MULTIPLIER:.1f}× breakeven-shaper "
+                    "is still available — just drag the slider."
+                ),
             )
         else:
             loss_cut_value = None
+
+        # ── Agent-parity gates ────────────────────────────────────────────
+        # Default-ON so interactive backtests use the same entry filters,
+        # risk budget, and exit thresholds as the live agent.
+        st.markdown("**Agent Parity**")
+        agent_parity = st.toggle(
+            "Enforce agent-parity filters",
+            value=True,
+            key="bt_agent_parity",
+            help=(
+                "When enabled, the backtester applies the live agent's "
+                "entry gates and exit rules with their production defaults:\n\n"
+                f"• Min credit/width ≥ {AGENT_MIN_CREDIT_RATIO} "
+                "(StrategyPlanner) — auto-skipped when σ-credit model "
+                "is active (synthetic credit can't fail this gate the way "
+                "bad real quotes can)\n"
+                f"• Short-leg |Δ| ≤ {AGENT_MAX_DELTA} "
+                "(StrategyPlanner, ≈80% POP)\n"
+                f"• Max loss ≤ {AGENT_MAX_RISK_PCT*100:.0f}% of equity "
+                "(RiskManager)\n"
+                f"• Exit at min(hard_stop × {AGENT_HARD_STOP_MULT}×credit, "
+                f"stop_loss × {AGENT_STOP_LOSS_PCT*100:.0f}%×max-loss) "
+                "(ExitMonitor)\n"
+                "• Skip entries inside the earnings-calendar lookahead\n"
+                "• Skip entries when IV-rank > 95 "
+                "(RegimeClassifier.high_iv_warning)"
+            ),
+        )
+        if agent_parity:
+            min_credit_ratio_val: Optional[float] = AGENT_MIN_CREDIT_RATIO
+            max_delta_val: Optional[float] = AGENT_MAX_DELTA
+            max_risk_pct_val: Optional[float] = AGENT_MAX_RISK_PCT
+            stop_loss_pct_val: Optional[float] = AGENT_STOP_LOSS_PCT
+            use_iv_gate_val = True
+            use_earnings_gate_val = True
+            earnings_lookahead_val = AGENT_EARNINGS_LOOKAHEAD
+        else:
+            min_credit_ratio_val = None
+            max_delta_val = None
+            max_risk_pct_val = None
+            stop_loss_pct_val = None
+            use_iv_gate_val = False
+            use_earnings_gate_val = False
+            earnings_lookahead_val = AGENT_EARNINGS_LOOKAHEAD
 
         st.divider()
         run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
@@ -756,12 +2722,22 @@ def render_backtest_ui() -> None:
                 tuple(sorted(tickers)), start_date, end_date, timeframe, use_alpaca,
                 sigma_mult=sigma_mult_value,
                 loss_cut_multiplier=loss_cut_value,
+                min_credit_ratio=min_credit_ratio_val,
+                max_delta=max_delta_val,
+                max_risk_pct=max_risk_pct_val,
+                stop_loss_pct=stop_loss_pct_val,
+                use_iv_gate=use_iv_gate_val,
+                use_earnings_gate=use_earnings_gate_val,
+                earnings_lookahead_days=earnings_lookahead_val,
+                use_alpaca_historical=use_alpaca_historical,
             )
             st.session_state["backtest_result"] = result
             st.session_state["backtest_timeframe"] = timeframe
             st.session_state["backtest_config"] = {
                 "sigma_mult": sigma_mult_value,
+                "use_alpaca_historical": use_alpaca_historical,
                 "loss_cut_multiplier": loss_cut_value,
+                "agent_parity": agent_parity,
             }
 
         result: Optional[BacktestResult] = st.session_state.get("backtest_result")
@@ -802,13 +2778,87 @@ def render_backtest_ui() -> None:
         cfg = st.session_state.get("backtest_config", {})
         cfg_sigma = cfg.get("sigma_mult")
         cfg_lc = cfg.get("loss_cut_multiplier")
+        cfg_parity = cfg.get("agent_parity", False)
         sigma_label = (
             f"σ×{cfg_sigma:.1f}" if cfg_sigma and cfg_sigma > 0 else "fixed-%-OTM"
         )
         lc_label = (
             f"loss-cut@{cfg_lc:.1f}×credit" if cfg_lc else "full-max-loss"
         )
-        st.caption(f"Strike model: **{sigma_label}** · Loss model: **{lc_label}**")
+        parity_label = "agent-parity ON" if cfg_parity else "agent-parity OFF"
+        data_source_label = (
+            "alpaca-historical-30d"
+            if cfg.get("use_alpaca_historical")
+            else f"sigma-model"
+        )
+        st.caption(
+            f"Strike model: **{sigma_label}** · Loss model: **{lc_label}** · "
+            f"Data: **{data_source_label}** · **{parity_label}**"
+        )
+
+        # ── Decision-path diagnostics (funnel + per-candidate samples) ────
+        funnel = getattr(result, "funnel", None)
+        rej_counts = getattr(result, "rejection_counts", {}) or {}
+        rej_samples = getattr(result, "rejection_samples", []) or []
+        if funnel is not None and (funnel.considered > 0 or rej_counts):
+            with st.expander(
+                "Decision-path diagnostics (why each candidate was accepted / rejected)",
+                expanded=False,
+            ):
+                st.markdown("**Candidate funnel**")
+                funnel_df = pd.DataFrame(funnel.as_rows())
+                st.dataframe(funnel_df, use_container_width=True, hide_index=True)
+                if funnel.skipped_phases:
+                    st.info(
+                        "Phases intentionally skipped this run: "
+                        + ", ".join(funnel.skipped_phases)
+                    )
+
+                if rej_counts:
+                    st.markdown("**Rejection counts by gate**")
+                    rc_df = (
+                        pd.DataFrame(
+                            [{"gate": k, "count": v} for k, v in rej_counts.items()]
+                        )
+                        .sort_values("count", ascending=False)
+                        .reset_index(drop=True)
+                    )
+                    st.dataframe(rc_df, use_container_width=True, hide_index=True)
+
+                if rej_samples:
+                    st.markdown(
+                        f"**Per-candidate rejection samples** "
+                        f"(capped at {REJECTION_SAMPLE_CAP} per gate)"
+                    )
+                    samp_df = pd.DataFrame([
+                        {
+                            "entry_date": r.entry_date,
+                            "ticker": r.ticker,
+                            "phase": r.phase,
+                            "gate": r.gate,
+                            "price": r.price,
+                            "regime": r.regime,
+                            "strategy": r.strategy,
+                            "measured": r.measured,
+                            "threshold": r.threshold,
+                            "reason": r.reason,
+                        }
+                        for r in rej_samples
+                    ])
+                    gate_choices = sorted(samp_df["gate"].unique().tolist())
+                    gate_filter = st.multiselect(
+                        "Filter by gate",
+                        options=gate_choices,
+                        default=gate_choices,
+                        key="bt_rej_gate_filter",
+                    )
+                    if gate_filter:
+                        samp_df = samp_df[samp_df["gate"].isin(gate_filter)]
+                    st.dataframe(
+                        samp_df.sort_values("entry_date").reset_index(drop=True),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
         # ── Summary metric cards ───────────────────────────────────────────
         hold_label = "Avg Hold (bars)" if is_result_intraday else "Avg Hold (days)"

@@ -31,7 +31,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, time as dtime
 from typing import Callable
-from zoneinfo import ZoneInfo
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 from trading_agent.calendar_utils import is_trading_day
 

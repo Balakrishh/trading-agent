@@ -97,8 +97,11 @@ class TestLiquidityCheck:
 
     def test_illiquid_underlying_fails(self):
         plan = _make_plan(ratio=0.34, max_loss=300)
+        # $0.80 spread on SPY @ ~$500 — exceeds the scaled 5 bps gate
+        # (max($0.05, 0.0005 × $500) = $0.25) but well below the 1%
+        # stale-quote threshold ($5), so it lands in the hard-FAIL branch.
         verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
-                                   underlying_bid_ask=(499.90, 499.96))  # $0.06 spread
+                                   underlying_bid_ask=(499.40, 500.20))
         assert verdict.approved is False
         assert any("illiquid" in f.lower() for f in verdict.checks_failed)
 
@@ -109,6 +112,94 @@ class TestLiquidityCheck:
                                    underlying_bid_ask=None)
         assert verdict.approved is True
         assert not any("liquid" in p.lower() for p in verdict.checks_passed)
+
+
+class TestScaledLiquidityCheck:
+    """
+    The bid/ask gate is now ``max(absolute_floor, bps_of_mid × mid)``.
+    A flat $0.05 cap over-rejects high-priced underlyings (SPY, GOOG)
+    where 2-3 cent spreads on $500-$2000 names are normal.
+    """
+
+    def setup_method(self):
+        self.rm = RiskManager(
+            max_risk_pct=0.02,
+            min_credit_ratio=0.25,
+            max_delta=0.25,
+            liquidity_max_spread=0.05,       # absolute floor
+            liquidity_bps_of_mid=0.0005,     # 5 bps slope
+            stale_spread_pct=0.01,           # 1% relative threshold
+        )
+
+    def test_high_priced_underlying_passes_under_scaled_gate(self):
+        """SPY ~ $500: 5 bps × 500 = $0.25 — a $0.10 spread should pass
+        even though it exceeds the flat $0.05 floor."""
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=(499.95, 500.05))
+        assert verdict.approved is True
+        assert any("liquid" in p.lower() for p in verdict.checks_passed)
+
+    def test_low_priced_underlying_uses_floor(self):
+        """At spot $20, 5 bps × 20 = $0.01, but the absolute floor is
+        $0.05 — so a $0.04 spread should still pass."""
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=(19.98, 20.02))
+        assert verdict.approved is True
+
+    def test_high_priced_underlying_with_wide_spread_fails(self):
+        """SPY ~ $500 but $0.30 spread — exceeds 5 bps × $500 = $0.25
+        AND below the 1% stale threshold ($5) — should hard-fail."""
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=(499.85, 500.15))
+        assert verdict.approved is False
+        assert any("illiquid" in f.lower() for f in verdict.checks_failed)
+
+
+class TestStaleQuoteSoftPass:
+    """
+    When the relative spread is huge (>1% of mid) the quote is almost
+    certainly stale on the free IEX feed.  Stale quotes get a WARN
+    soft-pass rather than a hard FAIL — otherwise we never trade
+    high-priced names whose IEX-only feed sometimes prints $10+ spreads.
+    """
+
+    def setup_method(self):
+        self.rm = RiskManager(
+            max_risk_pct=0.02,
+            min_credit_ratio=0.25,
+            max_delta=0.25,
+            liquidity_max_spread=0.05,
+            liquidity_bps_of_mid=0.0005,
+            stale_spread_pct=0.01,
+        )
+
+    def test_stale_spread_softpasses(self):
+        """GOOG-style: bid=170, ask=182.58 → spread $12.58 / mid $176.29
+        ≈ 7.1% > 1% threshold — should soft-pass with a warning."""
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=(170.00, 182.58))
+        assert verdict.approved is True
+        # The pass message should explicitly call out STALE
+        assert any("stale" in p.lower() for p in verdict.checks_passed)
+        # Hard-fail must NOT have triggered
+        assert not any("illiquid" in f.lower() for f in verdict.checks_failed)
+
+    def test_borderline_below_stale_threshold_still_evaluates_normally(self):
+        """0.9% relative spread: below 1% stale threshold, must evaluate
+        against the scaled gate (and fail if too wide)."""
+        plan = _make_plan(ratio=0.34, max_loss=300)
+        # bid=100, ask=100.90 → spread 0.90 / mid 100.45 ≈ 0.896% (< 1% stale)
+        # Scaled gate: max($0.05, 5bps × $100.45 = $0.05) = $0.05; spread $0.90 fails
+        verdict = self.rm.evaluate(plan, 100_000, "paper", True, False,
+                                   underlying_bid_ask=(100.00, 100.90))
+        assert verdict.approved is False
+        assert any("illiquid" in f.lower() for f in verdict.checks_failed)
+        # Must NOT have used the stale soft-pass branch
+        assert not any("stale" in p.lower() for p in verdict.checks_passed)
 
 
 class TestBuyingPowerCheck:

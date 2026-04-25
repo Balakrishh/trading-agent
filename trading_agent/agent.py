@@ -139,6 +139,8 @@ class TradingAgent:
             min_credit_ratio=config.trading.min_credit_ratio,
             max_delta=config.trading.max_delta,
             liquidity_max_spread=config.trading.liquidity_max_spread,
+            liquidity_bps_of_mid=config.trading.liquidity_bps_of_mid,
+            stale_spread_pct=config.trading.stale_spread_pct,
             max_buying_power_pct=config.trading.max_buying_power_pct,
             margin_multiplier=config.trading.margin_multiplier,
         )

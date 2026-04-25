@@ -400,3 +400,95 @@ class TestInsufficientDataGuard:
         result = provider.fetch_historical_prices("SPY", period_days=200)
         assert len(result) == 200
         assert "SPY" in provider._price_cache
+
+
+class TestStocksFeedParam:
+    """
+    Free/basic Alpaca subscriptions cannot read SIP — they 403 on stock
+    bars / snapshots without an explicit ``feed`` parameter.  All four
+    stock endpoints must send ``feed=iex`` by default and honor the
+    ``ALPACA_STOCKS_FEED`` env override for paid SIP users.
+    """
+
+    def _capturing_get(self, captured, payload):
+        from unittest.mock import MagicMock
+
+        def _get(url, *args, **kwargs):
+            captured.append({"url": url, "params": kwargs.get("params", {})})
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = payload
+            resp.url = url
+            resp.content = b"{}"
+            return resp
+        return _get
+
+    def test_batch_snapshots_sends_feed_iex(self, monkeypatch):
+        captured = []
+        monkeypatch.delenv("ALPACA_STOCKS_FEED", raising=False)
+        monkeypatch.setattr("requests.get",
+                            self._capturing_get(captured, {}))
+
+        provider = MarketDataProvider("k", "s")
+        provider.fetch_batch_snapshots(["SPY", "QQQ"])
+
+        assert len(captured) == 1
+        assert captured[0]["params"].get("feed") == "iex"
+
+    def test_single_snapshot_sends_feed_iex(self, monkeypatch):
+        captured = []
+        monkeypatch.delenv("ALPACA_STOCKS_FEED", raising=False)
+        monkeypatch.setattr("requests.get",
+                            self._capturing_get(
+                                captured,
+                                {"SPY": {"latestTrade": {"p": 500.0}}}))
+
+        provider = MarketDataProvider("k", "s")
+        provider._fetch_alpaca_snapshot_price("SPY")
+
+        assert len(captured) == 1
+        assert captured[0]["params"].get("feed") == "iex"
+
+    def test_underlying_bid_ask_sends_feed_iex(self, monkeypatch):
+        captured = []
+        monkeypatch.delenv("ALPACA_STOCKS_FEED", raising=False)
+        monkeypatch.setattr("requests.get",
+                            self._capturing_get(
+                                captured,
+                                {"SPY": {"latestQuote": {"bp": 499.95,
+                                                          "ap": 500.05}}}))
+
+        provider = MarketDataProvider("k", "s")
+        bid_ask = provider.get_underlying_bid_ask("SPY")
+
+        assert bid_ask == (499.95, 500.05)
+        assert len(captured) == 1
+        assert captured[0]["params"].get("feed") == "iex"
+
+    def test_5min_return_sends_feed_iex(self, monkeypatch):
+        captured = []
+        monkeypatch.delenv("ALPACA_STOCKS_FEED", raising=False)
+        monkeypatch.setattr("requests.get",
+                            self._capturing_get(
+                                captured,
+                                {"bars": [{"c": 100.0}, {"c": 100.5}]}))
+
+        provider = MarketDataProvider("k", "s")
+        provider.get_5min_return("SPY")
+
+        assert len(captured) == 1
+        assert captured[0]["params"].get("feed") == "iex"
+        # also check end-bar guard wasn't dropped
+        assert "end" in captured[0]["params"]
+
+    def test_env_override_uses_sip(self, monkeypatch):
+        """Paid SIP customers can opt out of the IEX default."""
+        captured = []
+        monkeypatch.setenv("ALPACA_STOCKS_FEED", "sip")
+        monkeypatch.setattr("requests.get",
+                            self._capturing_get(captured, {}))
+
+        provider = MarketDataProvider("k", "s")
+        provider.fetch_batch_snapshots(["SPY"])
+
+        assert captured[0]["params"].get("feed") == "sip"

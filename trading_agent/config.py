@@ -31,7 +31,9 @@ class TradingConfig:
     daily_drawdown_limit: float = 0.05  # kill process if account drops >X% in one day
     max_buying_power_pct: float = 0.80  # enter liquidation mode if BP >X% used
     margin_multiplier: float = 2.0      # broker's buying power multiplier (2.0 = standard margin, 1.0 = cash)
-    liquidity_max_spread: float = 0.05  # reject underlying if bid/ask spread >= X
+    liquidity_max_spread: float = 0.05  # absolute floor of the bid/ask gate ($)
+    liquidity_bps_of_mid: float = 0.0005  # slope of the bid/ask gate (5 bps × mid)
+    stale_spread_pct: float = 0.01       # rel-spread above which the quote is treated as stale (soft-pass)
     schedule_interval: str = "5m"       # cycle interval (for startup log / docs)
 
 
@@ -147,6 +149,8 @@ def load_config(env_path: str = None) -> AppConfig:
         max_buying_power_pct=float(os.getenv("MAX_BUYING_POWER_PCT", "0.80")),
         margin_multiplier=float(os.getenv("MARGIN_MULTIPLIER", "2.0")),
         liquidity_max_spread=float(os.getenv("LIQUIDITY_MAX_SPREAD", "0.05")),
+        liquidity_bps_of_mid=float(os.getenv("LIQUIDITY_BPS_OF_MID", "0.0005")),
+        stale_spread_pct=float(os.getenv("STALE_SPREAD_PCT", "0.01")),
         schedule_interval=os.getenv("SCHEDULE_INTERVAL", "5m"),
     )
 

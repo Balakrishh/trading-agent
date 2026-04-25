@@ -90,6 +90,21 @@ When price reaches a **3-standard-deviation Bollinger Band** (statistically extr
 
 On every cycle, the agent computes each ticker's **5-minute return** via Alpaca bars and compares it to SPY and QQQ. If the ticker outperforms by >0.1% in the 5-min window, the strategy selection is biased toward a Bull Put Spread even in a sideways regime.
 
+### Adaptive Spread Width
+
+Spread width is no longer a flat `$5`. The planner infers each chain's strike grid step (modal gap between sorted strikes — `$1` for IWM-style names, `$5` for SPY/QQQ far-dated wings) and picks:
+
+```
+width = max(SPREAD_WIDTH_FLOOR, 3 × strike_grid_step, 0.025 × spot)
+        snapped UP to the strike grid
+```
+
+This produces a `$5` spread on a `$80` ticker (floor wins) and a `$15-20` spread on SPY/QQQ at `$700` (the spot-percentage term wins) — the wider strike distance is what lets the credit clear the `1/3 × width` `MIN_CREDIT_RATIO` gate at `0.20`-delta short / 30-DTE. The legacy `SPREAD_WIDTH = $5` constant is now a hard floor, never a target. Applied to all four spread types (Bull Put, Bear Call, both Iron Condor wings).
+
+### DTE Targeting
+
+Theta capture is concentrated in the **25-40 DTE** band, so the planner targets `TARGET_DTE = 35` (was 45) and accepts any expiration in `DTE_RANGE = (28, 45)` (was `(35, 50)`). When several adjacent Fridays fall in range, the highest-DTE one is preferred (more theta runway, less gamma risk near expiry).
+
 ---
 
 ## 5-Minute Cycle Optimisations
@@ -316,7 +331,7 @@ Every trade must pass **all eight checks** before execution:
 | 4 | **Max Loss** | ≤ `MAX_RISK_PCT` × account equity per trade (default 2%) |
 | 5 | **Account Type** | Must be `paper` |
 | 6 | **Market Hours** | Market must be open |
-| 7 | **Underlying Liquidity** | Stock bid/ask spread < `LIQUIDITY_MAX_SPREAD` (default $0.05) |
+| 7 | **Underlying Liquidity** | Stock bid/ask spread < `max(LIQUIDITY_MAX_SPREAD, LIQUIDITY_BPS_OF_MID × mid)` — scales with spot so high-priced names (SPY, GOOG) aren't false-rejected. If `(spread / mid) > STALE_SPREAD_PCT` the quote is treated as stale and soft-passed with a `WARNING` instead of hard-failing. |
 | 8 | **Buying Power** | Available buying power ≥ (1 − `MAX_BUYING_POWER_PCT`) × equity |
 
 ```
@@ -565,8 +580,12 @@ pytest tests/ -v
 | `MAX_DELTA` | `0.20` | Max absolute delta of sold strike |
 | `DAILY_DRAWDOWN_LIMIT` | `0.05` | Kill process if account drops >N% in one day |
 | `MAX_BUYING_POWER_PCT` | `0.80` | Enter Liquidation Mode if >N% of BP used |
-| `LIQUIDITY_MAX_SPREAD` | `0.05` | Skip tickers where underlying bid/ask ≥ $N |
+| `LIQUIDITY_MAX_SPREAD` | `0.05` | Absolute floor of the underlying bid/ask gate ($) |
+| `LIQUIDITY_BPS_OF_MID` | `0.0005` | Slope of the bid/ask gate (5 bps × mid). Effective threshold per ticker = `max(LIQUIDITY_MAX_SPREAD, LIQUIDITY_BPS_OF_MID × mid)`. Prevents a flat 5-cent cap from over-rejecting high-priced names (SPY ≈ $500 → $0.25 gate, GOOG ≈ $170 → $0.085 gate). |
+| `STALE_SPREAD_PCT` | `0.01` | When `(spread / mid)` exceeds this, the underlying quote is treated as stale (common on the free IEX feed outside RTH or right at the open). The check soft-passes with a `WARNING` instead of hard-failing the trade. |
 | `FORCE_MARKET_OPEN` | `false` | Bypass market-hours check (paper testing) |
+| `ALPACA_STOCKS_FEED` | `iex` | Stock snapshot / bar feed. Free/basic Alpaca accounts cannot read `sip` and 403 without an explicit feed; `iex` is the correct free-tier choice. Set to `sip` if you have a paid SIP subscription. |
+| `ALPACA_OPTIONS_FEED` | `indicative` | Option snapshot feed. `indicative` is free (15-min delayed); set to `opra` for real-time on a paid OPRA subscription. |
 
 ### Core Intelligence Layer (Analyst)
 
@@ -671,8 +690,21 @@ streamlit run trading_agent/streamlit/app.py
 | Tab | Features |
 |-----|---------|
 | **📡 Live Monitoring** | Agent Start/Stop/Dry Run controls · cycle PID · equity · P&L · regime badge · open positions · equity curve · 8-guardrail status · market status · agent log · journal expander · auto-refresh 30 s |
-| **📊 Backtesting** | Date range · multi-ticker · timeframe (1Day/5Min) · simulated P&L · metric cards · per-regime bar chart · equity + drawdown charts · trade log · CSV/JSON/Journal export |
+| **📊 Backtesting** | Date range · multi-ticker · timeframe (1Day/5Min) · **Live Quote Refresh** (Alpaca API) · simulated P&L · metric cards · per-regime bar chart · equity + drawdown charts · trade log · CSV/JSON/Journal export |
 | **🤖 LLM Extension** | Chat with local Ollama model (RAG over journal) · Optimize Strategy → one-click `.env` update |
+
+#### Backtesting Live Quote Refresh
+
+The backtester now mirrors the live agent's **executor._refresh_limit_price()** pattern:
+
+- **When**: Immediately before simulating each trade (Phase VI)
+- **What**: Fetches fresh option chain from Alpaca API for the trade's underlying
+- **Why**: Prevents simulating trades on stale quotes that would be rejected in live trading
+- **Guardrails**: Re-validates credit-to-width ratio and max-loss per contract
+- **Drift Detection**: Logs warnings when credit drifts >10% from planning values
+- **Rejection**: Skips trades that fail live quote guardrails (same as live agent)
+
+**Configuration**: Enable by setting `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` in your `.env` file. The backtester will automatically use live quotes when available, falling back to simulated quotes when the API is unavailable.
 
 ---
 

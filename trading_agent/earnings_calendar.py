@@ -43,9 +43,35 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Known non-issuer tickers (ETFs / indices / treasuries) have no scheduled
+# earnings by construction.  Calling yfinance.get_earnings_dates on them
+# returns loud "No fundamentals data found" 404s that pollute the console
+# and waste an HTTP round-trip per refresh cycle.  Pre-filter cheaply.
+#
+# Not exhaustive — unknown ETFs still hit yfinance, fail gracefully, and
+# cache an empty result.  This set covers the symbols the agent and
+# backtester touch most (broad-market, sectors, vol, treasuries).
+# ---------------------------------------------------------------------------
+_NON_ISSUER_TICKERS: Set[str] = {
+    # Broad-market ETFs
+    "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "IVV", "VEA", "VWO", "EFA",
+    "EEM", "AGG", "BND", "TLT", "IEF", "SHY", "LQD", "HYG", "EMB",
+    # Sector ETFs (XL*)
+    "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLB", "XLU", "XLRE",
+    "XLC", "SMH", "XBI", "XOP", "XME", "XRT",
+    # Levered / inverse / vol
+    "TQQQ", "SQQQ", "SPXL", "SPXS", "UPRO", "SPXU", "VXX", "UVXY", "SVXY",
+    # Commodity / currency
+    "GLD", "SLV", "USO", "UNG", "UUP", "FXE", "FXY",
+    # Common indices that may end up in symbol lists
+    "SPX", "NDX", "DJX", "RUT", "VIX",
+}
 
 
 @dataclass
@@ -141,16 +167,37 @@ class EarningsCalendar:
     def _fetch(self, ticker: str) -> EarningsEntry:
         """Call yfinance for next earnings date.  Never raises."""
         next_date: Optional[date] = None
+
+        # Short-circuit ETFs/indices/treasuries — yfinance 404s loudly
+        # for these and the answer is deterministically "no earnings".
+        if ticker.upper() in _NON_ISSUER_TICKERS:
+            logger.debug(
+                "[%s] skipping earnings lookup — known non-issuer (ETF/index)",
+                ticker,
+            )
+            return EarningsEntry(
+                ticker=ticker,
+                next_date=None,
+                fetched_at=time.monotonic(),
+            )
+
         try:
             import yfinance as yf
             tk = yf.Ticker(ticker)
             # yfinance exposes `get_earnings_dates(limit=N)` returning a
             # DataFrame indexed by timestamp.  Pull a few ahead in case
-            # the nearest is stale.
+            # the nearest is stale.  Silence yfinance's own HTTP-error
+            # logger for the duration of the call so transient 404s on
+            # unknown tickers don't pollute the console.
+            yf_logger = logging.getLogger("yfinance")
+            prev_level = yf_logger.level
+            yf_logger.setLevel(logging.ERROR + 1)  # effectively silent
             try:
                 df = tk.get_earnings_dates(limit=6)
             except Exception:
                 df = None
+            finally:
+                yf_logger.setLevel(prev_level)
             today = datetime.now(timezone.utc).date()
             if df is not None and not df.empty:
                 for idx in df.index:
@@ -164,8 +211,15 @@ class EarningsCalendar:
                         break
 
             # Fallback: check the lighter-weight `calendar` property
+            # (also yfinance — silence its logger again across the call).
             if next_date is None:
-                cal = getattr(tk, "calendar", None)
+                yf_logger.setLevel(logging.ERROR + 1)
+                try:
+                    cal = getattr(tk, "calendar", None)
+                except Exception:
+                    cal = None
+                finally:
+                    yf_logger.setLevel(prev_level)
                 if cal is not None:
                     # yfinance returns either a dict {"Earnings Date": [...] }
                     # or a small DataFrame depending on version.
