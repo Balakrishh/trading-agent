@@ -68,6 +68,11 @@ from trading_agent.ports import (
 )
 from trading_agent.regime import Regime, RegimeClassifier, RegimeAnalysis
 from trading_agent.strategy import StrategyPlanner, SpreadPlan
+from trading_agent.strategy_presets import (
+    PresetConfig,
+    load_active_preset,
+    regime_is_allowed,
+)
 from trading_agent.risk_manager import RiskManager, RiskVerdict
 from trading_agent.executor import OrderExecutor
 from trading_agent.position_monitor import (
@@ -128,16 +133,39 @@ class TradingAgent:
             alpaca_data_url=config.alpaca.data_url,
             alpaca_base_url=config.alpaca.base_url,
         )
+
+        # Load the active Strategy-Profile preset (Conservative / Balanced /
+        # Aggressive / Custom) chosen via the Streamlit dashboard. The preset
+        # bundles max_delta + per-strategy DTE + width policy + C/W floor +
+        # max-risk %, plus the directional-bias filter. Falls back to BALANCED
+        # if STRATEGY_PRESET.json is missing or malformed (logged at info-level).
+        # Each subprocess re-reads the file on init, so dashboard changes apply
+        # on the next 5-min cycle without restarting the loop.
+        self.preset: PresetConfig = load_active_preset()
+        logger.info("Strategy preset → %s", self.preset.to_summary_line())
+
+        # Risk knobs come from the preset; everything else stays from the
+        # AppConfig env-loaded baseline (liquidity floors, margin, etc).
+        max_delta        = self.preset.max_delta
+        min_credit_ratio = self.preset.min_credit_ratio
+        max_risk_pct     = self.preset.max_risk_pct
+
         self.regime_classifier = RegimeClassifier(self.data_provider)
         self.strategy_planner = StrategyPlanner(
             data_provider=self.data_provider,
-            max_delta=config.trading.max_delta,
-            min_credit_ratio=config.trading.min_credit_ratio,
+            max_delta=max_delta,
+            min_credit_ratio=min_credit_ratio,
+            dte_vertical=self.preset.dte_vertical,
+            dte_iron_condor=self.preset.dte_iron_condor,
+            dte_mean_reversion=self.preset.dte_mean_reversion,
+            dte_window_days=self.preset.dte_window_days,
+            width_mode=self.preset.width_mode,
+            width_value=self.preset.width_value,
         )
         self.risk_manager = RiskManager(
-            max_risk_pct=config.trading.max_risk_pct,
-            min_credit_ratio=config.trading.min_credit_ratio,
-            max_delta=config.trading.max_delta,
+            max_risk_pct=max_risk_pct,
+            min_credit_ratio=min_credit_ratio,
+            max_delta=max_delta,
             liquidity_max_spread=config.trading.liquidity_max_spread,
             liquidity_bps_of_mid=config.trading.liquidity_bps_of_mid,
             stale_spread_pct=config.trading.stale_spread_pct,
@@ -668,6 +696,42 @@ class TradingAgent:
 
         logger.info("[%s] Phase II — CLASSIFY", ticker)
         analysis: RegimeAnalysis = self.regime_classifier.classify(ticker)
+
+        # --- Directional-bias filter (Strategy Profile) ------------------
+        # The active preset can restrict which regimes are tradeable.  This
+        # check runs immediately after classify so we short-circuit before
+        # spinning up the sentiment pipeline or option-chain fetch — both
+        # of which are expensive and pointless when the regime would be
+        # filtered out anyway.  Mean-reversion is always allowed (the 3-σ
+        # touch override is a fear-spike signal, not a directional view).
+        if not regime_is_allowed(
+            analysis.regime.value, self.preset.directional_bias
+        ):
+            reason = (
+                f"DirectionalBias={self.preset.directional_bias} blocks "
+                f"regime={analysis.regime.value}"
+            )
+            logger.info("[%s] %s — skipping ticker", ticker, reason)
+            self.journal_kb.log_signal(
+                ticker=ticker,
+                action="skipped_bias",
+                price=analysis.current_price,
+                raw_signal={
+                    "regime": analysis.regime.value,
+                    "directional_bias": self.preset.directional_bias,
+                    "preset": self.preset.name,
+                    "reason": reason,
+                },
+            )
+            return {
+                "ticker": ticker,
+                "regime": analysis.regime.value,
+                "strategy": "skipped_bias",
+                "plan_valid": False,
+                "risk_approved": False,
+                "status": "skipped",
+                "reason": reason,
+            }
 
         # --- High-IV block: IV rank > 95th pct blocks all new entries ---
         if getattr(analysis, "high_iv_warning", False):

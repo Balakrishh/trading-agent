@@ -705,6 +705,57 @@ streamlit run trading_agent/streamlit/app.py
 | **📊 Backtesting** | Date range · multi-ticker · timeframe (1Day/5Min) · **Live Quote Refresh** (Alpaca API) · simulated P&L · metric cards · per-regime bar chart · equity + drawdown charts · trade log · CSV/JSON/Journal export |
 | **🤖 LLM Extension** | Chat with local Ollama model (RAG over journal) · Optimize Strategy → one-click `.env` update |
 
+### Strategy Profile (Risk Preset)
+
+The Live Monitoring tab has a **Strategy Profile** expander that controls the four knobs that meaningfully change credit-spread economics: short-leg |Δ|, DTE per strategy, spread-width policy, and the C/W floor. Picking a profile + a directional bias and clicking **Apply** writes `STRATEGY_PRESET.json` to the repo root; the agent subprocess re-reads that file at the start of every cycle, so changes take effect on the next 5-minute tick — no restart, no cycle interruption.
+
+**Three built-in profiles plus Custom**:
+
+| Profile | Δ-short | DTE (Vert / IC / MR) | Width | C/W floor | Risk/trade | Approx. POP | Profile feel |
+|---|---|---|---|---|---|---|---|
+| Conservative | 0.15 | 35 / 45 / 21 | 2.5% × spot | 0.20 | 1% | ~85% | Far-OTM, longer DTE — fewer fires, smaller credits, high win rate |
+| **Balanced** (default) | 0.25 | 21 / 35 / 14 | 1.5% × spot | 0.30 | 2% | ~75% | 21-DTE verticals, healthy credits — recommended baseline |
+| Aggressive | 0.35 | 10 / 21 / 7  | $5 fixed   | 0.40 | 3% | ~65% | Near-ATM, short DTE — fires almost every cycle, gamma-sensitive |
+| Custom | sliders | sliders | sliders | sliders | sliders | — | Mix-and-match every knob, seeded from Balanced |
+
+**Directional-bias filter** restricts which classifier outputs the agent will trade. The check fires immediately after Phase II classify so disallowed regimes short-circuit before the sentiment pipeline or option-chain fetch. Mean-reversion is always allowed regardless of bias because the 3-σ-touch override is a fear-spike signal, not a directional view.
+
+| Bias | Allowed regimes |
+|---|---|
+| Auto (default) | Bullish · Bearish · Sideways · Mean-Reversion |
+| Bullish only | Bullish · Sideways · Mean-Reversion |
+| Bearish only | Bearish · Sideways · Mean-Reversion |
+| Neutral only | Sideways · Mean-Reversion |
+
+**Where the preset is applied**:
+
+- `agent.py::__init__` calls `load_active_preset()` and forwards `max_delta`, `min_credit_ratio`, `max_risk_pct`, all three per-strategy DTE targets, the DTE window, and the width policy into `StrategyPlanner` + `RiskManager`.
+- `strategy.py::_pick_expiration(kind=...)` honours the per-strategy DTE override only when the agent passes one (preserves legacy `DTE_RANGE` behaviour for unit tests that construct `StrategyPlanner` without preset kwargs).
+- `strategy.py::_pick_spread_width` honours `width_mode` (`"pct_of_spot"` vs `"fixed_dollar"`) and falls back to the legacy adaptive formula otherwise.
+- `agent.py::_process_ticker` calls `regime_is_allowed(regime, bias)` after classify; a `False` return logs `action="skipped_bias"` to `signals.jsonl` and short-circuits the ticker.
+
+**Persistence format** (`STRATEGY_PRESET.json`, written atomically via temp + rename):
+
+```json
+{
+  "profile": "balanced",
+  "directional_bias": "auto",
+  "custom": {
+    "max_delta": 0.22,
+    "dte_vertical": 18,
+    "dte_iron_condor": 30,
+    "dte_mean_reversion": 12,
+    "dte_window_days": 5,
+    "width_mode": "pct_of_spot",
+    "width_value": 0.020,
+    "min_credit_ratio": 0.28,
+    "max_risk_pct": 0.018
+  }
+}
+```
+
+`custom` is only consulted when `profile == "custom"`. Missing, malformed, or unknown-profile JSON falls back to **Balanced** (logged at `info`/`warning`) so a fresh install is always operational without touching the dashboard.
+
 #### Backtesting Live Quote Refresh
 
 The backtester mirrors the live agent's **executor._refresh_limit_price()** pattern:

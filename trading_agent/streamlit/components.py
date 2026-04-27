@@ -208,6 +208,37 @@ def positions_table(spreads: List[Dict]) -> None:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def ungrouped_legs_table(legs: List[Dict]) -> None:
+    """
+    Render Alpaca option legs that are NOT matched to any local
+    trade_plan_*.json file.
+
+    These legs are typically positions opened outside the agent
+    (manual entry via the Alpaca web UI, a different machine, or
+    runs whose plan files were rotated/deleted). Showing them here
+    keeps the dashboard a faithful mirror of the broker's view.
+    """
+    if not legs:
+        return  # silent — nothing to show
+    rows = []
+    for L in legs:
+        rows.append(
+            {
+                "Symbol":          L.get("symbol", ""),
+                "Underlying":      L.get("underlying", ""),
+                "Type":            L.get("type", ""),
+                "Strike":          L.get("strike", ""),
+                "Expiry":          L.get("expiration", ""),
+                "Side":            L.get("side", ""),
+                "Qty":             L.get("qty", 0),
+                "Avg Entry ($)":   round(float(L.get("avg_entry_price", 0)), 2),
+                "Current ($)":     round(float(L.get("current_price", 0)), 2),
+                "Unreal. P&L ($)": round(float(L.get("unrealized_pl", 0)), 2),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def alert_box(message: str, level: str = "warning") -> None:
     """Render an alert at the given severity level (info/warning/error/success)."""
     getattr(st, level, st.warning)(message)

@@ -22,13 +22,14 @@ State is persisted in three files:
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -39,7 +40,47 @@ from trading_agent.streamlit.components import (
     guardrail_cards,
     metric_row,
     positions_table,
+    ungrouped_legs_table,
 )
+from trading_agent.strategy_presets import (
+    AGGRESSIVE,
+    BALANCED,
+    CONSERVATIVE,
+    PRESET_FILE,
+    PRESETS,
+    PresetConfig,
+    load_active_preset,
+    save_active_preset,
+)
+
+
+_OCC_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
+
+
+def _parse_occ(symbol: str) -> Dict[str, str]:
+    """
+    Parse an OCC option symbol → underlying, expiration, type, strike.
+
+    OCC format: ROOT(1-6) + YYMMDD(6) + C/P(1) + STRIKE*1000(8)
+    Example:  SPY260516P00450000 → SPY, 2026-05-16, Put, 450.00
+
+    Returns the raw symbol as fallback `underlying` if parsing fails.
+    """
+    m = _OCC_RE.match(symbol or "")
+    if not m:
+        return {
+            "underlying":  symbol or "",
+            "expiration": "",
+            "type":       "",
+            "strike":     "",
+        }
+    root, ymd, cp, strike = m.groups()
+    return {
+        "underlying":  root,
+        "expiration": f"20{ymd[0:2]}-{ymd[2:4]}-{ymd[4:6]}",
+        "type":        "Call" if cp == "C" else "Put",
+        "strike":      f"{int(strike) / 1000:.2f}",
+    }
 
 # ---------------------------------------------------------------------------
 # File-based state paths (relative to repo root)
@@ -297,7 +338,19 @@ def _fetch_account(config) -> Dict:
         return {}
 
 
-def _fetch_spreads(config) -> List[Dict]:
+def _fetch_spreads(config) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Return (spreads, ungrouped_legs).
+
+    `spreads` are option positions that matched a local `trade_plan_*.json`
+    and were aggregated by `PositionMonitor.group_into_spreads`.
+
+    `ungrouped_legs` are option legs in the broker account that did NOT
+    match any local trade plan — typically positions opened outside the
+    agent or runs whose plan files were rotated/deleted. They are still
+    real money in the account, so we surface them rather than silently
+    dropping them.
+    """
     try:
         from trading_agent.position_monitor import PositionMonitor
         monitor = PositionMonitor(
@@ -320,18 +373,46 @@ def _fetch_spreads(config) -> List[Dict]:
                 except Exception:
                     pass
 
-        spreads = monitor.group_into_spreads(positions, trade_plans)
-        return [{
-            "underlying":      s.underlying,
-            "strategy_name":   s.strategy_name,
-            "original_credit": s.original_credit,
-            "net_unrealized_pl": s.net_unrealized_pl,
-            "expiration":      s.expiration,
-            "exit_signal":     s.exit_signal.value,
-        } for s in spreads]
+        spread_objs = monitor.group_into_spreads(positions, trade_plans)
+
+        spreads = [
+            {
+                "underlying":        s.underlying,
+                "strategy_name":     s.strategy_name,
+                "original_credit":   s.original_credit,
+                "net_unrealized_pl": s.net_unrealized_pl,
+                "expiration":        s.expiration,
+                "exit_signal":       s.exit_signal.value,
+            }
+            for s in spread_objs
+        ]
+
+        # Any leg whose symbol didn't end up in a matched spread is "ungrouped".
+        matched_symbols = {leg.symbol for s in spread_objs for leg in s.legs}
+        ungrouped_legs = []
+        for p in positions:
+            if p.symbol in matched_symbols:
+                continue
+            occ = _parse_occ(p.symbol)
+            ungrouped_legs.append(
+                {
+                    "symbol":          p.symbol,
+                    "underlying":      occ["underlying"],
+                    "expiration":      occ["expiration"],
+                    "type":            occ["type"],
+                    "strike":          occ["strike"],
+                    "qty":             p.qty,
+                    "side":            p.side,
+                    "avg_entry_price": p.avg_entry_price,
+                    "current_price":   p.current_price,
+                    "unrealized_pl":   p.unrealized_pl,
+                }
+            )
+
+        return spreads, ungrouped_legs
     except Exception as exc:
         st.warning(f"Position fetch failed: {exc}")
-        return []
+        return [], []
 
 
 def _is_market_open(config) -> Optional[bool]:
@@ -363,6 +444,226 @@ def _auto_refresh(interval_secs: int = REFRESH_INTERVAL) -> None:
         st.caption(f"Auto-refreshing in {remaining}s…")
         time.sleep(1)
         st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Strategy-Profile panel
+# ---------------------------------------------------------------------------
+#
+# The panel writes ``STRATEGY_PRESET.json`` (next to AGENT_RUNNING) when
+# the user clicks Apply.  The agent subprocess re-reads that file at the
+# start of every cycle (see ``agent.TradingAgent.__init__`` →
+# ``load_active_preset``), so changes take effect on the next 5-min tick
+# without restarting the loop.
+#
+# Layout: two top-level selectboxes (risk profile + directional bias)
+# plus an expander that's only meaningful when profile == "custom".
+
+_PROFILE_OPTIONS:    List[str] = ["conservative", "balanced", "aggressive", "custom"]
+_PROFILE_LABELS: Dict[str, str] = {
+    "conservative": "Conservative — ~85% POP, low risk, fewer trades",
+    "balanced":     "Balanced — ~75% POP, recommended baseline",
+    "aggressive":   "Aggressive — ~65% POP, fat credits, gamma-sensitive",
+    "custom":       "Custom — tune every knob yourself",
+}
+
+_BIAS_OPTIONS:    List[str] = ["auto", "bullish_only", "bearish_only", "neutral_only"]
+_BIAS_LABELS: Dict[str, str] = {
+    "auto":         "Auto — trade whatever regime classifier reports",
+    "bullish_only": "Bullish only — Bull Puts + Iron Condors + MR",
+    "bearish_only": "Bearish only — Bear Calls + Iron Condors + MR",
+    "neutral_only": "Neutral only — Iron Condors + MR (no directional)",
+}
+
+
+def _custom_inputs(seed: PresetConfig) -> Dict:
+    """Render the Custom-mode override widgets and return a dict of values."""
+    st.caption(
+        "Custom overrides start from the **Balanced** baseline. Only the "
+        "fields you change are persisted; everything else stays on the default."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        max_delta = st.slider(
+            "Max short-leg |Δ|", 0.05, 0.45, float(seed.max_delta), 0.01,
+            help="0.15 ≈ 85% POP · 0.25 ≈ 75% POP · 0.35 ≈ 65% POP",
+            key="cust_max_delta",
+        )
+        min_credit_ratio = st.slider(
+            "Credit/Width floor", 0.10, 0.50, float(seed.min_credit_ratio), 0.05,
+            help="Reject spreads whose credit / width is below this floor.",
+            key="cust_min_cw",
+        )
+        max_risk_pct = st.slider(
+            "Max account risk per trade (%)",
+            0.5, 5.0, float(seed.max_risk_pct) * 100, 0.5,
+            help="Hard cap on max-loss as a fraction of account equity.",
+            key="cust_max_risk",
+        ) / 100.0
+        dte_window_days = st.slider(
+            "DTE window ± (days)", 1, 14, int(seed.dte_window_days), 1,
+            key="cust_dte_window",
+        )
+    with c2:
+        dte_vertical = st.slider(
+            "Vertical (Bull Put / Bear Call) DTE",
+            5, 60, int(seed.dte_vertical), 1,
+            key="cust_dte_v",
+        )
+        dte_iron_condor = st.slider(
+            "Iron Condor DTE", 7, 60, int(seed.dte_iron_condor), 1,
+            key="cust_dte_ic",
+        )
+        dte_mean_reversion = st.slider(
+            "Mean-Reversion DTE", 3, 30, int(seed.dte_mean_reversion), 1,
+            key="cust_dte_mr",
+        )
+
+    st.markdown("**Spread-width policy**")
+    wc1, wc2 = st.columns(2)
+    with wc1:
+        width_mode = st.radio(
+            "Width mode",
+            options=["pct_of_spot", "fixed_dollar"],
+            index=0 if seed.width_mode == "pct_of_spot" else 1,
+            format_func=lambda v: "% of spot" if v == "pct_of_spot" else "Fixed $",
+            horizontal=True,
+            key="cust_width_mode",
+        )
+    with wc2:
+        if width_mode == "pct_of_spot":
+            width_value = st.slider(
+                "Width (% of spot)", 0.5, 5.0,
+                float(seed.width_value) * 100 if seed.width_mode == "pct_of_spot"
+                else 1.5,
+                0.1, key="cust_width_pct",
+            ) / 100.0
+        else:
+            width_value = st.slider(
+                "Width ($)", 1.0, 25.0,
+                float(seed.width_value) if seed.width_mode == "fixed_dollar"
+                else 5.0,
+                0.5, key="cust_width_usd",
+            )
+
+    return {
+        "max_delta":          max_delta,
+        "dte_vertical":       dte_vertical,
+        "dte_iron_condor":    dte_iron_condor,
+        "dte_mean_reversion": dte_mean_reversion,
+        "dte_window_days":    dte_window_days,
+        "width_mode":         width_mode,
+        "width_value":        width_value,
+        "min_credit_ratio":   min_credit_ratio,
+        "max_risk_pct":       max_risk_pct,
+    }
+
+
+def render_strategy_profile_panel() -> None:
+    """
+    Two-row Strategy-Profile selector + Apply button.
+
+    Reads the current preset from ``STRATEGY_PRESET.json`` (or the
+    BALANCED default when the file is missing) and writes the next
+    selection back atomically. Hot-applied on the next cycle.
+    """
+    current = load_active_preset()
+    is_loop_running = AGENT_RUNNING.exists()
+
+    with st.expander(
+        f"Strategy Profile — {current.to_summary_line()}",
+        expanded=not is_loop_running,
+    ):
+        st.markdown(
+            "Pick a risk profile + directional bias. Changes are written to "
+            "`STRATEGY_PRESET.json` and applied **on the next cycle** — no "
+            "restart needed. The active preset drives Δ-short, DTE per "
+            "strategy, spread width, C/W floor, and the % of equity at risk."
+        )
+
+        col_p, col_b = st.columns(2)
+
+        # Decide the index to show as currently-selected.  If the file says
+        # "custom", that's preserved; otherwise lookup the current preset's
+        # name in the canonical option list.
+        try:
+            saved_payload = (
+                json.loads(PRESET_FILE.read_text())
+                if PRESET_FILE.exists() else {}
+            )
+        except (json.JSONDecodeError, OSError):
+            saved_payload = {}
+
+        profile_default = (
+            saved_payload.get("profile", current.name)
+            if saved_payload.get("profile") in _PROFILE_OPTIONS
+            else current.name
+        )
+        bias_default = current.directional_bias
+
+        with col_p:
+            profile = st.selectbox(
+                "Risk profile",
+                options=_PROFILE_OPTIONS,
+                index=_PROFILE_OPTIONS.index(profile_default),
+                format_func=lambda v: _PROFILE_LABELS[v],
+                key="strat_profile",
+            )
+        with col_b:
+            bias = st.selectbox(
+                "Directional bias",
+                options=_BIAS_OPTIONS,
+                index=_BIAS_OPTIONS.index(bias_default),
+                format_func=lambda v: _BIAS_LABELS[v],
+                key="strat_bias",
+            )
+
+        # Preview line for the chosen built-in.
+        if profile in PRESETS:
+            preview = PRESETS[profile]
+            st.caption(f"Selected preset → {preview.description}")
+
+        # Custom overrides — only meaningful when profile == "custom".
+        custom_payload: Optional[Dict] = None
+        if profile == "custom":
+            seed = current if current.name == "custom" else BALANCED
+            custom_payload = _custom_inputs(seed)
+
+        # Apply / status row
+        ac1, ac2 = st.columns([1, 3])
+        with ac1:
+            apply_clicked = st.button(
+                "💾 Apply", type="primary", use_container_width=True,
+                key="strat_apply",
+            )
+        with ac2:
+            if is_loop_running:
+                st.caption(
+                    "Agent is running — changes apply on the **next cycle** "
+                    "(no restart, no current-cycle interruption)."
+                )
+            else:
+                st.caption(
+                    "Agent is stopped — the new preset will load on the "
+                    "first cycle when you click ▶ Start Agent."
+                )
+
+        if apply_clicked:
+            try:
+                save_active_preset(
+                    profile=profile,
+                    directional_bias=bias,
+                    custom=custom_payload,
+                )
+                st.toast(
+                    f"Saved profile=**{profile}**, bias=**{bias}** — "
+                    "active on next cycle.",
+                    icon="✅",
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not save preset: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -512,12 +813,13 @@ def render_live_monitor() -> None:
     equity = 0.0
     total_pnl = 0.0
     spreads: List[Dict] = []
+    ungrouped_legs: List[Dict] = []
 
     if config:
         account = _fetch_account(config)
         equity = float(account.get("equity") or 0)
         total_pnl = float(account.get("unrealized_pl") or 0)
-        spreads = _fetch_spreads(config)
+        spreads, ungrouped_legs = _fetch_spreads(config)
 
     if equity == 0.0 and not journal_df.empty:
         nonzero = journal_df[journal_df["account_balance"] > 0]["account_balance"]
@@ -538,9 +840,22 @@ def render_live_monitor() -> None:
     metric_row(equity, total_pnl, regime, cycle_secs)
     st.divider()
 
+    # ── Strategy profile panel ─────────────────────────────────────────────
+    render_strategy_profile_panel()
+    st.divider()
+
     # ── Open positions ─────────────────────────────────────────────────────
     st.subheader("Open Positions")
     positions_table(spreads)
+
+    if ungrouped_legs:
+        st.caption(
+            f"Ungrouped Alpaca legs ({len(ungrouped_legs)}) — open option "
+            "positions in your broker account that don't match any local "
+            "`trade_plan_*.json`. These were likely opened outside the agent "
+            "or have missing/rotated plan files. Exit signals do not apply."
+        )
+        ungrouped_legs_table(ungrouped_legs)
     st.divider()
 
     # ── Equity curve ───────────────────────────────────────────────────────

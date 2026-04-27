@@ -112,31 +112,59 @@ class StrategyPlanner:
     # times per session in a normal regime.
     RS_ZSCORE_THRESHOLD = 1.5
 
-    # Legacy fixed width — retained as a floor; the active width is now
-    # computed per-underlying by ``_pick_spread_width`` below.  At spot=$200
-    # this floor matches the legacy behavior; at spot=$700 (SPY/QQQ) the
-    # adaptive width takes over and produces ~$15-20 wide spreads, which
-    # is what's needed to clear the 1/3-of-width credit target on a
-    # 30-40 DTE 0.20-delta short put.
+    # Legacy class-level defaults — kept for back-compat with callers that
+    # don't pass overrides (and for tests that read them as class attrs).
+    # The Strategy-Profile preset system overrides these at __init__ time
+    # via the ``preset`` keyword; see ``strategy_presets.PresetConfig`` and
+    # ``trading_agent/strategy_presets.py`` for the active values.
     SPREAD_WIDTH = 5.0
-    # Theta capture is concentrated in the 25-40 DTE band; the prior
-    # 45 DTE / (35,50) range was too far out, leaving credits thin and
-    # forcing the credit/width gate into perpetual fail mode.
     TARGET_DTE = 35
     DTE_RANGE = (28, 45)
-    # Delta targeting window for the short leg: maximises POP while capping risk.
-    # Lowered from 0.20 to 0.15 to preserve a meaningful sweet-spot range when
-    # max_delta is 0.20 (default). With MIN_DELTA == max_delta the band would
-    # collapse to a single point and every trade would land in the fallback branch.
     MIN_DELTA = 0.15            # floor — below this is too far OTM (low credit)
-    # max_delta passed via __init__ (default 0.20 — matches README design, ~80% POP)
+
+    # Strategy "kind" labels used by _pick_expiration to select per-strategy DTE.
+    KIND_VERTICAL       = "vertical"        # Bull Put / Bear Call
+    KIND_IRON_CONDOR    = "iron_condor"
+    KIND_MEAN_REVERSION = "mean_reversion"
 
     def __init__(self, data_provider: MarketDataProvider,
                  max_delta: float = 0.20,   # ceiling for short-leg delta (~80% POP)
-                 min_credit_ratio: float = 0.33):
+                 min_credit_ratio: float = 0.33,
+                 *,
+                 # Per-strategy DTE targets (None → use TARGET_DTE class default).
+                 dte_vertical: Optional[int] = None,
+                 dte_iron_condor: Optional[int] = None,
+                 dte_mean_reversion: Optional[int] = None,
+                 dte_window_days: Optional[int] = None,
+                 # Width policy overrides — when both are None, fall back to the
+                 # legacy formula: max(SPREAD_WIDTH, 3*grid, 2.5% × spot).
+                 width_mode: Optional[str] = None,           # "pct_of_spot" | "fixed_dollar"
+                 width_value: Optional[float] = None):
         self.data = data_provider
         self.max_delta = max_delta
         self.min_credit_ratio = min_credit_ratio
+
+        # Per-strategy DTE targets and search window.
+        self._dte_vertical       = dte_vertical       if dte_vertical       is not None else self.TARGET_DTE
+        self._dte_iron_condor    = dte_iron_condor    if dte_iron_condor    is not None else self.TARGET_DTE
+        self._dte_mean_reversion = dte_mean_reversion if dte_mean_reversion is not None else max(7, self.TARGET_DTE - 14)
+        # Default ± window if caller didn't supply one. Width=7 keeps the picker
+        # within the same calendar-month band.
+        default_window = max(1, (self.DTE_RANGE[1] - self.DTE_RANGE[0]) // 2)
+        self._dte_window = dte_window_days if dte_window_days is not None else default_window
+        # Track whether *any* DTE override was explicitly supplied. When all
+        # are None we preserve the exact legacy DTE_RANGE behaviour for the
+        # vertical kind, which is what the test suite (and existing live
+        # callers without preset support) rely on.
+        self._dte_overridden = any(
+            v is not None for v in (
+                dte_vertical, dte_iron_condor, dte_mean_reversion, dte_window_days,
+            )
+        )
+
+        # Width policy. None/None preserves the legacy adaptive formula.
+        self._width_mode  = width_mode
+        self._width_value = width_value
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -153,17 +181,20 @@ class StrategyPlanner:
           3. Z-scored leadership bias — leadership_zscore > 1.5 σ → Bull Put
              (Items 1 & 2 of the ETF macro patch)
           4. Normal regime → Bull Put / Bear Call / Iron Condor
-        """
-        expiration = self._pick_expiration()
-        logger.info("[%s] Planning %s strategy, expiration %s",
-                     ticker, analysis.regime.value, expiration)
 
+        Each branch picks its own expiration with the per-strategy DTE
+        from the active preset (verticals are typically shorter-dated
+        than Iron Condors; mean-reversion shortest of all).
+        """
         # --- Priority 1: Mean Reversion (3-std BB touch) ---
         # Mean reversion intentionally bypasses the inter-market gate —
         # a 3-std band touch IS a fear-spike condition, and the side
         # of the trade is dictated by the touch direction, so the gate
         # is redundant here.
         if analysis.regime == Regime.MEAN_REVERSION:
+            expiration = self._pick_expiration(self.KIND_MEAN_REVERSION)
+            logger.info("[%s] Planning Mean-Reversion, expiration %s",
+                        ticker, expiration)
             return self._plan_mean_reversion(ticker, analysis, expiration)
 
         # --- Priority 2: Inter-market inhibit (VIX gate) ---
@@ -177,11 +208,12 @@ class StrategyPlanner:
             analysis, "inter_market_inhibit_bullish", False)
         if inter_market_inhibit and analysis.regime in (
                 Regime.BULLISH, Regime.SIDEWAYS):
+            expiration = self._pick_expiration(self.KIND_VERTICAL)
             logger.info(
                 "[%s] VIX inter-market inhibit (z=%.2f σ) → demoting "
-                "%s to Bear Call Spread",
+                "%s to Bear Call Spread, expiration %s",
                 ticker, getattr(analysis, "vix_zscore", 0.0),
-                analysis.regime.value)
+                analysis.regime.value, expiration)
             return self._plan_bear_call(ticker, analysis, expiration)
 
         # --- Priority 3: Z-scored leadership bias ---
@@ -191,17 +223,28 @@ class StrategyPlanner:
                             and leadership_z > self.RS_ZSCORE_THRESHOLD)
         if rs_outperforming and analysis.regime in (
                 Regime.BULLISH, Regime.SIDEWAYS):
+            expiration = self._pick_expiration(self.KIND_VERTICAL)
             logger.info(
-                "[%s] Z-scored leadership bias (vs %s, z=%.2f σ) → Bull Put Spread",
-                ticker, leadership_anchor, leadership_z)
+                "[%s] Z-scored leadership bias (vs %s, z=%.2f σ) → "
+                "Bull Put Spread, expiration %s",
+                ticker, leadership_anchor, leadership_z, expiration)
             return self._plan_bull_put(ticker, analysis, expiration)
 
         # --- Priority 4: Normal regime mapping ---
         if analysis.regime == Regime.BULLISH:
+            expiration = self._pick_expiration(self.KIND_VERTICAL)
+            logger.info("[%s] Planning Bull Put Spread, expiration %s",
+                        ticker, expiration)
             return self._plan_bull_put(ticker, analysis, expiration)
         elif analysis.regime == Regime.BEARISH:
+            expiration = self._pick_expiration(self.KIND_VERTICAL)
+            logger.info("[%s] Planning Bear Call Spread, expiration %s",
+                        ticker, expiration)
             return self._plan_bear_call(ticker, analysis, expiration)
         else:
+            expiration = self._pick_expiration(self.KIND_IRON_CONDOR)
+            logger.info("[%s] Planning Iron Condor, expiration %s",
+                        ticker, expiration)
             return self._plan_iron_condor(ticker, analysis, expiration)
 
     # ------------------------------------------------------------------
@@ -362,26 +405,49 @@ class StrategyPlanner:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _pick_expiration(self) -> str:
+    def _pick_expiration(self, kind: str = "vertical") -> str:
         """
-        Choose the weekly expiration nearest to TARGET_DTE (45), biasing
-        toward the UPPER end of DTE_RANGE to reduce gamma risk.
+        Choose the weekly expiration nearest to the target DTE for *kind*.
 
-        Uses NYSE calendar (pandas_market_calendars) so that holiday-Fridays
-        (e.g. Good Friday) correctly resolve to Thursday expiration, which
-        is where the weekly options actually list.
+        ``kind`` is one of ``vertical`` (Bull Put / Bear Call), ``iron_condor``
+        (4-leg neutral), or ``mean_reversion`` (3-σ snapback). The active
+        Strategy-Profile preset (Conservative / Balanced / Aggressive /
+        Custom) supplies the per-kind DTE; absent overrides we fall back
+        to the class-level ``TARGET_DTE`` so legacy callers keep working.
 
-        Uses local date (not UTC) to match the cron-run trading day.
+        Uses NYSE calendar (pandas_market_calendars) so holiday-Fridays
+        (e.g. Good Friday) correctly resolve to Thursday expiration where
+        the weekly options actually list. Uses local date (not UTC) to
+        match the cron-run trading day.
         """
+        if kind == self.KIND_IRON_CONDOR:
+            target = self._dte_iron_condor
+        elif kind == self.KIND_MEAN_REVERSION:
+            target = self._dte_mean_reversion
+        else:
+            target = self._dte_vertical
+
+        # No preset override + vertical kind → preserve the exact legacy
+        # DTE_RANGE behaviour (target=35, range=(28,45)) so existing tests
+        # and pre-preset callers see identical picks. Once any DTE override
+        # is supplied we switch to the window-based range, which is also
+        # used unconditionally for IC and MR (no legacy callers for those).
+        if not self._dte_overridden and kind == self.KIND_VERTICAL:
+            dte_min, dte_max = self.DTE_RANGE
+        else:
+            dte_min = max(1, target - self._dte_window)
+            dte_max = target + self._dte_window
+
         today = datetime.now().date()
         candidate = next_weekly_expiration(
             today=today,
-            target_dte=self.TARGET_DTE,
-            dte_min=self.DTE_RANGE[0],
-            dte_max=self.DTE_RANGE[1],
+            target_dte=target,
+            dte_min=dte_min,
+            dte_max=dte_max,
         )
         dte = (candidate - today).days
-        logger.debug("Expiration selected: %s (%d DTE)", candidate, dte)
+        logger.debug("Expiration selected: %s (%d DTE, kind=%s)",
+                     candidate, dte, kind)
         return candidate.strftime("%Y-%m-%d")
 
     def _find_sold_strike(self, contracts: List[Dict]) -> Optional[Dict]:
@@ -442,27 +508,34 @@ class StrategyPlanner:
     def _pick_spread_width(self, contracts: List[Dict],
                            sold_strike: float) -> float:
         """
-        Compute an adaptive spread width that scales with spot, the
-        underlying's strike grid, and the legacy floor.
+        Compute the spread width.
 
-        Three constraints, take the maximum:
-          1. ``SPREAD_WIDTH`` (legacy floor — never go narrower than this)
-          2. ``3 × strike_grid_step``  (span at least 3 strikes so the
-             two legs aren't priced almost identically)
-          3. ``2.5% × spot``  (roughly the move size that makes the
-             1/3-of-width credit math work at 25-40 DTE / 0.20 delta)
+        Two paths:
+          * **Preset override** — when the active preset specifies a
+            ``width_mode`` and ``width_value`` (set in __init__), that
+            policy takes precedence. ``pct_of_spot`` uses ``width_value
+            × sold_strike``; ``fixed_dollar`` uses ``width_value`` raw.
+            Either is then snapped UP to the strike grid.
+          * **Legacy adaptive formula** — when no override is supplied,
+            take ``max(SPREAD_WIDTH, 3 × strike_grid_step, 2.5% × spot
+            proxy)`` and snap UP to the grid. This is the original
+            behavior and remains the back-compat default.
 
-        The result is then snapped UP to the strike grid so a contract
-        actually exists at that distance.
+        The sold-leg strike is the spot proxy (within ~2 σ of spot for a
+        0.20-delta short put — close enough for width sizing).
         """
         grid = self._strike_grid_step(contracts)
-        # Use the sold-leg strike as the spot proxy — it's the closest
-        # we have without re-piping the underlying price down here, and
-        # for a 0.20-delta short the strike is within ~2 σ of spot.
         spot_proxy = sold_strike
-        # Hold-strikes-far-apart constraint
-        candidate = max(self.SPREAD_WIDTH, 3 * grid, 0.025 * spot_proxy)
-        # Snap UP to the grid so a real strike sits at this distance
+
+        if self._width_mode == "pct_of_spot" and self._width_value is not None:
+            candidate = max(grid, self._width_value * spot_proxy)
+        elif self._width_mode == "fixed_dollar" and self._width_value is not None:
+            candidate = max(grid, float(self._width_value))
+        else:
+            # Legacy adaptive width.
+            candidate = max(self.SPREAD_WIDTH, 3 * grid, 0.025 * spot_proxy)
+
+        # Snap UP to the strike grid so a real strike sits at this distance.
         snapped = grid * max(1, int(round(candidate / grid + 0.4999)))
         return float(snapped)
 
