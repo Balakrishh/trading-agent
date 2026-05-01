@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import requests
 
+from trading_agent.market_data import ALPACA_TIMEOUT_LONG
 from trading_agent.strategy import SpreadPlan
 from trading_agent.risk_manager import RiskVerdict
 
@@ -72,7 +73,10 @@ class OrderExecutor:
                  dry_run: bool = True,
                  data_provider: Optional["MarketDataProvider"] = None,
                  max_risk_pct: float = 0.02,
-                 min_credit_ratio: float = 0.33):
+                 min_credit_ratio: float = 0.33,
+                 *,
+                 delta_aware_floor: bool = False,
+                 edge_buffer: float = 0.10):
         self.api_key = api_key
         self.secret_key = secret_key
         self.base_url = base_url
@@ -84,6 +88,12 @@ class OrderExecutor:
         # validation and execution-time validation never drift apart.
         self.max_risk_pct = max_risk_pct
         self.min_credit_ratio = min_credit_ratio
+        # When True, the live-credit recheck and the haircut guard use a
+        # delta-aware floor (|Δshort_max|×(1+edge_buffer)) instead of the
+        # static ``min_credit_ratio``. Mirrors RiskManager so an adaptive
+        # plan never gets rejected at exec time by a stale static floor.
+        self.delta_aware_floor = delta_aware_floor
+        self.edge_buffer = edge_buffer
         os.makedirs(self.trade_plan_dir, exist_ok=True)
 
     def _headers(self) -> Dict[str, str]:
@@ -178,7 +188,11 @@ class OrderExecutor:
         must be recomputed from ``live_credit`` and re-validated against
         the same thresholds the RiskManager uses:
 
-          * guardrail #2  — credit / width  ≥  ``min_credit_ratio``
+          * guardrail #2  — credit / width  ≥  C/W floor
+              - static mode:    ``min_credit_ratio``
+              - adaptive mode:  ``|Δshort_max| × (1 + edge_buffer)``
+                (mirrors RiskManager Check 2 so a scanner-picked plan
+                never trips a stale static floor at execution time)
           * guardrail #4  — max_loss (per contract) ≤ ``max_risk_pct × equity``
 
         Returns
@@ -193,11 +207,24 @@ class OrderExecutor:
             return (False,
                     f"live_credit_risk: spread_width {width} is non-positive")
 
+        # Resolve C/W floor — must match RiskManager Check 2 exactly so
+        # planning-time validation and execution-time recheck never drift.
+        if self.delta_aware_floor and plan.legs:
+            short_legs = [l for l in plan.legs if l.action == "sell"]
+            short_max_delta = (max(abs(l.delta) for l in short_legs)
+                               if short_legs else 0.0)
+            cw_floor = short_max_delta * (1.0 + self.edge_buffer)
+            floor_label = (f"|Δ|×(1+edge)={short_max_delta:.3f}×"
+                           f"{1+self.edge_buffer:.2f}={cw_floor:.4f}")
+        else:
+            cw_floor = self.min_credit_ratio
+            floor_label = f"{self.min_credit_ratio}"
+
         live_ratio = live_credit / width
-        if live_ratio < self.min_credit_ratio:
+        if live_ratio < cw_floor:
             return (False,
                     f"live_credit_risk: credit/width {live_ratio:.4f} < "
-                    f"{self.min_credit_ratio} "
+                    f"{floor_label} "
                     f"(live_credit=${live_credit:.2f}, width=${width:.2f}, "
                     f"planning ratio was {plan.credit_to_width_ratio:.4f})")
 
@@ -374,7 +401,7 @@ class OrderExecutor:
                 f"{self.base_url}/orders",
                 headers=self._headers(),
                 json=order_payload,
-                timeout=15,
+                timeout=ALPACA_TIMEOUT_LONG,
             )
 
             try:
@@ -492,7 +519,7 @@ class OrderExecutor:
         url = f"{self.base_url}/positions/{symbol}"
         resp_body = None
         try:
-            resp = requests.delete(url, headers=self._headers(), timeout=15)
+            resp = requests.delete(url, headers=self._headers(), timeout=ALPACA_TIMEOUT_LONG)
             try:
                 resp_body = resp.json()
             except Exception:

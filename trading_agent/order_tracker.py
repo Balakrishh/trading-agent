@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 
 import requests
 
+from trading_agent.market_data import ALPACA_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,7 +96,7 @@ class OrderTracker:
         }
         try:
             resp = requests.get(url, headers=self._headers(),
-                                params=params, timeout=10)
+                                params=params, timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             orders_data = resp.json()
 
@@ -123,7 +125,7 @@ class OrderTracker:
         """GET /v2/orders/{order_id} — fetch a specific order."""
         url = f"{self.base_url}/orders/{order_id}"
         try:
-            resp = requests.get(url, headers=self._headers(), timeout=10)
+            resp = requests.get(url, headers=self._headers(), timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             return self._parse_order(resp.json())
         except requests.RequestException as exc:
@@ -138,7 +140,7 @@ class OrderTracker:
         """DELETE /v2/orders/{order_id} — cancel a specific open order."""
         url = f"{self.base_url}/orders/{order_id}"
         try:
-            resp = requests.delete(url, headers=self._headers(), timeout=10)
+            resp = requests.delete(url, headers=self._headers(), timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             logger.info("Cancelled order %s", order_id)
             return True
@@ -150,7 +152,7 @@ class OrderTracker:
         """DELETE /v2/orders — cancel all open orders."""
         url = f"{self.base_url}/orders"
         try:
-            resp = requests.delete(url, headers=self._headers(), timeout=10)
+            resp = requests.delete(url, headers=self._headers(), timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             logger.info("Cancelled all open orders")
             return True

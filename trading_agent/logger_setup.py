@@ -37,6 +37,14 @@ DEFAULT_MAX_BYTES      = 10 * 1024 * 1024   # 10 MB
 DEFAULT_BACKUP_COUNT   = 7
 LOG_FILENAME           = "trading_agent.log"
 
+# Sentinel attribute we attach to handlers we install so a re-entrant
+# ``setup_logging`` call (Streamlit hot reload, test fixtures, ``from_env``
+# called from inside an app that already initialised logging) can detect
+# that initialisation already happened and short-circuit. Without this the
+# user sees "Logging initialised — ..." printed twice on every Streamlit
+# render.
+_HANDLER_TAG = "_trading_agent_log_handler"
+
 
 def _int_from_env(name: str, default: int) -> int:
     """Read an int env var with graceful fallback on parse errors."""
@@ -69,10 +77,30 @@ def setup_logging(
     -------
     The root logger.
     """
-    os.makedirs(log_dir, exist_ok=True)
-
     level = getattr(logging, log_level.upper(), logging.INFO)
-    log_file = os.path.join(log_dir, LOG_FILENAME)
+    log_file_target = os.path.join(log_dir, LOG_FILENAME)
+
+    # Idempotence guard — if our handlers are already attached to root and
+    # pointing at the same file at the same level, this is a redundant call
+    # (typical sources: Streamlit hot reload, ``TradingAgent.from_env``
+    # called from a Streamlit app that already initialised logging). Return
+    # the existing root logger without printing a second
+    # "Logging initialised — ..." line.
+    root = logging.getLogger()
+    existing = [h for h in root.handlers if getattr(h, _HANDLER_TAG, False)]
+    if existing:
+        same_level = root.level == level
+        same_file = any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            and os.path.abspath(getattr(h, "baseFilename", "")) ==
+                os.path.abspath(log_file_target)
+            for h in existing
+        )
+        if same_level and same_file:
+            return root
+
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = log_file_target
 
     if max_bytes is None:
         max_bytes = _int_from_env("LOG_MAX_BYTES", DEFAULT_MAX_BYTES)
@@ -88,6 +116,7 @@ def setup_logging(
     console = logging.StreamHandler()
     console.setLevel(level)
     console.setFormatter(fmt)
+    setattr(console, _HANDLER_TAG, True)
 
     # Rotating file handler — size-driven, bounded retention
     file_handler = logging.handlers.RotatingFileHandler(
@@ -99,11 +128,14 @@ def setup_logging(
     )
     file_handler.setLevel(level)
     file_handler.setFormatter(fmt)
+    setattr(file_handler, _HANDLER_TAG, True)
 
-    root = logging.getLogger()
     root.setLevel(level)
-    # Avoid duplicate handlers on re-init (Streamlit hot reload / test reuse)
-    root.handlers.clear()
+    # Avoid duplicate handlers on re-init (Streamlit hot reload / test reuse).
+    # Drop only handlers we own — leave anything pytest's caplog or a host
+    # app installed in place so we don't break their log capture.
+    root.handlers = [h for h in root.handlers
+                     if not getattr(h, _HANDLER_TAG, False)]
     root.addHandler(console)
     root.addHandler(file_handler)
 

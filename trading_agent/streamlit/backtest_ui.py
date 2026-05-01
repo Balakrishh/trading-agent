@@ -3459,7 +3459,7 @@ def render_backtest_ui() -> None:
             use_macro_signals_val = False
 
         st.divider()
-        run_btn = st.button("Run Backtest", type="primary", use_container_width=True)
+        run_btn = st.button("Run Backtest", type="primary", width='stretch')
 
     # ── Results rendered in the right column ───────────────────────────────
     with results_col:
@@ -3612,7 +3612,7 @@ def render_backtest_ui() -> None:
             ):
                 st.markdown("**Candidate funnel**")
                 funnel_df = pd.DataFrame(funnel.as_rows())
-                st.dataframe(funnel_df, use_container_width=True, hide_index=True)
+                st.dataframe(funnel_df, width='stretch', hide_index=True)
                 if funnel.skipped_phases:
                     st.info(
                         "Phases intentionally skipped this run: "
@@ -3628,7 +3628,7 @@ def render_backtest_ui() -> None:
                         .sort_values("count", ascending=False)
                         .reset_index(drop=True)
                     )
-                    st.dataframe(rc_df, use_container_width=True, hide_index=True)
+                    st.dataframe(rc_df, width='stretch', hide_index=True)
 
                 if rej_samples:
                     st.markdown(
@@ -3661,7 +3661,7 @@ def render_backtest_ui() -> None:
                         samp_df = samp_df[samp_df["gate"].isin(gate_filter)]
                     st.dataframe(
                         samp_df.sort_values("entry_date").reset_index(drop=True),
-                        use_container_width=True,
+                        width='stretch',
                         hide_index=True,
                     )
 
@@ -3694,17 +3694,17 @@ def render_backtest_ui() -> None:
                     result.regime_stats.assign(
                         pnl=result.regime_stats["pnl"].map("${:,.2f}".format)
                     ),
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True,
                 )
             with right:
-                st.plotly_chart(regime_bar_chart(result.regime_stats), use_container_width=True)
+                st.plotly_chart(regime_bar_chart(result.regime_stats), width='stretch')
             st.divider()
 
         # ── Equity + drawdown charts ───────────────────────────────────────
         if not result.equity_curve.empty:
-            st.plotly_chart(equity_curve_chart(result.equity_curve), use_container_width=True)
-            st.plotly_chart(drawdown_chart(result.equity_curve), use_container_width=True)
+            st.plotly_chart(equity_curve_chart(result.equity_curve), width='stretch')
+            st.plotly_chart(drawdown_chart(result.equity_curve), width='stretch')
             st.divider()
 
         # ── Sortable trade log ─────────────────────────────────────────────
@@ -3717,7 +3717,7 @@ def render_backtest_ui() -> None:
             ascending = st.checkbox("Ascending", value=False, key="bt_ascending")
             st.dataframe(
                 result.trades.sort_values(sort_col, ascending=ascending),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -3732,7 +3732,7 @@ def render_backtest_ui() -> None:
                 data=result.trades.to_csv(index=False).encode(),
                 file_name="backtest_trades.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width='stretch',
             )
 
         with col_json:
@@ -3741,9 +3741,9 @@ def render_backtest_ui() -> None:
                 data=result.trades.to_json(orient="records", date_format="iso", indent=2).encode(),
                 file_name="backtest_trades.json",
                 mime="application/json",
-                use_container_width=True,
+                width='stretch',
             )
 
         with col_journal:
-            if st.button("Export to Journal", use_container_width=True):
+            if st.button("Export to Journal", width='stretch'):
                 _export_to_journal(result)

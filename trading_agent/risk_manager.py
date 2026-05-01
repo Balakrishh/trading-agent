@@ -49,10 +49,20 @@ class RiskManager:
                  liquidity_bps_of_mid: float = 0.0005,
                  stale_spread_pct: float = 0.01,
                  max_buying_power_pct: float = 0.80,
-                 margin_multiplier: float = 2.0):
+                 margin_multiplier: float = 2.0,
+                 *,
+                 delta_aware_floor: bool = False,
+                 edge_buffer: float = 0.10):
         self.max_risk_pct = max_risk_pct
         self.min_credit_ratio = min_credit_ratio
         self.max_delta = max_delta
+        # Adaptive C/W floor — when True, Check 2 demands
+        #   C/W ≥ |Δshort_max| × (1 + edge_buffer)
+        # which matches what ChainScanner enforces during selection.
+        # That keeps planning-time and validation-time floors identical
+        # so a scanner pick can never be rejected by a stricter RM gate.
+        self.delta_aware_floor = delta_aware_floor
+        self.edge_buffer = edge_buffer
         # Floor of the bid/ask gate, in dollars.  For low-priced
         # underlyings ($20-$100) this is the binding constraint.
         self.liquidity_max_spread = liquidity_max_spread
@@ -89,14 +99,31 @@ class RiskManager:
             failed.append(f"Plan invalid: {plan.rejection_reason}")
 
         # --- Check 2: credit-to-width ratio ---
-        if plan.credit_to_width_ratio >= self.min_credit_ratio:
+        # In adaptive mode the floor is delta-aware (matches the scanner):
+        # required C/W = |Δshort_max| × (1 + edge_buffer). The static floor
+        # ``min_credit_ratio`` is ignored because it doesn't scale with the
+        # directional risk being taken; using it would either accept
+        # below-breakeven trades (small Δ) or block well-priced ones
+        # (large Δ).
+        if self.delta_aware_floor and plan.legs:
+            short_legs = [l for l in plan.legs if l.action == "sell"]
+            short_max_delta = (max(abs(l.delta) for l in short_legs)
+                               if short_legs else 0.0)
+            cw_floor = short_max_delta * (1.0 + self.edge_buffer)
+            floor_label = (f"|Δ|×(1+edge)={short_max_delta:.3f}"
+                           f"×{1+self.edge_buffer:.2f}={cw_floor:.4f}")
+        else:
+            cw_floor = self.min_credit_ratio
+            floor_label = f"{self.min_credit_ratio}"
+
+        if plan.credit_to_width_ratio >= cw_floor:
             passed.append(
                 f"Credit/Width ratio {plan.credit_to_width_ratio:.4f} "
-                f"≥ {self.min_credit_ratio}")
+                f"≥ {floor_label}")
         else:
             failed.append(
                 f"Credit/Width ratio {plan.credit_to_width_ratio:.4f} "
-                f"< {self.min_credit_ratio}")
+                f"< {floor_label}")
 
         # --- Check 3: sold-strike delta ---
         sold_legs = [l for l in plan.legs if l.action == "sell"]

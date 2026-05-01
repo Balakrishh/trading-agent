@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from trading_agent.regime import Regime, RegimeAnalysis
 from trading_agent.market_data import MarketDataProvider
 from trading_agent.calendar_utils import next_weekly_expiration
+from trading_agent.chain_scanner import ChainScanner, SpreadCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +140,32 @@ class StrategyPlanner:
                  # Width policy overrides — when both are None, fall back to the
                  # legacy formula: max(SPREAD_WIDTH, 3*grid, 2.5% × spot).
                  width_mode: Optional[str] = None,           # "pct_of_spot" | "fixed_dollar"
-                 width_value: Optional[float] = None):
+                 width_value: Optional[float] = None,
+                 # Adaptive scan-mode wiring. When ``preset`` is supplied and
+                 # ``preset.scan_mode == 'adaptive'`` the planner routes
+                 # vertical/IC builders through ChainScanner instead of the
+                 # static single-point picker. ``preset`` is None for legacy
+                 # callers and tests that don't use the preset system.
+                 preset: Optional[object] = None):
         self.data = data_provider
         self.max_delta = max_delta
         self.min_credit_ratio = min_credit_ratio
+        self.preset = preset
+        # Adaptive scanner is constructed lazily — only when the active preset
+        # asks for it. Stays None in static mode so tests don't need to wire
+        # a preset just to instantiate the planner.
+        self._scanner: Optional[ChainScanner] = None
+        if preset is not None and getattr(preset, "scan_mode", "static") == "adaptive":
+            self._scanner = ChainScanner(
+                data_provider=data_provider,
+                preset=preset,
+                dte_window_days=getattr(preset, "dte_window_days", 5),
+            )
+        # Last scan results — captured per cycle so the agent can persist them
+        # to the journal alongside the picked plan. Cleared at the start of
+        # every plan() call.
+        self.last_scan_candidates: List[SpreadCandidate] = []
+        self.last_scan_side: Optional[str] = None
 
         # Per-strategy DTE targets and search window.
         self._dte_vertical       = dte_vertical       if dte_vertical       is not None else self.TARGET_DTE
@@ -170,6 +193,11 @@ class StrategyPlanner:
     # Public entry point
     # ------------------------------------------------------------------
 
+    @property
+    def is_adaptive(self) -> bool:
+        """True iff the active preset asked for chain-scanner planning."""
+        return self._scanner is not None
+
     def plan(self, ticker: str, analysis: RegimeAnalysis) -> SpreadPlan:
         """
         Build the best credit-spread plan for *ticker* given regime *analysis*.
@@ -185,7 +213,20 @@ class StrategyPlanner:
         Each branch picks its own expiration with the per-strategy DTE
         from the active preset (verticals are typically shorter-dated
         than Iron Condors; mean-reversion shortest of all).
+
+        When the active preset's ``scan_mode`` is ``"adaptive"`` the
+        vertical and Iron-Condor branches delegate to ``ChainScanner``,
+        which sweeps the (DTE × Δ × width) grid and returns the highest
+        EV-per-$-risked candidate, or ``None`` (→ skip) when no point
+        clears the breakeven-plus-edge floor. Mean-reversion and
+        explicit IC trades remain on the static path because their
+        timing/strike logic is regime-driven, not edge-driven.
         """
+        # Reset scan state at the start of every plan call so leftover
+        # candidates from the previous ticker can never bleed into this
+        # one's journal.
+        self.last_scan_candidates = []
+        self.last_scan_side = None
         # --- Priority 1: Mean Reversion (3-std BB touch) ---
         # Mean reversion intentionally bypasses the inter-market gate —
         # a 3-std band touch IS a fear-spike condition, and the side
@@ -254,6 +295,10 @@ class StrategyPlanner:
     def _plan_bull_put(self, ticker: str, analysis: RegimeAnalysis,
                        expiration: str) -> SpreadPlan:
         """Sell an OTM put, buy a further-OTM put."""
+        if self.is_adaptive:
+            return self._plan_via_scanner(ticker, "bull_put", analysis,
+                                          fallback_expiration=expiration)
+
         contracts = self.data.fetch_option_chain(ticker, expiration, "put")
         if not contracts:
             return self._empty_plan(ticker, "Bull Put Spread", analysis,
@@ -277,6 +322,10 @@ class StrategyPlanner:
     def _plan_bear_call(self, ticker: str, analysis: RegimeAnalysis,
                         expiration: str) -> SpreadPlan:
         """Sell an OTM call, buy a further-OTM call."""
+        if self.is_adaptive:
+            return self._plan_via_scanner(ticker, "bear_call", analysis,
+                                          fallback_expiration=expiration)
+
         contracts = self.data.fetch_option_chain(ticker, expiration, "call")
         if not contracts:
             return self._empty_plan(ticker, "Bear Call Spread", analysis,
@@ -404,6 +453,90 @@ class StrategyPlanner:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _plan_via_scanner(self, ticker: str, side: str,
+                          analysis: RegimeAnalysis,
+                          fallback_expiration: str) -> SpreadPlan:
+        """
+        Adaptive-mode planner. Routes through ChainScanner; converts the
+        winning ``SpreadCandidate`` into a ``SpreadPlan`` whose legs and
+        economics match what the scanner priced.
+
+        On no-edge (empty candidate list) we return an empty plan with
+        rejection_reason="No positive-EV candidate ..." so the agent's
+        existing pipeline can journal it under the "skipped: no_edge"
+        path without special-casing scanner output.
+
+        ``fallback_expiration`` is used only for the empty-plan when the
+        scanner produced nothing — gives the journal a sensible expiry
+        stamp instead of an empty string.
+        """
+        assert self._scanner is not None, "_plan_via_scanner needs adaptive preset"
+        strategy_name = "Bull Put Spread" if side == "bull_put" else "Bear Call Spread"
+
+        try:
+            candidates = self._scanner.scan(ticker, side)
+        except Exception as exc:
+            logger.exception("[%s] Adaptive scan failed: %s", ticker, exc)
+            return self._empty_plan(ticker, strategy_name, analysis,
+                                     fallback_expiration,
+                                     f"Adaptive scan crashed: {exc}")
+
+        # Capture for the journal regardless of outcome.
+        self.last_scan_candidates = list(candidates)
+        self.last_scan_side = side
+
+        if not candidates:
+            reason = ("No positive-EV candidate found across DTE×Δ×width "
+                      f"grid (edge_buffer={self.preset.edge_buffer:.0%}, "
+                      f"min_pop={self.preset.min_pop:.0%})")
+            logger.info("[%s] %s — sitting out", ticker, reason)
+            return self._empty_plan(ticker, strategy_name, analysis,
+                                     fallback_expiration, reason)
+
+        best = candidates[0]
+        opt_type = "put" if side == "bull_put" else "call"
+
+        legs = [
+            SpreadLeg(symbol=best.short_symbol, strike=best.short_strike,
+                      action="sell", option_type=opt_type,
+                      delta=best.short_delta, theta=0.0,
+                      bid=best.short_bid, ask=best.short_ask,
+                      mid=round((best.short_bid + best.short_ask) / 2, 4)),
+            SpreadLeg(symbol=best.long_symbol, strike=best.long_strike,
+                      action="buy", option_type=opt_type,
+                      delta=best.short_delta * 0.4,  # rough — real Δ rides skew
+                      theta=0.0,
+                      bid=best.long_bid, ask=best.long_ask,
+                      mid=round((best.long_bid + best.long_ask) / 2, 4)),
+        ]
+        max_loss = round((best.width - best.credit) * 100, 2)
+
+        reasoning = (
+            f"{strategy_name} (adaptive). {ticker} {analysis.regime.value} "
+            f"regime; scanner picked {best.dte}-DTE Δ-{abs(best.short_delta):.3f}, "
+            f"width=${best.width:.2f}, credit=${best.credit:.2f}, "
+            f"C/W={best.cw_ratio:.4f} (floor {best.cw_floor:.4f}), "
+            f"POP={best.pop:.0%}, EV/$risked={best.ev_per_dollar_risked:+.4f} "
+            f"(annualized {best.annualized_score:+.3f}). "
+            f"{len(candidates)} candidate(s) cleared the floor."
+        )
+
+        plan = SpreadPlan(
+            ticker=ticker, strategy_name=strategy_name,
+            regime=analysis.regime.value, legs=legs,
+            spread_width=float(best.width), net_credit=float(best.credit),
+            max_loss=max_loss,
+            credit_to_width_ratio=round(best.cw_ratio, 4),
+            expiration=best.expiration, reasoning=reasoning,
+        )
+
+        # Adaptive mode uses the scanner's own |Δ|×(1+edge_buffer) floor —
+        # which the scanner already enforced — so we don't re-apply the
+        # static min_credit_ratio gate here. The RiskManager (in adaptive
+        # mode) will use the same delta-aware floor for its independent
+        # check, keeping planning and validation consistent.
+        return plan
 
     def _pick_expiration(self, kind: str = "vertical") -> str:
         """

@@ -476,6 +476,29 @@ _BIAS_LABELS: Dict[str, str] = {
 }
 
 
+def _parse_grid(text: str, kind: str) -> Optional[tuple]:
+    """
+    Parse a comma-separated grid string into a sorted unique tuple.
+
+    ``kind`` is one of ``"int"`` (DTE values) or ``"float"`` (Δ / width %).
+    Returns ``None`` on malformed input — caller should fall back to the
+    seed value rather than persisting garbage.
+    """
+    out = []
+    for tok in (text or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = int(tok) if kind == "int" else float(tok)
+        except ValueError:
+            return None
+        out.append(v)
+    if not out:
+        return None
+    return tuple(sorted(set(out)))
+
+
 def _custom_inputs(seed: PresetConfig) -> Dict:
     """Render the Custom-mode override widgets and return a dict of values."""
     st.caption(
@@ -547,7 +570,47 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 0.5, key="cust_width_usd",
             )
 
-    return {
+    # ── Adaptive scan grids — only meaningful when scan_mode == "adaptive",
+    #    but always shown so a user can pre-stage a Custom payload.
+    with st.expander(
+        "Adaptive scan grids (only used when Scan Mode = Adaptive)",
+        expanded=False,
+    ):
+        st.caption(
+            "The chain scanner sweeps the cross-product of these three grids "
+            "and picks the highest-EV candidate. Empty an entry to fall back "
+            "to the preset default. Comma-separated."
+        )
+        min_pop = st.slider(
+            "Min POP (annualised score floor)", 0.30, 0.85,
+            float(seed.min_pop), 0.05,
+            help="Drop candidates whose POP (≈ 1 − |Δshort|) is below this.",
+            key="cust_min_pop",
+        )
+        gc1, gc2, gc3 = st.columns(3)
+        with gc1:
+            dte_grid_text = st.text_input(
+                "DTE grid (days)",
+                value=", ".join(str(d) for d in seed.dte_grid),
+                key="cust_dte_grid",
+                help="e.g. 7, 14, 21, 30",
+            )
+        with gc2:
+            delta_grid_text = st.text_input(
+                "Δ grid (|short delta|)",
+                value=", ".join(f"{d:g}" for d in seed.delta_grid),
+                key="cust_delta_grid",
+                help="e.g. 0.20, 0.25, 0.30, 0.35",
+            )
+        with gc3:
+            width_grid_text = st.text_input(
+                "Width grid (% of spot)",
+                value=", ".join(f"{w:g}" for w in seed.width_grid_pct),
+                key="cust_width_grid",
+                help="e.g. 0.010, 0.015, 0.020, 0.025",
+            )
+
+    payload = {
         "max_delta":          max_delta,
         "dte_vertical":       dte_vertical,
         "dte_iron_condor":    dte_iron_condor,
@@ -557,7 +620,17 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "width_value":        width_value,
         "min_credit_ratio":   min_credit_ratio,
         "max_risk_pct":       max_risk_pct,
+        "min_pop":            min_pop,
     }
+    # Only persist grids when they parse cleanly — silently fall back to
+    # seed value otherwise so a malformed text box doesn't poison the file.
+    parsed_dte    = _parse_grid(dte_grid_text,    "int")
+    parsed_delta  = _parse_grid(delta_grid_text,  "float")
+    parsed_width  = _parse_grid(width_grid_text,  "float")
+    if parsed_dte:    payload["dte_grid"]      = parsed_dte
+    if parsed_delta:  payload["delta_grid"]    = parsed_delta
+    if parsed_width:  payload["width_grid_pct"] = parsed_width
+    return payload
 
 
 def render_strategy_profile_panel() -> None:
@@ -619,10 +692,56 @@ def render_strategy_profile_panel() -> None:
                 key="strat_bias",
             )
 
+        # ── Scan-mode overlay row ────────────────────────────────────────
+        # Static  → planner uses fixed (Δ, DTE, width) preset values.
+        # Adaptive → ChainScanner sweeps (DTE × Δ × width) grid and picks
+        # the highest-EV candidate that clears |Δshort|×(1+edge_buffer).
+        # Both RiskManager and the executor's live-credit recheck switch
+        # to the same Δ-aware floor when adaptive is selected, so the
+        # planner / risk / exec floors never drift.
+        col_s, col_e = st.columns(2)
+        scan_default = saved_payload.get("scan_mode") or current.scan_mode
+        if scan_default not in ("static", "adaptive"):
+            scan_default = "static"
+        edge_default = saved_payload.get("edge_buffer", current.edge_buffer)
+        with col_s:
+            scan_mode = st.radio(
+                "Scan mode",
+                options=["static", "adaptive"],
+                index=0 if scan_default == "static" else 1,
+                format_func=lambda v: (
+                    "Static — fixed Δ/DTE/width" if v == "static"
+                    else "Adaptive — chain scanner picks best EV"
+                ),
+                horizontal=True,
+                key="strat_scan_mode",
+                help="Adaptive replaces the static preset triple with a "
+                     "(DTE × Δ × width) grid sweep, scoring each candidate "
+                     "by per-dollar-risked EV. Floor becomes "
+                     "|Δshort|×(1+edge_buffer) so it stays above breakeven "
+                     "for whatever Δ the scanner picks.",
+            )
+        with col_e:
+            edge_buffer = st.slider(
+                "Edge buffer (over breakeven C/W)",
+                0.0, 0.50, float(edge_default), 0.01,
+                disabled=(scan_mode != "adaptive"),
+                help="Required C/W = |Δshort| × (1 + edge_buffer). "
+                     "10% is a reasonable default — drops to 5% in tight "
+                     "tape, raise to 20%+ if you want to demand more cushion "
+                     "before taking the trade.",
+                key="strat_edge_buffer",
+            )
+
         # Preview line for the chosen built-in.
         if profile in PRESETS:
             preview = PRESETS[profile]
-            st.caption(f"Selected preset → {preview.description}")
+            mode_tag = ("ADAPTIVE scan" if scan_mode == "adaptive"
+                        else "STATIC scan")
+            st.caption(
+                f"Selected preset → {preview.description}  · {mode_tag} "
+                f"(edge buffer {edge_buffer:.2f})"
+            )
 
         # Custom overrides — only meaningful when profile == "custom".
         custom_payload: Optional[Dict] = None
@@ -634,7 +753,7 @@ def render_strategy_profile_panel() -> None:
         ac1, ac2 = st.columns([1, 3])
         with ac1:
             apply_clicked = st.button(
-                "💾 Apply", type="primary", use_container_width=True,
+                "💾 Apply", type="primary", width='stretch',
                 key="strat_apply",
             )
         with ac2:
@@ -655,9 +774,12 @@ def render_strategy_profile_panel() -> None:
                     profile=profile,
                     directional_bias=bias,
                     custom=custom_payload,
+                    scan_mode=scan_mode,
+                    edge_buffer=edge_buffer,
                 )
                 st.toast(
-                    f"Saved profile=**{profile}**, bias=**{bias}** — "
+                    f"Saved profile=**{profile}**, bias=**{bias}**, "
+                    f"scan=**{scan_mode}** (edge {edge_buffer:.2f}) — "
                     "active on next cycle.",
                     icon="✅",
                 )
@@ -732,14 +854,14 @@ def render_live_monitor() -> None:
 
     with btn_cols[0]:
         if loop_running:
-            if st.button("⏹ Stop Agent", type="secondary", use_container_width=True):
+            if st.button("⏹ Stop Agent", type="secondary", width='stretch'):
                 _stop_agent()
                 st.toast("Stop requested — current cycle will finish then halt.", icon="⏹")
                 st.rerun()
         else:
             label = "▶ Start (Dry Run)" if dry_mode else "▶ Start Agent"
             btn_type = "secondary" if dry_mode else "primary"
-            if st.button(label, type=btn_type, use_container_width=True):
+            if st.button(label, type=btn_type, width='stretch'):
                 _start_agent(dry_run=dry_mode)
                 mode = "DRY-RUN" if dry_mode else "LIVE"
                 st.toast(f"Agent loop started [{mode}]!", icon="▶")
@@ -747,19 +869,19 @@ def render_live_monitor() -> None:
 
     with btn_cols[1]:
         if PAUSE_FLAG.exists():
-            if st.button("▶ Resume", use_container_width=True):
+            if st.button("▶ Resume", width='stretch'):
                 PAUSE_FLAG.unlink(missing_ok=True)
                 st.toast("Agent resumed.", icon="▶")
                 st.rerun()
         else:
-            if st.button("⏸ Pause", use_container_width=True, disabled=not loop_running):
+            if st.button("⏸ Pause", width='stretch', disabled=not loop_running):
                 PAUSE_FLAG.write_text(_now())
                 st.toast("Agent paused — no new orders until resumed.", icon="⏸")
                 st.rerun()
 
     with btn_cols[2]:
         run_once_label = "⚡ Run Once (Dry)" if dry_mode else "⚡ Run Once"
-        if st.button(run_once_label, use_container_width=True, disabled=cycle_running):
+        if st.button(run_once_label, width='stretch', disabled=cycle_running):
             if not loop_running:
                 _is_dry = dry_mode
 
@@ -776,7 +898,7 @@ def render_live_monitor() -> None:
                 st.rerun()
 
     with btn_cols[3]:
-        if st.button("🔴", use_container_width=True,
+        if st.button("🔴", width='stretch',
                      help="SIGKILL the running cycle immediately (emergency)",
                      disabled=not cycle_running):
             _kill_current_cycle()
@@ -861,7 +983,7 @@ def render_live_monitor() -> None:
     equity_df = journal_df[journal_df["account_balance"] > 0].copy()
     if not equity_df.empty:
         st.subheader("Equity Curve")
-        st.plotly_chart(equity_curve_chart(equity_df), use_container_width=True)
+        st.plotly_chart(equity_curve_chart(equity_df), width='stretch')
         st.divider()
 
     # ── Guardrail status ───────────────────────────────────────────────────
@@ -908,7 +1030,7 @@ def render_live_monitor() -> None:
             cols = [c for c in cols if c in journal_df.columns]
             st.dataframe(
                 journal_df[cols].tail(100).iloc[::-1],
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 

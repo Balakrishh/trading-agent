@@ -1,7 +1,9 @@
 """NYSE trading-calendar helpers — wraps pandas_market_calendars.
 
-A single module-level NYSE calendar instance is shared across the agent
-to amortise the ~50-100 ms pandas_market_calendars setup cost.
+A single shared NYSE calendar instance is built **lazily** on first use
+to amortise the pandas_market_calendars setup cost without paying it on
+import (which used to add measurable overhead to every test that touched
+the trading_agent package).
 
 Rationale
 ---------
@@ -19,16 +21,27 @@ day, which silently breaks three places in the agent:
 """
 
 from datetime import date, timedelta
+from functools import lru_cache
 from typing import List, Optional
 
 import pandas_market_calendars as mcal
 
-_NYSE = mcal.get_calendar("NYSE")
+
+@lru_cache(maxsize=1)
+def _nyse():
+    """Return the singleton NYSE calendar — built on first call only.
+
+    Lazy construction keeps `import trading_agent.calendar_utils` cheap;
+    the calendar is only instantiated the first time a helper that needs
+    it is actually invoked. ``lru_cache`` gives us a free thread-safe
+    one-shot initialiser.
+    """
+    return mcal.get_calendar("NYSE")
 
 
 def _valid_days(start: date, end: date) -> List[date]:
     """Return sorted list of NYSE regular-session trading days in [start, end]."""
-    return [d.date() for d in _NYSE.valid_days(start_date=start, end_date=end)]
+    return [d.date() for d in _nyse().valid_days(start_date=start, end_date=end)]
 
 
 def is_trading_day(d: date) -> bool:

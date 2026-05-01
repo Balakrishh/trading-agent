@@ -186,6 +186,7 @@ class TradingAgent:
             dte_window_days=self.preset.dte_window_days,
             width_mode=self.preset.width_mode,
             width_value=self.preset.width_value,
+            preset=self.preset,
         )
         self.risk_manager = RiskManager(
             max_risk_pct=max_risk_pct,
@@ -196,6 +197,10 @@ class TradingAgent:
             stale_spread_pct=config.trading.stale_spread_pct,
             max_buying_power_pct=config.trading.max_buying_power_pct,
             margin_multiplier=config.trading.margin_multiplier,
+            # Adaptive mode: replace the static C/W floor with a Δ-aware one —
+            # same formula the scanner uses: |Δshort| × (1 + edge_buffer).
+            delta_aware_floor=(self.preset.scan_mode == "adaptive"),
+            edge_buffer=self.preset.edge_buffer,
         )
         # The three broker-facing adapters are typed as ports so the
         # agent core never reaches into vendor-specific internals.  The
@@ -210,6 +215,12 @@ class TradingAgent:
             data_provider=self.data_provider,   # for live quote refresh on execution
             max_risk_pct=config.trading.max_risk_pct,            # shared w/ RiskManager #4
             min_credit_ratio=config.trading.min_credit_ratio,    # shared w/ RiskManager #2
+            # Adaptive mode: live-credit recheck + 1-tick haircut both use the
+            # same Δ-aware floor RiskManager is enforcing, so a scanner-picked
+            # plan can never be vetoed at execution time by a stale static
+            # floor.  Mirrors the kwargs passed to RiskManager above.
+            delta_aware_floor=(self.preset.scan_mode == "adaptive"),
+            edge_buffer=self.preset.edge_buffer,
         )
         self.position_monitor: PositionsPort = PositionMonitor(
             api_key=config.alpaca.api_key,
@@ -249,9 +260,19 @@ class TradingAgent:
         # circuits (earnings calendar, content-hash cache) live inside
         # the facade, not the agent, so the orchestration call site
         # stays trivial.
+        # Short-circuit when the intelligence layer is fully disabled so we
+        # don't pay the SentimentPipeline factory cost (transitively imports
+        # NewsAggregator + FinGPTAnalyser + EarningsCalendar) for tests and
+        # rule-only deployments. Was a measurable per-test hit because every
+        # `TradingAgent(...)` instantiation triggered the factory.
+        intel_cfg = config.intelligence
+        intel_disabled = (
+            intel_cfg is None
+            or not getattr(intel_cfg, "enabled", False)
+        )
         self.sentiment_pipeline: Optional[SentimentPipeline] = (
-            SentimentPipeline.from_config(config.intelligence)
-            if config.intelligence else None
+            None if intel_disabled
+            else SentimentPipeline.from_config(intel_cfg)
         )
         # Back-compat handles — a few tests and journal helpers still
         # reach for these instance attributes by name.  Expose the
@@ -841,6 +862,11 @@ class TradingAgent:
         )
         plan: SpreadPlan = self.strategy_planner.plan(ticker, analysis)
 
+        # Snapshot adaptive-scan results immediately so the next ticker's
+        # plan() call doesn't overwrite ``last_scan_candidates`` before
+        # we get a chance to journal them.  Returns None in static mode.
+        scan_results = self._snapshot_scan_results()
+
         logger.info("[%s] Phase IV — RISK CHECK", ticker)
         verdict: RiskVerdict = self.risk_manager.evaluate(
             plan, balance, acct_type, market_open,
@@ -894,7 +920,9 @@ class TradingAgent:
 
                 self._log_signal(
                     ticker, "skipped_by_llm", analysis, plan, verdict,
-                    llm_decision, exec_result=None)
+                    llm_decision, exec_result=None,
+                    scan_results=scan_results,
+                )
 
                 return {
                     "ticker": ticker,
@@ -930,6 +958,7 @@ class TradingAgent:
         self._log_signal(
             ticker, exec_result.get("status", "unknown"),
             analysis, plan, verdict, llm_decision, exec_result,
+            scan_results=scan_results,
         )
 
         result = {
@@ -968,6 +997,57 @@ class TradingAgent:
     # JournalKB signal helper
     # ==================================================================
 
+    # ------------------------------------------------------------------
+    # Adaptive-scan journal helper
+    # ------------------------------------------------------------------
+
+    # Top-K candidates persisted per cycle.  10 is enough to reconstruct
+    # the scanner's decision (best + a few near-misses) without bloating
+    # signals.jsonl on a 12-ticker, 4-grid sweep.
+    _SCAN_JOURNAL_TOPK = 10
+
+    def _snapshot_scan_results(self) -> Optional[Dict]:
+        """
+        Capture the planner's most recent scanner output as a journal-safe
+        dict, or return ``None`` when the planner is in static mode.
+
+        MUST be called immediately after ``strategy_planner.plan(...)`` —
+        the next plan() invocation resets ``last_scan_candidates`` and
+        the snapshot would otherwise reflect a different ticker.
+
+        The returned shape is::
+
+            {
+              "side":           "bull_put" | "bear_call",
+              "scan_mode":      "adaptive",
+              "edge_buffer":    0.10,
+              "candidates_total": 8,
+              "selected_index":  0,             # index into the K below
+              "top_k": [ <SpreadCandidate.to_journal_dict()>, ... ]
+            }
+
+        ``selected_index`` is 0 when the scanner picked a candidate
+        (top-of-list) and -1 when no candidate cleared the floor.
+        """
+        planner = self.strategy_planner
+        if not getattr(planner, "is_adaptive", False):
+            return None
+        candidates = list(getattr(planner, "last_scan_candidates", []) or [])
+        side = getattr(planner, "last_scan_side", None)
+        # No scan ran this ticker (e.g. iron condor or mean-reversion path
+        # in adaptive preset — those still use the static builders today).
+        if not candidates and side is None:
+            return None
+        top_k = candidates[: self._SCAN_JOURNAL_TOPK]
+        return {
+            "scan_mode":        "adaptive",
+            "side":             side,
+            "edge_buffer":      float(getattr(self.preset, "edge_buffer", 0.10)),
+            "candidates_total": len(candidates),
+            "selected_index":   0 if candidates else -1,
+            "top_k":            [c.to_journal_dict() for c in top_k],
+        }
+
     def _log_signal(
         self,
         ticker: str,
@@ -977,6 +1057,8 @@ class TradingAgent:
         verdict: "RiskVerdict",
         llm_decision: Optional["AnalystDecision"],
         exec_result: Optional[Dict],
+        *,
+        scan_results: Optional[Dict] = None,
     ) -> None:
         """Build raw_signal dict and write to JournalKB."""
         thesis = build_thesis(analysis, plan, verdict)
@@ -1016,6 +1098,12 @@ class TradingAgent:
             "run_id": exec_result.get("run_id") if exec_result else None,
             "thesis": thesis,
         }
+
+        # Adaptive-scan diagnostics: top-K candidates + selected pick. Only
+        # set when the planner ran the scanner this cycle; static mode emits
+        # nothing so the journal stays compact.
+        if scan_results is not None:
+            raw["scan_results"] = scan_results
 
         exec_status = exec_result.get("status") if exec_result else action
 

@@ -212,7 +212,7 @@ def render_llm_extension() -> None:
     btn_cols = st.columns(3)
     for col, (label, template) in zip(btn_cols, PRESET_PROMPTS.items()):
         with col:
-            if st.button(label, use_container_width=True):
+            if st.button(label, width='stretch'):
                 prompt = template.format(trades_json=trades_json)
                 with st.spinner("Analyzing…"):
                     response = _call_ollama(prompt)
@@ -227,7 +227,7 @@ def render_llm_extension() -> None:
     opt_col, apply_col = st.columns([3, 2])
 
     with opt_col:
-        if st.button("Optimize Strategy Config", use_container_width=True):
+        if st.button("Optimize Strategy Config", width='stretch'):
             prompt = OPTIMIZE_PROMPT.format(trades_json=trades_json)
             with st.spinner("Generating optimized parameters…"):
                 response = _call_ollama(prompt)
@@ -252,7 +252,7 @@ def render_llm_extension() -> None:
             st.json(st.session_state.pending_config)
         col_save, col_discard = st.columns(2)
         with col_save:
-            if st.button("Apply to .env", type="primary", use_container_width=True):
+            if st.button("Apply to .env", type="primary", width='stretch'):
                 ok, msg = _apply_config_to_env(st.session_state.pending_config)
                 if ok:
                     st.success(f"Saved — {msg}")
@@ -260,7 +260,7 @@ def render_llm_extension() -> None:
                 else:
                     st.error(f"Save failed: {msg}")
         with col_discard:
-            if st.button("Discard", use_container_width=True):
+            if st.button("Discard", width='stretch'):
                 st.session_state.pending_config = None
                 st.rerun()
 

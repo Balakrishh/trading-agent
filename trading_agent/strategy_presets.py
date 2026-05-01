@@ -23,7 +23,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,15 @@ DirectionalBias = Literal["auto", "bullish_only", "bearish_only", "neutral_only"
 # Width policy: either a fraction of spot ("pct") or a fixed dollar amount.
 WidthMode = Literal["pct_of_spot", "fixed_dollar"]
 
+# Strategy planner mode:
+#   "static"   — single (Δ, DTE, width) point from the preset's scalar fields,
+#                C/W gated by ``min_credit_ratio``. Original behaviour.
+#   "adaptive" — scan a grid of (DTE × Δ × width) tuples, score each by
+#                ``EV_per_$risked = (POP×C/W − (1−POP)×(1−C/W)) / (1−C/W)``,
+#                pick the highest-scoring candidate that clears the
+#                breakeven-plus-edge_buffer floor, OR sit out if none do.
+ScanMode = Literal["static", "adaptive"]
+
 
 @dataclass(frozen=True)
 class PresetConfig:
@@ -54,10 +63,34 @@ class PresetConfig:
     dte_window_days:       int              # ± window around target DTE
     width_mode:            WidthMode        # pct_of_spot | fixed_dollar
     width_value:           float            # 0.015 = 1.5% spot; or 5.0 = $5
-    min_credit_ratio:      float            # C/W floor
+    min_credit_ratio:      float            # C/W floor (static mode)
     max_risk_pct:          float            # account-fraction risk cap
     directional_bias:      DirectionalBias = "auto"
     description:           str = ""
+
+    # ------------------------------------------------------------------
+    # Adaptive-scan knobs (only consulted when scan_mode == "adaptive").
+    # In static mode these are ignored — the scalar dte_*/max_delta/
+    # width_* fields above are authoritative.
+    # ------------------------------------------------------------------
+    scan_mode:             ScanMode = "static"
+    # Required EV-over-breakeven margin. The scanner demands
+    #   C/W ≥ |Δshort| × (1 + edge_buffer)
+    # because POP ≈ 1 − |Δ|, so |Δ| is the breakeven C/W. 0.10 = "demand
+    # 10 % over breakeven before firing", which keeps the strategy
+    # self-consistent across delta/DTE/width choices.
+    edge_buffer:           float = 0.10
+    # POP floor — refuse any candidate with implied POP below this regardless
+    # of credit. 0.55 admits Δ-0.45 in extreme regimes; 0.65 is "no aggressive
+    # naked-short approximations". Default chosen to match Aggressive preset
+    # tail behaviour without being too restrictive.
+    min_pop:               float = 0.55
+    # Grids the scanner sweeps. Tuples (immutable so dataclass(frozen=True)
+    # accepts them). DTE in calendar days, delta as |Δ|, width as fraction
+    # of spot.
+    dte_grid:              Tuple[int, ...]   = (7, 14, 21, 30)
+    delta_grid:            Tuple[float, ...] = (0.20, 0.25, 0.30, 0.35)
+    width_grid_pct:        Tuple[float, ...] = (0.010, 0.015, 0.020, 0.025)
 
     # ------------------------------------------------------------------
     # Convenience
@@ -83,6 +116,14 @@ class PresetConfig:
         wstr = (f"{self.width_value*100:.1f}%spot"
                 if self.width_mode == "pct_of_spot"
                 else f"${self.width_value:.0f}")
+        if self.scan_mode == "adaptive":
+            return (
+                f"{self.name.title()} • {self.directional_bias.replace('_', ' ')} • "
+                f"ADAPTIVE scan • DTE∈{list(self.dte_grid)} Δ∈{list(self.delta_grid)} "
+                f"w∈{[f'{w*100:.1f}%' for w in self.width_grid_pct]} • "
+                f"Edge ≥ {self.edge_buffer:.0%} • POP ≥ {self.min_pop:.0%} • "
+                f"Max risk {self.max_risk_pct*100:.0f}%"
+            )
         return (
             f"{self.name.title()} • {self.directional_bias.replace('_', ' ')} • "
             f"Vert@{self.dte_vertical}d Δ-{self.max_delta:.2f} w={wstr} • "
@@ -162,6 +203,18 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 # Persistence
 # ---------------------------------------------------------------------------
 
+_TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct"}
+
+
+def _coerce_overrides(overrides: Dict) -> Dict:
+    """JSON gives us lists; the dataclass wants tuples (frozen=True)."""
+    out = dict(overrides)
+    for k in _TUPLE_FIELDS:
+        if k in out and isinstance(out[k], list):
+            out[k] = tuple(out[k])
+    return out
+
+
 def _make_custom(overrides: Dict) -> PresetConfig:
     """
     Build a Custom preset by starting from BALANCED and applying overrides.
@@ -170,6 +223,7 @@ def _make_custom(overrides: Dict) -> PresetConfig:
     if older preset files lack a newer field.
     """
     base = BALANCED
+    overrides = _coerce_overrides(overrides)
     safe_overrides = {
         k: v for k, v in overrides.items()
         if k in {f.name for f in base.__dataclass_fields__.values()}
@@ -220,12 +274,33 @@ def load_active_preset(path: Optional[Path] = None) -> PresetConfig:
         logger.warning("Unknown directional_bias %r — coercing to 'auto'", bias)
         bias = "auto"
 
-    return replace(preset, directional_bias=bias)
+    # Scan-mode + edge_buffer round-trip as overlays so a user can pick
+    # "Balanced + Adaptive" or "Aggressive + Static" without falling into
+    # the Custom profile.  Missing keys preserve whatever the chosen
+    # profile already specified — same pattern used for directional_bias.
+    overlay: Dict = {"directional_bias": bias}
+    scan_mode = data.get("scan_mode")
+    if scan_mode in ("static", "adaptive"):
+        overlay["scan_mode"] = scan_mode
+    elif scan_mode is not None:
+        logger.warning("Unknown scan_mode %r — keeping profile default %r",
+                       scan_mode, preset.scan_mode)
+    edge_buffer = data.get("edge_buffer")
+    if isinstance(edge_buffer, (int, float)) and 0.0 <= edge_buffer <= 1.0:
+        overlay["edge_buffer"] = float(edge_buffer)
+    elif edge_buffer is not None:
+        logger.warning("Invalid edge_buffer %r — keeping profile default %r",
+                       edge_buffer, preset.edge_buffer)
+
+    return replace(preset, **overlay)
 
 
 def save_active_preset(profile: ProfileName,
                        directional_bias: DirectionalBias = "auto",
                        custom: Optional[Dict] = None,
+                       *,
+                       scan_mode: Optional[ScanMode] = None,
+                       edge_buffer: Optional[float] = None,
                        path: Optional[Path] = None) -> Path:
     """
     Persist the active preset selection to ``STRATEGY_PRESET.json``.
@@ -233,12 +308,21 @@ def save_active_preset(profile: ProfileName,
     Called from the Streamlit dashboard's Apply button. The file is
     written atomically (temp + rename) so a half-written JSON can never
     be observed by a concurrently-launching agent subprocess.
+
+    ``scan_mode`` and ``edge_buffer`` are persisted as top-level overlays —
+    they apply on top of whichever profile is chosen (mirrors the
+    ``directional_bias`` model). Pass ``None`` to omit them entirely;
+    the loader will then use the chosen profile's built-in default.
     """
     fp = path or PRESET_FILE
-    payload = {
+    payload: Dict = {
         "profile": profile,
         "directional_bias": directional_bias,
     }
+    if scan_mode is not None:
+        payload["scan_mode"] = scan_mode
+    if edge_buffer is not None:
+        payload["edge_buffer"] = float(edge_buffer)
     if profile == "custom" and custom:
         # Only persist the dataclass-known keys.
         valid = {f.name for f in PresetConfig.__dataclass_fields__.values()}
@@ -247,7 +331,8 @@ def save_active_preset(profile: ProfileName,
     tmp = fp.with_suffix(fp.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(fp)
-    logger.info("Saved %s → profile=%s bias=%s", fp, profile, directional_bias)
+    logger.info("Saved %s → profile=%s bias=%s scan_mode=%s edge_buffer=%s",
+                fp, profile, directional_bias, scan_mode, edge_buffer)
     return fp
 
 

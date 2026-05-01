@@ -50,6 +50,16 @@ INTRADAY_RETURN_TTL = 60        # 1 minute — 5-min bar return; long enough to
 # Max workers for parallel historical fetches
 _MAX_PREFETCH_WORKERS = 5
 
+# (connect, read) timeouts for Alpaca HTTP calls. The connect side stays
+# tight so an unreachable host (DNS, VPN, firewall) fails in 2s instead of
+# blocking a whole cycle / test for the full read-budget. The read side
+# stays generous since some Alpaca endpoints take a few seconds under load.
+ALPACA_CONNECT_TIMEOUT = 2
+ALPACA_READ_TIMEOUT = 10
+ALPACA_READ_TIMEOUT_LONG = 15
+ALPACA_TIMEOUT = (ALPACA_CONNECT_TIMEOUT, ALPACA_READ_TIMEOUT)
+ALPACA_TIMEOUT_LONG = (ALPACA_CONNECT_TIMEOUT, ALPACA_READ_TIMEOUT_LONG)
+
 
 def _truncate_json(obj: object, limit: int = 400) -> str:
     """Compact, length-capped JSON repr for log lines — diagnostic only."""
@@ -244,7 +254,7 @@ class MarketDataProvider:
 
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=10)
+                                params=params, timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
         except requests.RequestException as exc:
@@ -286,7 +296,7 @@ class MarketDataProvider:
         params = {"symbols": ticker, "feed": feed}
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=10)
+                                params=params, timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
             snap = data.get(ticker, {})
@@ -488,7 +498,7 @@ class MarketDataProvider:
             params = {**base_params, **extra_params}
             try:
                 resp = requests.get(url, headers=self._alpaca_headers(),
-                                    params=params, timeout=15)
+                                    params=params, timeout=ALPACA_TIMEOUT_LONG)
                 resp.raise_for_status()
                 data = resp.json() if resp.content else {}
                 snaps = data.get("snapshots") if isinstance(data, dict) else None
@@ -650,7 +660,7 @@ class MarketDataProvider:
         }
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=15)
+                                params=params, timeout=ALPACA_TIMEOUT_LONG)
             resp.raise_for_status()
             body = resp.json() or {}
         except requests.RequestException as exc:
@@ -719,7 +729,7 @@ class MarketDataProvider:
         params = {"symbols": ",".join(symbols), "feed": feed}
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=10)
+                                params=params, timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             snapshots = resp.json().get("snapshots", {}) or {}
             quotes = {}
@@ -752,7 +762,7 @@ class MarketDataProvider:
         params = {"symbols": ticker, "feed": feed}
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=10)
+                                params=params, timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
             snap = data.get(ticker, {})
@@ -837,7 +847,7 @@ class MarketDataProvider:
         }
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=10)
+                                params=params, timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             bars = resp.json().get("bars") or []
             if len(bars) < 2:
@@ -901,7 +911,7 @@ class MarketDataProvider:
         }
         try:
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=10)
+                                params=params, timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             bars = resp.json().get("bars") or []
         except requests.RequestException as exc:
@@ -1078,7 +1088,7 @@ class MarketDataProvider:
         """
         url = f"{self.alpaca_base_url}/account"
         try:
-            resp = requests.get(url, headers=self._alpaca_headers(), timeout=10)
+            resp = requests.get(url, headers=self._alpaca_headers(), timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as exc:
@@ -1093,7 +1103,7 @@ class MarketDataProvider:
         """
         url = f"{self.alpaca_base_url}/clock"
         try:
-            resp = requests.get(url, headers=self._alpaca_headers(), timeout=10)
+            resp = requests.get(url, headers=self._alpaca_headers(), timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             return resp.json().get("is_open", False)
         except requests.RequestException as exc:

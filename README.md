@@ -109,7 +109,29 @@ width = max(SPREAD_WIDTH_FLOOR, 3 × strike_grid_step, 0.025 × spot)
         snapped UP to the strike grid
 ```
 
-This produces a `$5` spread on a `$80` ticker (floor wins) and a `$15-20` spread on SPY/QQQ at `$700` (the spot-percentage term wins) — the wider strike distance is what lets the credit clear the `1/3 × width` `MIN_CREDIT_RATIO` gate at `0.20`-delta short / 30-DTE. The legacy `SPREAD_WIDTH = $5` constant is now a hard floor, never a target. Applied to all four spread types (Bull Put, Bear Call, both Iron Condor wings).
+This produces a `$5` spread on a `$80` ticker (floor wins) and a `$15-20` spread on SPY/QQQ at `$700` (the spot-percentage term wins) — the wider strike distance is what lets the credit clear the adaptive C/W floor at `0.20`-delta short / 30-DTE. The legacy `SPREAD_WIDTH = $5` constant is now a hard floor, never a target. Applied to all four spread types (Bull Put, Bear Call, both Iron Condor wings).
+
+### Adaptive Chain Scanner (`chain_scanner.py`)
+
+The legacy planner picked **one** point on the chain (target Δ + target DTE + fixed width) and either passed or failed risk. On thin-credit days that produced 100% reject rates because every adjacent strike was equally bad. The adaptive scanner replaces that single-point approach with a **scored sweep**: for every `(DTE, target Δ-short, width)` tuple in the configured grid the scanner picks the nearest weekly expiration, fetches the relevant put/call chain, finds the contract closest to the target Δ, picks the protective leg `width × spot` strikes away (snapped to the strike grid), prices the spread `bid_short − ask_long`, and scores it.
+
+**Score formula:**
+
+```
+POP         ≈ 1 − |Δshort|       (vertical credit-spread approximation)
+C/W         = credit / width
+EV/$risked  = (POP × C/W − (1 − POP) × (1 − C/W)) / (1 − C/W)
+annualized  = EV/$risked × (365 / DTE)
+```
+
+**Hard filters applied before scoring:**
+- POP ≥ `min_pop` (default `0.55`)
+- C/W ≥ `|Δshort| × (1 + edge_buffer)` — the **edge floor**. Breakeven C/W on a vertical credit spread is exactly `|Δshort|`; the buffer is the requested margin of edge. Default `edge_buffer = 0.10` → 10% edge over breakeven.
+- Positive net credit; both legs quote a non-zero bid/ask.
+
+Candidates that fail any filter are dropped, never returned. The scanner returns `[]` when the chain offers no positive-edge trade — the agent treats this as `skipped: no edge` and journals it instead of forcing a marginal entry. The annualized score breaks ties so short-dated wins beat longer-dated ones at the same EV/$risked.
+
+**Single-source-of-truth invariant:** the same `cw_floor = |Δshort| × (1 + edge_buffer)` formula appears in three places — `chain_scanner.py` (candidate filtering), `risk_manager.py` (final gate, in adaptive mode), and `executor.py` (live-quote re-validation). The `scan_invariant_check.py` smoke test AST-walks all three sites every release to guarantee they stay synchronised; the static `MIN_CREDIT_RATIO=0.33` floor is now only used when adaptive mode is disabled.
 
 ### DTE Targeting
 
@@ -132,6 +154,10 @@ Theta capture is concentrated in the **25-40 DTE** band, so the planner targets 
 | **Tier-0 earnings short-circuit** | `earnings_calendar.py` | Authoritative `yfinance` earnings calendar — scheduled catalyst within 7d returns `event_risk=1.0` deterministically, skipping FinGPT and the verifier entirely |
 | **Tier-1 content-hash cache** | `sentiment_cache.py` | SHA-1 fingerprint over `source \| form_type \| slug \| minute_timestamp` (sorted). Unchanged evidence replays the last `VerifiedSentimentReport`; the cache only ever holds post-verifier results |
 | **Hard timeout guard** | `agent.py` | Daemon timer at 270 s: logs `cycle_timeout` and calls `os._exit(1)` so the scheduler cleanly starts the next run |
+| **Split connect/read timeouts** | `market_data.py` | Every Alpaca HTTP call uses `(connect=2s, read=10s)` (and `(2s, 15s)` for order-submission paths in `executor.py`). Previously a single `timeout=10` meant an unreachable host stalled cycles for 10s per call; the 2-second connect cap surfaces network outages immediately while preserving slack for slow legitimate responses. Centralised as `ALPACA_TIMEOUT` / `ALPACA_TIMEOUT_LONG` and reused by `position_monitor.py`, `order_tracker.py`, and `executor.py` |
+| **Idempotent logger setup** | `logger_setup.py` | Streamlit hot-reloads and `TradingAgent.from_env` calls from inside an already-initialised app used to print `Logging initialised — ...` twice and double every log line. A sentinel attribute (`_HANDLER_TAG`) marks the handlers we install; subsequent `setup_logging` calls at the same level/file return the existing root unchanged and only our handlers are filtered out on re-init (pytest's caplog and host-app handlers are preserved) |
+| **Lazy NYSE calendar load** | `calendar_utils.py` | `pandas_market_calendars.get_calendar("NYSE")` was called at import time, which dragged ~200ms onto every short-lived test. Wrapped behind `@lru_cache(maxsize=1)` so the calendar loads on first use and is reused thereafter |
+| **SentimentPipeline short-circuit** | `agent.py` | When `intelligence.enabled=false` the agent now skips `SentimentPipeline.from_config()` entirely instead of constructing a no-op pipeline — saves the FinGPT/verifier model-resolve probes on every restart for users not running the sentiment stack |
 
 ### Live Quote Refresh at Execution
 
@@ -338,7 +364,7 @@ Every trade must pass **all eight checks** before execution:
 | # | Check | Rule |
 |---|-------|------|
 | 1 | **Plan Validity** | Strategy planner found valid strikes and contracts |
-| 2 | **Credit-to-Width Ratio** | Credit ≥ `MIN_CREDIT_RATIO` of spread width (default 0.33) |
+| 2 | **Credit-to-Width Ratio** | **Adaptive mode** (default): C/W ≥ `\|Δshort\| × (1 + edge_buffer)` — same formula the chain scanner used to admit the candidate. **Static mode**: C/W ≥ `MIN_CREDIT_RATIO` (default 0.33). |
 | 3 | **Sold Delta** | ≤ `MAX_DELTA` (default 0.20, ≈80% probability OTM) |
 | 4 | **Max Loss** | ≤ `MAX_RISK_PCT` × account equity per trade (default 2%) |
 | 5 | **Account Type** | Must be `paper` |
@@ -398,10 +424,13 @@ trading-agent/
 │   ├── logger_setup.py
 │   │
 │   │   # ── Core Phases ──
-│   ├── market_data.py                # Phase I   — yfinance + Alpaca (TTL cache, parallel)
+│   ├── market_data.py                # Phase I   — yfinance + Alpaca (TTL cache, parallel, split timeouts)
 │   ├── regime.py                     # Phase II  — SMA / RSI / Bollinger regime classifier
 │   ├── strategy.py                   # Phase III — strike selection, nearest-Friday DTE
-│   ├── risk_manager.py               # Phase IV  — 8-guardrail validator
+│   ├── chain_scanner.py              # Phase III — adaptive (Δ, DTE, width) sweep + EV/$risked scoring
+│   ├── calendar_utils.py             # NYSE trading-day oracle (lazy lru_cache singleton)
+│   ├── strategy_presets.py           # Conservative / Balanced / Aggressive risk presets
+│   ├── risk_manager.py               # Phase IV  — 8-guardrail validator (delta-aware C/W floor)
 │   ├── executor.py                   # Phase VI  — mleg order execution + HTML report
 │   ├── trade_plan_report.py
 │   │
@@ -572,8 +601,15 @@ FORCE_MARKET_OPEN=true python -m trading_agent.agent
 ### 5. Run tests
 
 ```bash
-python run_tests.py
-pytest tests/ -v
+python run_tests.py                       # full repo suite
+pytest tests/ -v                          # equivalent direct invocation
+
+# Targeted scratch verifiers — useful when iterating on the scanner / risk gate
+# without spinning up the full suite:
+python run_chain_scanner_tests.py         # 40-case adaptive scanner unit tests
+python scan_invariant_check.py            # asserts |Δ|×(1+edge_buffer) appears in
+                                          #   chain_scanner / risk_manager / executor
+python run_risk_manager_quick.py          # smoke-tests static vs adaptive C/W floor
 ```
 
 ---
@@ -590,6 +626,10 @@ pytest tests/ -v
 | `MAX_RISK_PCT` | `0.02` | Max loss per trade as % of equity |
 | `MIN_CREDIT_RATIO` | `0.33` | Minimum credit / spread width |
 | `MAX_DELTA` | `0.20` | Max absolute delta of sold strike |
+| `EDGE_BUFFER` | `0.10` | Adaptive C/W floor margin over breakeven. Required C/W = `\|Δshort\| × (1 + edge_buffer)`. Used by both `chain_scanner` (candidate filter) and `risk_manager` (final gate, in adaptive mode). Set to `0` to admit any positive-EV candidate; raise toward `0.20` for stricter edge demand at the cost of fewer fires. |
+| `SCAN_MODE` | `adaptive` | `adaptive` activates the chain scanner + delta-aware C/W floor; `static` falls back to the legacy single-point planner with `MIN_CREDIT_RATIO`. Toggle from the Streamlit Strategy Profile panel. |
+| `LOG_MAX_BYTES` | `10485760` | Per-file rotation threshold for `logs/trading_agent.log` (default 10 MB). |
+| `LOG_BACKUP_COUNT` | `7` | Number of rollover files retained (`...log.1` through `...log.N`). Older files purged on rotation. |
 | `DAILY_DRAWDOWN_LIMIT` | `0.05` | Kill process if account drops >N% in one day |
 | `MAX_BUYING_POWER_PCT` | `0.80` | Enter Liquidation Mode if >N% of BP used |
 | `LIQUIDITY_MAX_SPREAD` | `0.05` | Absolute floor of the underlying bid/ask gate ($) |
@@ -704,6 +744,8 @@ streamlit run trading_agent/streamlit/app.py
 | **📡 Live Monitoring** | Agent Start/Stop/Dry Run controls · cycle PID · equity · P&L · regime badge · open positions · equity curve · 8-guardrail status · market status · agent log · journal expander · auto-refresh 30 s |
 | **📊 Backtesting** | Date range · multi-ticker · timeframe (1Day/5Min) · **Live Quote Refresh** (Alpaca API) · simulated P&L · metric cards · per-regime bar chart · equity + drawdown charts · trade log · CSV/JSON/Journal export |
 | **🤖 LLM Extension** | Chat with local Ollama model (RAG over journal) · Optimize Strategy → one-click `.env` update |
+
+> **Streamlit ≥ 1.42 compatibility:** all dashboard widgets use the modern `width='stretch'` API (the deprecated `use_container_width=True` keyword was swept across `live_monitor.py`, `components.py`, `backtest_ui.py`, and `llm_extension.py`). No console deprecation warnings on first render.
 
 ### Strategy Profile (Risk Preset)
 

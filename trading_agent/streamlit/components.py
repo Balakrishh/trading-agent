@@ -205,7 +205,7 @@ def positions_table(spreads: List[Dict]) -> None:
                 "Exit Signal": s.get("exit_signal", "hold"),
             }
         )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
 
 def ungrouped_legs_table(legs: List[Dict]) -> None:
@@ -236,7 +236,7 @@ def ungrouped_legs_table(legs: List[Dict]) -> None:
                 "Unreal. P&L ($)": round(float(L.get("unrealized_pl", 0)), 2),
             }
         )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
 
 def alert_box(message: str, level: str = "warning") -> None:

@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 import requests
 
 from trading_agent.calendar_utils import is_last_trading_day_before
+from trading_agent.market_data import ALPACA_TIMEOUT
 from trading_agent.regime import Regime
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ class PositionMonitor:
         """GET /v2/positions — filters to us_option only."""
         url = f"{self.base_url}/positions"
         try:
-            resp = requests.get(url, headers=self._headers(), timeout=10)
+            resp = requests.get(url, headers=self._headers(), timeout=ALPACA_TIMEOUT)
             resp.raise_for_status()
             positions_data = resp.json()
 
