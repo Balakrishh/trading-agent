@@ -14,7 +14,13 @@ from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
 
-JOURNAL_PATH = Path("trade_journal/signals.jsonl")
+# Live agent writes to ``signals_live.jsonl`` (Phase 3 split). The LLM
+# corpus is *deliberately* live-only — backtest signals would otherwise
+# bias guardrail recommendations toward synthetic counterfactuals.
+# Legacy ``signals.jsonl`` is read as a fallback so pre-rename history
+# is still available for the analyst prompts.
+JOURNAL_PATH        = Path("trade_journal/signals_live.jsonl")
+LEGACY_JOURNAL_PATH = Path("trade_journal/signals.jsonl")
 ENV_PATH = Path(".env")
 
 # Read from environment so tests can override
@@ -84,11 +90,19 @@ OPTIMIZE_PROMPT = (
 # ---------------------------------------------------------------------------
 
 def _load_recent_signals(n: int = 10) -> List[Dict]:
-    """Return the last n records from signals.jsonl."""
-    if not JOURNAL_PATH.exists():
+    """Return the last n records from the live-agent journal.
+
+    Falls back to the legacy ``signals.jsonl`` filename so users who
+    have a pre-Phase-3 journal still get history surfaced.
+    """
+    if JOURNAL_PATH.exists():
+        path = JOURNAL_PATH
+    elif LEGACY_JOURNAL_PATH.exists():
+        path = LEGACY_JOURNAL_PATH
+    else:
         return []
     records: List[Dict] = []
-    with open(JOURNAL_PATH) as fh:
+    with open(path) as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -199,7 +213,8 @@ def render_llm_extension() -> None:
 
     if not recent_signals:
         st.warning(
-            "No journal entries found at trade_journal/signals.jsonl. "
+            "No journal entries found at trade_journal/signals_live.jsonl "
+            "(or legacy trade_journal/signals.jsonl). "
             "Run the agent at least once to populate the journal."
         )
 

@@ -75,8 +75,13 @@ def env_file(tmp_path):
 
 class TestLoadRecentSignals:
     def test_returns_empty_when_missing(self, tmp_path):
+        # Patch BOTH JOURNAL_PATH and LEGACY_JOURNAL_PATH so the
+        # backward-compat fallback can't pick up a real on-disk
+        # signals.jsonl.
         with patch("trading_agent.streamlit.llm_extension.JOURNAL_PATH",
-                   tmp_path / "nonexistent.jsonl"):
+                   tmp_path / "nonexistent.jsonl"), \
+             patch("trading_agent.streamlit.llm_extension.LEGACY_JOURNAL_PATH",
+                   tmp_path / "nonexistent_legacy.jsonl"):
             result = _load_recent_signals(10)
         assert result == []
 
@@ -279,10 +284,15 @@ class TestRenderLlmExtensionSmoke:
     def test_shows_warning_with_empty_journal(self, tmp_path):
         # The render function shows st.warning when _load_recent_signals returns [].
         # Verify the trigger condition: an absent journal file yields an empty list,
-        # which is exactly what causes the warning branch to execute.
+        # which is exactly what causes the warning branch to execute. We patch BOTH
+        # JOURNAL_PATH and LEGACY_JOURNAL_PATH so the backward-compat fallback
+        # can't pick up a real on-disk signals.jsonl.
         with patch(
             "trading_agent.streamlit.llm_extension.JOURNAL_PATH",
             tmp_path / "nonexistent.jsonl",
+        ), patch(
+            "trading_agent.streamlit.llm_extension.LEGACY_JOURNAL_PATH",
+            tmp_path / "nonexistent_legacy.jsonl",
         ):
             signals = _load_recent_signals(10)
         assert signals == [], (

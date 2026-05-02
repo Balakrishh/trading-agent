@@ -412,6 +412,21 @@ class Backtester:
         # the live signal but at a different timescale.  Set timeframe
         # = "5Min" for true parity (subject to yfinance's 30-day limit).
         use_macro_signals: bool = False,
+        # --- Unified decision-engine path (Phase 2 of live↔backtest unify) ---
+        # When ``use_unified_engine=True`` AND ``preset`` is provided,
+        # ``_alpaca_historical_plan`` delegates strike-selection, credit
+        # pricing, EV scoring, and the C/W floor gate to
+        # ``trading_agent.decision_engine.decide()`` — the *same* call the
+        # live ``ChainScanner`` makes. Drift between live and backtest is
+        # impossible here by construction: any change to
+        # ``_score_candidate_with_reason`` or ``_quote_credit`` in
+        # ``chain_scanner.py`` automatically flows through. Defaults are
+        # ``preset=None`` / ``use_unified_engine=False`` so the existing
+        # test suite stays byte-identical with the legacy σ-path; the
+        # Streamlit UI flips the toggle on for interactive runs so they
+        # match the live agent's economics.
+        preset: Optional[object] = None,
+        use_unified_engine: bool = False,
     ) -> None:
         self.starting_equity = starting_equity
         self.spread_width = spread_width
@@ -436,6 +451,12 @@ class Backtester:
         self._alpaca_data_url = alpaca_data_url or os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets/v2")
         self.use_alpaca_historical = bool(use_alpaca_historical)
         self.use_macro_signals = bool(use_macro_signals)
+        self.preset = preset
+        self.use_unified_engine = bool(use_unified_engine)
+        # Last ScanDiagnostics returned by decide() — populated only on the
+        # unified path. The Streamlit UI surfaces this in the same diagnostics
+        # panel the live monitor uses, so reject-reason taxonomy stays unified.
+        self.last_decide_diagnostics = None
         # Option chain cache: {(ticker, expiry, type): (contracts, epoch)}
         self._option_cache: Dict[Tuple[str, str, str], Tuple[List[Dict], float]] = {}
         # Alpaca API call counters surfaced to the diagnostics expander.
@@ -1640,6 +1661,185 @@ class Backtester:
             f"last={last_reason or 'unknown'}"
         )
 
+    # ── Unified decision-engine bridge (Phase 2) ─────────────────────────────
+    def _synth_chain_slice_for_decide(
+        self,
+        *,
+        expiration: str,
+        entry_date: date,
+        contracts: List[Dict],
+        bars_by_symbol: Dict[str, List[Dict]],
+        spot: float,
+        sigma_hold: float,
+    ) -> Optional[object]:
+        """
+        Build a ``decision_engine.ChainSlice`` from Alpaca-historical inputs.
+
+        Alpaca's historical endpoints don't return bid/ask or Greeks — only
+        contracts metadata + OHLCV bars. We fabricate the dict-shaped chain
+        ``decide()`` expects by:
+
+          * setting ``bid = ask = bar_close`` so ``_quote_credit`` collapses
+            to ``(short_close − long_close − fill_haircut)``, matching the
+            legacy historical credit minus a one-tick fill haircut.
+          * approximating ``Δ`` from a one-period BS with σ_hold (no rate,
+            no carry — fine for short-dated index spreads). The σ-path
+            already does this for ``approx_abs_delta``; we apply the same
+            trick *per-strike* so the engine can run its Δ-grid sweep.
+
+        Returns ``None`` when no contract has bars on entry_date or when
+        the inputs are degenerate. Caller treats this as a fallbackable
+        data-availability failure.
+        """
+        from math import erf, log, sqrt
+        from trading_agent.decision_engine import ChainSlice
+        if spot <= 0 or sigma_hold <= 0 or not contracts:
+            return None
+        try:
+            dte_days = max(1, (date.fromisoformat(expiration) - entry_date).days)
+        except (TypeError, ValueError):
+            return None
+        rows: List[Dict] = []
+        for c in contracts:
+            sym = (c.get("symbol") or "").strip()
+            strike = float(c.get("strike") or 0.0)
+            if not sym or strike <= 0:
+                continue
+            bars = bars_by_symbol.get(sym) or []
+            if not bars:
+                continue
+            try:
+                close = float(bars[0].get("c") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if close <= 0:
+                continue
+            try:
+                d1 = (log(spot / strike) + 0.5 * sigma_hold * sigma_hold) / sigma_hold
+            except (ValueError, ZeroDivisionError):
+                continue
+            cdf_d1 = 0.5 * (1.0 + erf(d1 / sqrt(2.0)))
+            opt_type = (c.get("type") or "").lower()
+            # Δ_call = Φ(d1); Δ_put = Φ(d1) − 1.  Sign matters: live uses
+            # signed delta so the C/W floor (|Δ|×(1+edge_buffer)) is the
+            # *same* expression on both sides.
+            delta = cdf_d1 if opt_type == "call" else (cdf_d1 - 1.0)
+            rows.append({
+                "strike": strike,
+                "delta":  delta,
+                "bid":    close,
+                "ask":    close,
+                "symbol": sym,
+            })
+        if not rows:
+            return None
+        return ChainSlice(expiration=expiration, dte=dte_days, contracts=rows)
+
+    def _build_alpaca_plan_via_decide(
+        self,
+        *,
+        ticker: str,
+        entry_date: date,
+        regime: str,
+        expiration: str,
+        underlying_price: float,
+        sigma_annual: float,
+        effective_sigma_mult: float,
+        hold_bars: Optional[int],
+        bars_per_year: Optional[int],
+    ) -> Tuple[Optional[Dict], str, bool]:
+        """
+        Resolve a trade plan through ``decision_engine.decide()`` — the
+        same scoring path the live ``ChainScanner`` runs. This is the
+        parity seam: ``_score_candidate_with_reason``, ``_quote_credit``,
+        and the C/W floor formula all live in ``chain_scanner.py``,
+        and changes there automatically flow into the backtester here.
+
+        Returns the ``(plan, reason, retry)`` tuple shape
+        ``_build_alpaca_plan_for_expiration`` expects so the caller's
+        expiration-fallback loop is untouched.
+        """
+        from trading_agent.decision_engine import DecisionInput, decide
+        side = "bear_call" if regime == "bearish" else "bull_put"
+        option_type = "call" if side == "bear_call" else "put"
+        contracts = self._fetch_alpaca_option_contracts(
+            ticker, expiration, option_type,
+        )
+        if not contracts:
+            return None, (
+                f"no_contracts_for_type: {ticker} {option_type}s "
+                f"exp={expiration}"
+            ), True
+        symbols = [c["symbol"] for c in contracts if c.get("symbol")]
+        bars_by_symbol = self._fetch_alpaca_option_bars(
+            symbols,
+            start=entry_date,
+            end=entry_date + timedelta(days=1),
+        )
+        if not bars_by_symbol:
+            return None, (
+                f"no_bars_on_entry_day: {ticker} {entry_date} "
+                f"exp={expiration}"
+            ), True
+        # σ_hold matches the legacy horizon contract so the two paths are
+        # comparable when sweeping side-by-side.
+        try:
+            dte_days = max(1, (date.fromisoformat(expiration) - entry_date).days)
+        except (TypeError, ValueError):
+            dte_days = 1
+        if hold_bars and bars_per_year and hold_bars > 0 and bars_per_year > 0:
+            horizon_frac = hold_bars / bars_per_year
+        else:
+            horizon_frac = dte_days / 252.0
+        sigma_hold = (
+            sigma_annual * float(np.sqrt(horizon_frac))
+            if sigma_annual > 0 else 0.01
+        )
+        chain_slice = self._synth_chain_slice_for_decide(
+            expiration=expiration,
+            entry_date=entry_date,
+            contracts=contracts,
+            bars_by_symbol=bars_by_symbol,
+            spot=underlying_price,
+            sigma_hold=sigma_hold,
+        )
+        if chain_slice is None or not chain_slice.contracts:
+            return None, (
+                f"empty_synth_chain: {ticker} {entry_date} "
+                f"exp={expiration}"
+            ), True
+        output = decide(
+            DecisionInput(side=side, chain_slices=[chain_slice], preset=self.preset),
+            max_candidates=1,
+        )
+        # Stash diagnostics so the Streamlit panel can show why the
+        # engine rejected (or what the near-miss was) on the same UI
+        # the live monitor uses.
+        self.last_decide_diagnostics = output.diagnostics
+        if not output.candidates:
+            top_reason = max(
+                output.diagnostics.rejects_by_reason.items(),
+                key=lambda kv: kv[1],
+                default=("unknown", 0),
+            )[0]
+            return None, (
+                f"decide_no_candidate_{top_reason}: {ticker} "
+                f"{entry_date} exp={expiration}"
+            ), False
+        pick = output.candidates[0]
+        strike_distance_pct = abs(pick.short_strike - underlying_price) / underlying_price
+        return {
+            "short_symbol":         pick.short_symbol,
+            "long_symbol":          pick.long_symbol,
+            "short_strike":         pick.short_strike,
+            "long_strike":          pick.long_strike,
+            "expiration":           pick.expiration,
+            "option_type":          option_type,
+            "credit":               pick.credit,
+            "strike_distance_pct":  strike_distance_pct,
+            "approx_abs_delta":     abs(pick.short_delta),
+        }, "", False
+
     def _build_alpaca_plan_for_expiration(
         self,
         *,
@@ -1661,7 +1861,27 @@ class Backtester:
         the next-best expiration) and ``False`` when the failure is
         deterministic given the expiration's strike grid (caller should
         return immediately).
+
+        When ``self.use_unified_engine`` is ``True`` and ``self.preset``
+        is provided, this method delegates to
+        ``_build_alpaca_plan_via_decide`` — the parity-critical seam
+        that runs the same ``decide()`` the live scanner runs. The
+        legacy σ-distance heuristic below is preserved for the
+        existing test suite and as a fallback when no preset is
+        wired in.
         """
+        if self.use_unified_engine and self.preset is not None:
+            return self._build_alpaca_plan_via_decide(
+                ticker=ticker,
+                entry_date=entry_date,
+                regime=regime,
+                expiration=expiration,
+                underlying_price=underlying_price,
+                sigma_annual=sigma_annual,
+                effective_sigma_mult=effective_sigma_mult,
+                hold_bars=hold_bars,
+                bars_per_year=bars_per_year,
+            )
         # Pull both sides for iron condor; for directional regimes we only
         # need one but fetching both is cheap and simplifies logic.
         contracts_p = self._fetch_alpaca_option_contracts(ticker, expiration, "put")
@@ -3220,7 +3440,19 @@ def _run_cached(
     earnings_lookahead_days: int = AGENT_EARNINGS_LOOKAHEAD,
     use_alpaca_historical: bool = False,
     use_macro_signals: bool = False,
+    # Unified Decision Engine — preset is passed by *name* (str, hashable)
+    # so the @st.cache_data wrapper stays happy. We resolve the actual
+    # PresetConfig inside this function.
+    preset_name: Optional[str] = None,
+    use_unified_engine: bool = False,
 ) -> BacktestResult:
+    preset_obj = None
+    if use_unified_engine and preset_name:
+        try:
+            from trading_agent.strategy_presets import PRESETS
+            preset_obj = PRESETS.get(preset_name)
+        except Exception:
+            preset_obj = None
     return Backtester(
         sigma_mult=sigma_mult,
         loss_cut_multiplier=loss_cut_multiplier,
@@ -3233,6 +3465,8 @@ def _run_cached(
         earnings_lookahead_days=earnings_lookahead_days,
         use_alpaca_historical=use_alpaca_historical,
         use_macro_signals=use_macro_signals,
+        preset=preset_obj,
+        use_unified_engine=use_unified_engine and preset_obj is not None,
     ).run(list(tickers), start, end, timeframe, use_alpaca)
 
 
@@ -3243,7 +3477,11 @@ def _run_cached(
 def _export_to_journal(result: BacktestResult) -> None:
     try:
         from trading_agent.journal_kb import JournalKB
-        journal = JournalKB(journal_dir="trade_journal")
+        # ``run_mode="backtest"`` routes the export to
+        # ``signals_backtest.jsonl`` so backtest summaries never mingle
+        # with the live ``signals_live.jsonl`` corpus that the LLM and
+        # diagnostics panels consume.
+        journal = JournalKB(journal_dir="trade_journal", run_mode="backtest")
         m = result.metrics
         journal.log_signal(
             ticker="BACKTEST",
@@ -3457,6 +3695,71 @@ def render_backtest_ui() -> None:
             use_earnings_gate_val = False
             earnings_lookahead_val = AGENT_EARNINGS_LOOKAHEAD
             use_macro_signals_val = False
+
+        # ── Unified Decision Engine ───────────────────────────────────────
+        # Routes the backtest's strike-selection through the same
+        # ``decision_engine.decide()`` function the live agent calls. When
+        # OFF the legacy %-OTM / sigma-distance picker is used (kept for
+        # apples-to-apples comparison against historical runs).
+        st.markdown("**Unified Decision Engine**")
+        try:
+            from trading_agent.strategy_presets import (
+                PRESETS as _PRESETS,
+                load_active_preset as _load_active_preset,
+            )
+            _preset_choices = list(_PRESETS.keys())
+            try:
+                _default_preset_name = _load_active_preset().name
+            except Exception:
+                _default_preset_name = "balanced"
+            _default_idx = (_preset_choices.index(_default_preset_name)
+                            if _default_preset_name in _preset_choices else 0)
+            _presets_loaded = True
+        except Exception:
+            _preset_choices = ["balanced"]
+            _default_idx = 0
+            _presets_loaded = False
+
+        use_unified_engine_val = st.toggle(
+            "Use unified decision engine",
+            value=False,
+            key="bt_use_unified_engine",
+            disabled=not _presets_loaded,
+            help=(
+                "When ON, the backtester picks strikes via "
+                "``decision_engine.decide()`` — the same function the live "
+                "agent calls — using the preset selected below. This makes "
+                "the backtest a true dry-run of live behaviour: same C/W "
+                "floor, same |Δ|×(1+edge_buffer) rule, same scoring.\n\n"
+                "When OFF, the backtester uses its legacy %-OTM / "
+                "sigma-distance heuristic (kept for back-compat with "
+                "earlier runs).\n\n"
+                "**Requires** ``use_alpaca_historical=True`` — the unified "
+                "path needs real option contracts + bars to synthesize the "
+                "chain."
+            ),
+        )
+        if use_unified_engine_val and _presets_loaded:
+            preset_name_val: Optional[str] = st.selectbox(
+                "Preset",
+                options=_preset_choices,
+                index=_default_idx,
+                key="bt_unified_preset",
+                help=(
+                    "Strategy preset whose `dte_grid`, `delta_grid`, "
+                    "`width_grid_pct`, `edge_buffer`, and `min_pop` will "
+                    "drive the unified scanner."
+                ),
+            )
+            if not use_alpaca_historical:
+                st.warning(
+                    "⚠️  Unified engine requires `use_alpaca_historical=ON` "
+                    "(it builds the synth chain from real Alpaca contracts). "
+                    "Enable Alpaca-historical above or the toggle has no "
+                    "effect."
+                )
+        else:
+            preset_name_val = None
 
         st.divider()
         run_btn = st.button("Run Backtest", type="primary", width='stretch')

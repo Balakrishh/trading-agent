@@ -106,7 +106,13 @@ def journal_with_failures(tmp_path, passing_signal, failing_signal):
 class TestLoadJournalDf:
     def test_returns_empty_when_file_missing(self, tmp_path):
         missing = tmp_path / "nonexistent.jsonl"
-        with patch("trading_agent.streamlit.live_monitor.JOURNAL_PATH", missing):
+        legacy_missing = tmp_path / "nonexistent_legacy.jsonl"
+        # Patch BOTH JOURNAL_PATH (signals_live.jsonl) and LEGACY_JOURNAL_PATH
+        # (signals.jsonl) — the loader falls back to the legacy file when the
+        # primary is missing, so the test must isolate from any real on-disk
+        # legacy journal.
+        with patch("trading_agent.streamlit.live_monitor.JOURNAL_PATH", missing), \
+             patch("trading_agent.streamlit.live_monitor.LEGACY_JOURNAL_PATH", legacy_missing):
             df = _load_journal_df()
         assert df.empty
         assert "timestamp" in df.columns

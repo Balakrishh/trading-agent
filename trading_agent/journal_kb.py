@@ -4,9 +4,17 @@ Journal Knowledge Base
 Structured signal logger for every trade attempt/signal, written
 regardless of whether the LLM intelligence layer is enabled.
 
-Two output files maintained in *journal_dir*:
-  signals.jsonl  — one JSON object per line (LLM fine-tuning / RAG-ready)
-  signals.md     — append-only Markdown table (human-readable)
+Two output files maintained in *journal_dir*, basename keyed by
+``run_mode``:
+
+  signals_<run_mode>.jsonl  — one JSON object per line (LLM-ready)
+  signals_<run_mode>.md     — append-only Markdown table (human-readable)
+
+``run_mode`` is one of ``"live"`` (default — used by the live agent)
+or ``"backtest"`` (used by ``backtest_ui._export_to_journal``). Keeping
+the streams in separate files prevents backtest signals from polluting
+the live RAG corpus or the live diagnostics dashboard, and makes
+post-mortem readers obvious about which environment a row came from.
 
 JSONL record schema
 -------------------
@@ -71,11 +79,23 @@ class JournalKB:
                        raw_signal={...})
     """
 
-    def __init__(self, journal_dir: str = "journal_kb"):
+    # Allow-list of recognised run-modes — guards against typos that
+    # would silently create a new journal file (``signals_lvie.jsonl``…).
+    VALID_RUN_MODES = ("live", "backtest")
+
+    def __init__(self, journal_dir: str = "journal_kb",
+                 run_mode: str = "live"):
+        if run_mode not in self.VALID_RUN_MODES:
+            raise ValueError(
+                f"run_mode must be one of {self.VALID_RUN_MODES}; got {run_mode!r}"
+            )
         self.journal_dir = journal_dir
+        self.run_mode    = run_mode
         os.makedirs(journal_dir, exist_ok=True)
-        self.jsonl_path = os.path.join(journal_dir, "signals.jsonl")
-        self.md_path = os.path.join(journal_dir, "signals.md")
+        # Path basename keyed by run_mode so live and backtest never
+        # interleave bytes inside the same JSONL stream.
+        self.jsonl_path = os.path.join(journal_dir, f"signals_{run_mode}.jsonl")
+        self.md_path    = os.path.join(journal_dir, f"signals_{run_mode}.md")
         self._ensure_md_header()
 
     # ------------------------------------------------------------------

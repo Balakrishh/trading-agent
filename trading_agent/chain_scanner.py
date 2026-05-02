@@ -359,18 +359,6 @@ class ChainScanner:
             today = datetime.now().date()
 
         opt_type = "put" if side == "bull_put" else "call"
-        candidates: List[SpreadCandidate] = []
-
-        # Diagnostics scaffolding — sized off the preset grid so the user
-        # can read "evaluated 12 of 16 grid points" right out of the journal.
-        n_dte = len(list(self.preset.dte_grid))
-        n_delta = len(list(self.preset.delta_grid))
-        n_width = len(list(self.preset.width_grid_pct))
-        diag = ScanDiagnostics(grid_points_total=n_dte * n_delta * n_width)
-        # Track the highest-EV candidate that *only* failed the C/W floor —
-        # the actionable near-miss the user wants to see when zero
-        # candidates pass.
-        best_near_miss_payload: Optional[Dict[str, Any]] = None
 
         # 1. Pick distinct expirations (grid items collapse onto the same
         #    weekly when DTEs are close together; dedup on the resolved
@@ -390,141 +378,57 @@ class ChainScanner:
                 continue
             exp_str = exp_date.strftime("%Y-%m-%d")
             dte = (exp_date - today).days
-            # Keep the smallest DTE if collisions; closer to the user's
-            # asked grid-point will dominate ranking anyway.
             if exp_str not in seen_exps or dte < seen_exps[exp_str]:
                 seen_exps[exp_str] = dte
 
-        diag.expirations_resolved = len(seen_exps)
-        if not seen_exps:
-            logger.warning("[%s] Scanner found no expirations for grid %s",
-                           ticker, list(self.preset.dte_grid))
-            self.last_diagnostics = diag
-            return []
-
-        # 2. For each (expiration, target_delta, width), score one candidate.
+        # 2. Fetch chains for every resolved expiration and build the
+        #    list of ChainSlice the decision engine will score. Empty
+        #    chains are still included so the engine can record
+        #    ``no_chain`` in diagnostics.
+        from trading_agent.decision_engine import (   # late import to
+            ChainSlice,                                # break a cycle
+            DecisionInput,
+            decide,
+        )
+        chain_slices: List[ChainSlice] = []
         for exp_str, dte in seen_exps.items():
-            chain = self.data.fetch_option_chain(ticker, exp_str, opt_type)
+            chain = self.data.fetch_option_chain(ticker, exp_str, opt_type) or []
             if not chain:
-                # All (Δ × width) tuples for this expiration are dead.
-                diag.record(REJECT_NO_CHAIN, n_delta * n_width)
                 logger.debug("[%s] No %s chain for %s — skipping",
                              ticker, opt_type, exp_str)
-                continue
+            chain_slices.append(ChainSlice(
+                expiration=exp_str, dte=dte, contracts=list(chain),
+            ))
 
-            spot_proxy = self._infer_spot_proxy(chain)
-            grid_step = self._infer_grid_step(chain)
+        if not seen_exps:
+            n_delta = len(list(self.preset.delta_grid))
+            n_width = len(list(self.preset.width_grid_pct))
+            n_dte   = len(list(self.preset.dte_grid))
+            diag = ScanDiagnostics(
+                grid_points_total=n_dte * n_delta * n_width,
+            )
+            self.last_diagnostics = diag
+            logger.warning("[%s] Scanner found no expirations for grid %s",
+                           ticker, list(self.preset.dte_grid))
+            return []
 
-            for target_delta in self.preset.delta_grid:
-                short_contract = self._find_short(chain, target_delta)
-                if short_contract is None:
-                    diag.record(REJECT_NO_SHORT_CONTRACT, n_width)
-                    continue
-                short_strike = float(short_contract["strike"])
-
-                for width_pct in self.preset.width_grid_pct:
-                    raw_width = width_pct * spot_proxy
-                    width = self._snap_width_to_grid(raw_width, grid_step)
-                    if width <= 0:
-                        diag.record(REJECT_NON_POSITIVE_WIDTH)
-                        continue
-                    long_strike = (short_strike - width if side == "bull_put"
-                                   else short_strike + width)
-                    long_contract = self._find_strike(chain, long_strike)
-                    if long_contract is None:
-                        diag.record(REJECT_NO_LONG_CONTRACT)
-                        continue
-                    actual_width = abs(short_strike - float(long_contract["strike"]))
-                    if actual_width <= 0:
-                        diag.record(REJECT_NON_POSITIVE_WIDTH)
-                        continue
-
-                    # Score off "fillable mid" — see ``_quote_credit`` for
-                    # the rationale and fallback rules. Raw bid/ask still
-                    # land on the SpreadCandidate below for journal
-                    # transparency, so post-hoc fill analysis can compare
-                    # mid-target to worst-case ``short_bid − long_ask``.
-                    credit = _quote_credit(
-                        short_bid=float(short_contract["bid"]),
-                        short_ask=float(short_contract["ask"]),
-                        long_bid =float(long_contract["bid"]),
-                        long_ask =float(long_contract["ask"]),
-                    )
-                    short_delta = float(short_contract["delta"])
-
-                    diag.grid_points_priced += 1
-                    result = _score_candidate_with_reason(
-                        credit=credit,
-                        width=actual_width,
-                        short_delta=short_delta,
-                        dte=dte,
-                        edge_buffer=self.preset.edge_buffer,
-                        min_pop=self.preset.min_pop,
-                    )
-                    if result["status"] == "rejected":
-                        reason = result["reason"]
-                        diag.record(reason)
-                        # Surface the closest the chain came to passing —
-                        # only candidates that failed *only* the C/W floor
-                        # qualify (those have full pop/cw/ev populated and
-                        # are within reach of a tighter edge_buffer dial).
-                        if reason == REJECT_CW_BELOW_FLOOR:
-                            cand_payload = {
-                                "expiration":   exp_str,
-                                "dte":          dte,
-                                "short_strike": short_strike,
-                                "long_strike":  float(long_contract["strike"]),
-                                "short_delta":  round(short_delta, 4),
-                                "credit":       credit,
-                                "width":        round(actual_width, 4),
-                                "cw_ratio":     round(result.get("cw") or 0.0, 4),
-                                "cw_floor":     round(result.get("cw_floor") or 0.0, 4),
-                                "pop":          round(result.get("pop") or 0.0, 4),
-                                "ev":           round(result.get("ev") or 0.0, 4),
-                                "target_delta": float(target_delta),
-                                "width_pct":    float(width_pct),
-                            }
-                            cur_ev = (best_near_miss_payload or {}).get("ev", -1e9)
-                            if cand_payload["ev"] > cur_ev:
-                                best_near_miss_payload = cand_payload
-                        continue
-
-                    candidates.append(SpreadCandidate(
-                        side=side,
-                        expiration=exp_str,
-                        dte=dte,
-                        short_strike=short_strike,
-                        long_strike=float(long_contract["strike"]),
-                        short_delta=short_delta,
-                        short_symbol=str(short_contract.get("symbol", "")),
-                        long_symbol=str(long_contract.get("symbol", "")),
-                        short_bid=float(short_contract["bid"]),
-                        short_ask=float(short_contract["ask"]),
-                        long_bid=float(long_contract["bid"]),
-                        long_ask=float(long_contract["ask"]),
-                        credit=credit,
-                        width=actual_width,
-                        cw_ratio=result["cw"],
-                        pop=result["pop"],
-                        cw_floor=result["cw_floor"],
-                        ev_per_dollar_risked=result["ev"],
-                        annualized_score=result["annualized"],
-                        target_delta=float(target_delta),
-                        width_pct=float(width_pct),
-                    ))
-
-        # 3. Rank: annualized score desc, then absolute credit desc as tiebreak.
-        candidates.sort(
-            key=lambda c: (c.annualized_score, c.credit),
-            reverse=True,
+        # 3. Hand it to the pure decision engine. This is the *single*
+        #    place where (Δ × width) sweeping happens in the codebase —
+        #    the backtester calls ``decide()`` with its own chain slices
+        #    so the math cannot drift between live and backtest.
+        output = decide(
+            DecisionInput(
+                side=side,
+                chain_slices=chain_slices,
+                preset=self.preset,
+            ),
+            max_candidates=self.max_candidates,
         )
-
-        diag.best_near_miss = best_near_miss_payload
+        candidates = output.candidates
+        diag = output.diagnostics
         self.last_diagnostics = diag
 
         if not candidates:
-            # Promote the top reject reason into the log line so an operator
-            # tailing trading_agent.log doesn't have to open the journal.
             top_reason = max(diag.rejects_by_reason.items(),
                              key=lambda kv: kv[1], default=(None, 0))
             logger.info(
@@ -534,7 +438,7 @@ class ChainScanner:
                 ticker, len(seen_exps),
                 diag.grid_points_priced, diag.grid_points_total,
                 top_reason[0], top_reason[1],
-                (best_near_miss_payload or {}).get("ev", 0.0),
+                (diag.best_near_miss or {}).get("ev", 0.0),
             )
         else:
             top = candidates[0]
@@ -546,7 +450,7 @@ class ChainScanner:
                 top.credit, top.cw_ratio, top.cw_floor, top.ev_per_dollar_risked,
                 top.annualized_score, len(candidates),
             )
-        return candidates[: self.max_candidates]
+        return candidates
 
     # ------------------------------------------------------------------
     # Chain inspection helpers

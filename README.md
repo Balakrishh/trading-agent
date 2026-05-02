@@ -909,6 +909,46 @@ Backtester(
 - **Friday-weekly preference in `_pick_alpaca_expiration`** — the picker used to select strict-nearest-DTE, which on most weekday entry-dates landed on a Mon/Wed/Thu weekly. Mon/Wed weeklies on QQQ/SPY/IWM trade at a fraction of Friday-weekly volume, so Alpaca's options-bars endpoint returned empty results for ~80% of intraday backtest candidates. The picker now adds a +4-day penalty to non-Friday expirations so Friday weeklies within 4d of the target_dte beat ties; tiebreaker prefers Friday over non-Friday and earlier expirations over later. Math: `target = entry+35d` (Mon) → Mon@35d effective-diff 0+4=4, Wed@37d 2+4=6, Fri@32d 3+0=**3 (wins)**, Fri@39d 4+0=4. Regression: `TestPickAlpacaExpirationFridayPreference`.
 - **Expiration-fallback loop on data-availability failures.** When the first-choice expiry returns empty bars (or no contracts, or non-positive credit), `_alpaca_historical_plan` now retries with the next-best expiration up to `MAX_FALLBACK_ATTEMPTS=3` times before giving up. Strike-grid failures (`long_leg_off_grid`, `no_otm_near_target`) do NOT retry because they're deterministic given the catalogue. New rejection token: `no_bars_after_fallbacks` (caught only when all retries are exhausted). Internal helper `_build_alpaca_plan_for_expiration` was extracted to make this loopable. Regression: `TestAlpacaHistoricalPlanFallback`.
 
+#### Live ↔ Backtest Unified Decision Engine (May 2026)
+
+The previous biggest source of drift was that the live agent ran a `(DTE × Δ × width)` adaptive sweep through `chain_scanner.ChainScanner.scan()` while the backtester ran a homegrown σ-distance heuristic in `_alpaca_historical_plan` — different strike picker, different credit pricing, different EV/POP logic, no shared code. Any change on one side could silently diverge the other.
+
+The May 2026 unification reshapes this around a single pure function:
+
+```
+chain_scanner.py             ← pure helpers (_quote_credit, _score_candidate_with_reason)
+        │
+        ▼
+decision_engine.decide()     ← pure scoring entrypoint (no I/O)
+        │
+        ├──── ChainScanner.scan()                  (live)
+        └──── Backtester._build_alpaca_plan_via_decide()   (backtest)
+```
+
+`decision_engine.decide(DecisionInput) -> DecisionOutput` is a pure function with no I/O, no calendar lookups, no broker calls. It takes `ChainSlice`s in (one expiration's worth of `{strike, delta, bid, ask, symbol}` dicts plus the DTE), runs the full `(Δ × width)` sweep, and returns ranked `SpreadCandidate`s plus a `ScanDiagnostics` block. Both the live `ChainScanner` and the backtester's `_build_alpaca_plan_via_decide` are *clients* of this function — neither owns the scoring logic.
+
+**Backtester opt-in.** Pass `use_unified_engine=True` and `preset=<PresetConfig>` to the `Backtester` constructor. When set, `_build_alpaca_plan_for_expiration` synthesizes a `ChainSlice` from Alpaca-historical contracts + bars (bar close stands in for both bid and ask; |Δ| approximated from σ_hold via Black-Scholes since Alpaca's historical endpoints don't return Greeks) and delegates to `decide()`. When unset, the legacy σ-distance heuristic still runs — preserved for the existing test suite.
+
+**Drift-prevention enforcement** lives in three places:
+
+1. `scan_invariant_check.py` — AST walker, runs in CI. Asserts (a) the `|Δ|×(1+edge_buffer)` C/W floor formula appears in `chain_scanner.py`, `risk_manager.py`, and `executor.py`; (b) no module *outside* `chain_scanner` and `decision_engine` defines `_score_candidate`, `_score_candidate_with_reason`, or `_quote_credit` (no shadow scorers); (c) `streamlit/backtest_ui.py` contains a `decide(...)` call (the unified path is wired in, not dead code).
+
+2. `run_live_vs_backtest_parity_check.py` — end-to-end smoke driver that builds a synthetic chain, feeds it to *both* `ChainScanner.scan()` and `Backtester._build_alpaca_plan_via_decide()`, and asserts identical strike picks + matching credit (Δ ≤ $0.01).
+
+3. **Separate journal files.** Live writes `trade_journal/signals_live.jsonl`; backtest writes `trade_journal/signals_backtest.jsonl`. The LLM analyst corpus and the live-monitor diagnostics panel deliberately read only the live file so synthetic backtest counterfactuals can't bias guardrail recommendations. `JournalKB.__init__` accepts `run_mode={"live","backtest"}`; an unknown value raises `ValueError` so typos can't silently fork the journal.
+
+**Smoke tests bundled with the repo:**
+
+```bash
+python3 scan_invariant_check.py              # AST invariants — runs in CI
+python3 run_scan_diagnostics_check.py        # ChainScanner + decide() integration
+python3 run_unified_backtest_check.py        # Backtester unified-path smoke
+python3 run_journal_split_check.py           # JournalKB run_mode split
+python3 run_live_vs_backtest_parity_check.py # end-to-end parity
+```
+
+All five must pass before any change to scoring, pricing, or floor logic ships. If `run_live_vs_backtest_parity_check.py` reports drift, the engine moved on one side but not the other — track down the divergence in `chain_scanner.py` / `decision_engine.py` and re-test.
+
 ---
 
 ## Signal Journal Format (`signals.jsonl`)

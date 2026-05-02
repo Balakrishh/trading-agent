@@ -155,14 +155,15 @@ class TestFullPipeline:
 
     def test_journal_kb_logs_signal_on_dry_run(self, tmp_path, bullish_prices,
                                                 sample_put_contracts):
-        """JournalKB signals.jsonl is written after each cycle."""
+        """JournalKB signals_<run_mode>.jsonl is written after each cycle."""
         agent = TradingAgent(_make_config(tmp_path))
         _mock_agent(agent, bullish_prices, sample_put_contracts)
 
         agent.run_cycle()
 
-        journal_dir = agent.journal_kb.journal_dir
-        jsonl_path = os.path.join(journal_dir, "signals.jsonl")
+        # Use the canonical path attribute so the test is robust to the
+        # live/backtest split (signals_live.jsonl vs signals_backtest.jsonl).
+        jsonl_path = agent.journal_kb.jsonl_path
         assert os.path.exists(jsonl_path)
         lines = open(jsonl_path).readlines()
         assert len(lines) >= 1
@@ -179,7 +180,7 @@ class TestFullPipeline:
 
         agent.run_cycle()
 
-        jsonl_path = os.path.join(agent.journal_kb.journal_dir, "signals.jsonl")
+        jsonl_path = agent.journal_kb.jsonl_path
         record = json.loads(open(jsonl_path).readline())
         thesis = record["raw_signal"].get("thesis", {})
         assert "why" in thesis

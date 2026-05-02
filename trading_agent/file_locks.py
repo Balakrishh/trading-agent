@@ -7,9 +7,13 @@ Context
 The agent writes to several shared files from multiple possible
 processes:
 
-  • trade_journal/signals.jsonl  — appended every cycle, every ticker
-  • trade_journal/signals.md     — appended alongside JSONL
-  • trade_plans/daily_state.json — read-modify-write for drawdown + debounce
+  • trade_journal/signals_live.jsonl     — live agent: appended every
+    cycle, every ticker
+  • trade_journal/signals_backtest.jsonl — backtester: appended on
+    Backtest UI export
+  • trade_journal/signals_*.md           — appended alongside each JSONL
+  • trade_plans/daily_state.json         — read-modify-write for
+    drawdown + debounce
 
 Although a single scheduler is expected, overlapping runs can happen:
   – cron fires the next cycle before the previous exits
@@ -98,7 +102,7 @@ def locked_append(path: str, encoding: str = "utf-8") -> Iterator:
 
     Usage::
 
-        with locked_append("signals.jsonl") as fh:
+        with locked_append("signals_live.jsonl") as fh:
             fh.write(json.dumps(record) + "\n")
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

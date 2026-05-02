@@ -85,7 +85,13 @@ def _parse_occ(symbol: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 # File-based state paths (relative to repo root)
 # ---------------------------------------------------------------------------
-JOURNAL_PATH   = Path("trade_journal/signals.jsonl")
+# Live agent writes ``signals_live.jsonl`` (Phase 3 of the live↔backtest
+# unification — backtests write ``signals_backtest.jsonl`` instead so
+# the two streams never mingle in this dashboard or in the LLM corpus).
+# Legacy ``signals.jsonl`` is read as a fallback so existing on-disk
+# journal history is still surfaced after the rename.
+JOURNAL_PATH        = Path("trade_journal/signals_live.jsonl")
+LEGACY_JOURNAL_PATH = Path("trade_journal/signals.jsonl")
 PAUSE_FLAG     = Path("PAUSED")
 AGENT_RUNNING  = Path("AGENT_RUNNING")   # sentinel: agent loop is active
 AGENT_PID      = Path("AGENT_PID")       # PID of the running cycle process
@@ -260,11 +266,18 @@ def _load_journal_df() -> pd.DataFrame:
                  "regime", "checks_passed", "checks_failed", "notes",
                  "rsi_14", "sma_50", "sma_200", "scan_results"]
     )
-    if not JOURNAL_PATH.exists():
+    # Prefer the new live-only file, fall back to legacy ``signals.jsonl``
+    # so the dashboard keeps surfacing pre-rename history. Once the agent
+    # has written one cycle to the new path, this naturally converges.
+    if JOURNAL_PATH.exists():
+        path = JOURNAL_PATH
+    elif LEGACY_JOURNAL_PATH.exists():
+        path = LEGACY_JOURNAL_PATH
+    else:
         return empty
 
     rows = []
-    with open(JOURNAL_PATH) as fh:
+    with open(path) as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -1186,7 +1199,11 @@ def render_live_monitor() -> None:
     # ── Journal expander ───────────────────────────────────────────────────
     with st.expander("Recent Journal Entries", expanded=False):
         if journal_df.empty:
-            st.info("No journal entries found at trade_journal/signals.jsonl.")
+            st.info(
+                "No journal entries found at "
+                "trade_journal/signals_live.jsonl "
+                "(or legacy trade_journal/signals.jsonl)."
+            )
         else:
             cols = ["timestamp", "ticker", "action", "regime", "notes"]
             cols = [c for c in cols if c in journal_df.columns]
