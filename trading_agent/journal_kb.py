@@ -57,15 +57,45 @@ JSONL record schema
 }
 """
 
+import hashlib
 import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from trading_agent.file_locks import locked_append
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Rejection-spam dedup (Option A — added 2026-05-06)
+# ---------------------------------------------------------------------------
+# At a 5-min cycle × ~9 tickers, a $5k account can produce 80–100 redundant
+# rejection rows per hour as oversized underlyings (SPY, GLD) trip the
+# max_loss > 2% × equity gate every cycle.  This module's dedup
+# suppresses identical consecutive entries per ticker, with a periodic
+# heartbeat row so the journal isn't completely silent.
+#
+# Signature = (action, sorted(checks_failed_set), rejection_reason)
+# - Match  → increment counter, suppress write unless heartbeat tick.
+# - Diff   → write fresh row + reset counter.
+# - SUBMITTED / CLOSED actions BYPASS dedup entirely (they're never spam,
+#   and operators must always see them at the exact instant they happen).
+#
+# Configurable: JOURNAL_DEDUP_HEARTBEAT_EVERY env var.
+#   - default 12  → ~1 heartbeat per hour at 5-min cycles
+#   - 0 disables dedup entirely (fully verbose journal)
+#   - 1 also effectively disables (every row is a heartbeat)
+_DEFAULT_HEARTBEAT_EVERY = 12
+
+# Actions that ALWAYS write a journal row regardless of dedup state.
+# Submissions, closes, and dry-run sentinels are material events; an
+# operator must see each one at the exact moment it happened.
+_DEDUP_BYPASS_ACTIONS = frozenset({
+    "submitted", "dry_run", "closed", "dry_run_close",
+    "error",  # errors are rare AND material — dedupe is wrong here
+})
 
 _MD_HEADER = (
     "| Timestamp (UTC) | Ticker | Action | Price | Strategy | Regime "
@@ -104,6 +134,20 @@ class JournalKB:
         self.md_path    = os.path.join(journal_dir, f"signals_{run_mode}.md")
         self._ensure_md_header()
 
+        # ── Rejection-spam dedup state (Option A) ────────────────────────
+        # In-memory only — not persisted across restarts (intentional: a
+        # restart is often the trigger for an operator to re-inspect
+        # rejection state, so writing the first post-restart rejection
+        # is the right behaviour).
+        self._last_signature_by_ticker: Dict[str, Tuple[str, int]] = {}
+        try:
+            self._heartbeat_every = max(0, int(os.environ.get(
+                "JOURNAL_DEDUP_HEARTBEAT_EVERY",
+                str(_DEFAULT_HEARTBEAT_EVERY),
+            )))
+        except (TypeError, ValueError):
+            self._heartbeat_every = _DEFAULT_HEARTBEAT_EVERY
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -136,6 +180,16 @@ class JournalKB:
         if notes is None:
             notes = self._auto_notes(raw_signal, action)
 
+        # ── Rejection-spam dedup gate ────────────────────────────────────
+        # Compute a per-ticker signature; on consecutive matches, suppress
+        # the write entirely OR emit a periodic heartbeat row depending on
+        # the cycle counter.  Material events (submitted, closed, errors)
+        # bypass the gate so they always appear in the journal at the
+        # exact instant they happen.
+        is_dedup_skip, dedup_meta = self._dedup_decision(ticker, action, raw_signal)
+        if is_dedup_skip:
+            return                          # silently suppressed duplicate
+
         record: Dict[str, Any] = {
             "timestamp": ts,
             "ticker": ticker,
@@ -145,9 +199,98 @@ class JournalKB:
             "notes": notes[:120],
             "raw_signal": raw_signal,
         }
+        if dedup_meta:
+            # Annotate heartbeat rows so an operator (and future
+            # analytics) can distinguish a heartbeat from a fresh write.
+            record["dedup"] = dedup_meta
 
         self._write_jsonl(record)
         self._write_md_row(ts, ticker, action, price, raw_signal, status, notes)
+
+    # ------------------------------------------------------------------
+    # Rejection-spam dedup helper
+    # ------------------------------------------------------------------
+
+    def _dedup_decision(self, ticker: str, action: str,
+                        raw_signal: Dict[str, Any]) -> Tuple[bool, Optional[Dict]]:
+        """
+        Decide whether a log_signal call should be suppressed (duplicate)
+        or annotated as a heartbeat.
+
+        Returns
+        -------
+        (is_skip, dedup_meta)
+            ``is_skip=True``  → caller must drop the row entirely.
+            ``is_skip=False`` → caller writes the row.  ``dedup_meta`` is
+            either ``None`` (fresh write — nothing to annotate) or a dict
+            ``{"streak": N, "kind": "heartbeat"}`` to tag the row as a
+            heartbeat for downstream analytics.
+
+        Bypass conditions
+        -----------------
+        * ``self._heartbeat_every == 0`` — dedup disabled.
+        * ``action`` in :data:`_DEDUP_BYPASS_ACTIONS` — material events
+          (submitted, closed, dry_run, error) always pass through.
+        """
+        # Dedup disabled — write everything.
+        if self._heartbeat_every == 0:
+            return False, None
+
+        # Material events bypass dedup entirely.
+        if action in _DEDUP_BYPASS_ACTIONS:
+            # Reset the per-ticker counter so a subsequent rejection
+            # (after a real submission/close) writes fresh.
+            self._last_signature_by_ticker.pop(ticker, None)
+            return False, None
+
+        sig = self._signature(action, raw_signal)
+        prev = self._last_signature_by_ticker.get(ticker)
+
+        if prev is None or prev[0] != sig:
+            # First occurrence OR signature changed → write fresh, reset count.
+            self._last_signature_by_ticker[ticker] = (sig, 1)
+            return False, None
+
+        # Identical signature — increment streak.
+        prev_sig, prev_count = prev
+        new_count = prev_count + 1
+        self._last_signature_by_ticker[ticker] = (prev_sig, new_count)
+
+        # Heartbeat if the new count is divisible by the configured
+        # interval (e.g. every 12th duplicate at default).
+        if new_count % self._heartbeat_every == 0:
+            return False, {
+                "streak": new_count,
+                "kind": "heartbeat",
+                "interval": self._heartbeat_every,
+            }
+
+        # Otherwise suppress.
+        return True, None
+
+    @staticmethod
+    def _signature(action: str, raw_signal: Dict[str, Any]) -> str:
+        """
+        Produce a stable hash for the (action, checks_failed,
+        rejection_reason) tuple.  Two calls for the same ticker with
+        identical signature → consecutive duplicates.
+
+        Why not a tuple of strings directly?  Python set order is
+        non-deterministic, so we sort ``checks_failed`` first to make
+        the hash invariant under list-order changes.
+        """
+        checks_failed = raw_signal.get("checks_failed") or []
+        if isinstance(checks_failed, list):
+            checks_key = tuple(sorted(str(c) for c in checks_failed))
+        else:
+            checks_key = (str(checks_failed),)
+        rejection_reason = str(raw_signal.get("rejection_reason") or "")
+        # Also include the freeform "reason" field that gates like
+        # skipped_existing / skipped_bias use, so a transition between
+        # two skip-types is captured as a state change.
+        reason = str(raw_signal.get("reason") or "")
+        material = (action, checks_key, rejection_reason, reason)
+        return hashlib.sha256(repr(material).encode("utf-8")).hexdigest()[:16]
 
     def log_defense_first(
         self,
