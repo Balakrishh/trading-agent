@@ -253,6 +253,8 @@ Read this list as "if you're about to touch X, you must understand Y first."
 | The watchlist or any intraday surface | [12 Multi-timeframe resolution](12_multi_timeframe_resolution.md) |
 | Adding a tunable knob | [13 Preset system & hot-reload](13_preset_system_hot_reload.md) |
 | Choosing between simple and grid-scan planning | [14 Adaptive vs static scan modes](14_adaptive_vs_static_scan_modes.md) |
+| Backtester / live-parity changes | [15 Backtest↔live parity](15_backtest_live_parity.md) |
+| Adding a market-data provider, OAuth flow, or per-surface routing | [16 Market-data provider routing](16_market_data_provider_routing.md) |
 
 ## 8. Edge Cases / Guardrails
 
@@ -270,7 +272,7 @@ Read this list as "if you're about to touch X, you must understand Y first."
 
 ## 9. Cross-References
 
-This file links to all 14 phase-1 skills:
+This file links to all 16 phase-1 skills:
 
 - [01 POP from short delta](01_pop_from_delta.md)
 - [02 Strike snapping to grid](02_strike_snapping.md)
@@ -286,6 +288,8 @@ This file links to all 14 phase-1 skills:
 - [12 Multi-timeframe regime resolution](12_multi_timeframe_resolution.md)
 - [13 Preset system & hot-reload](13_preset_system_hot_reload.md)
 - [14 Adaptive vs static scan modes](14_adaptive_vs_static_scan_modes.md)
+- [15 Backtest↔live parity](15_backtest_live_parity.md)
+- [16 Market-data provider routing](16_market_data_provider_routing.md)
 
 External documents:
 
@@ -295,4 +299,4 @@ External documents:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-03.*
+*Last verified against repo HEAD on 2026-05-05.*

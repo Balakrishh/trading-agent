@@ -87,7 +87,8 @@ Run locally:
 pytest tests/                                          # full suite
 pytest tests/test_<module>.py -v                       # focused
 python scripts/checks/scan_invariant_check.py          # AST-level invariants
-python scripts/checks/run_unified_backtest_check.py    # live↔backtest parity
+python scripts/checks/run_scan_diagnostics_check.py    # ChainScanner ↔ decide() integration
+python scripts/checks/run_journal_split_check.py       # JournalKB run_mode split
 ```
 
 If you added a verification harness, add it to `.github/workflows/ci.yml`.

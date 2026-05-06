@@ -4,9 +4,10 @@ decision_engine.py — pure spread-scoring engine, shared by live and backtest.
 This module owns the *deterministic* part of "given a chain, which spread
 should we trade?". No I/O, no calendar lookups, no broker calls — everything
 the engine needs is in its ``DecisionInput``. Both the live ``ChainScanner``
-and the historical ``Backtester`` construct an input, call ``decide()``, and
-get back the same shape: a ranked list of ``SpreadCandidate`` plus a
-``ScanDiagnostics`` block describing why anything was rejected.
+and the backtest ``run_one_cycle`` (under ``trading_agent/backtest/``)
+construct an input, call ``decide()``, and get back the same shape: a
+ranked list of ``SpreadCandidate`` plus a ``ScanDiagnostics`` block
+describing why anything was rejected.
 
 Why this lives in its own module:
 

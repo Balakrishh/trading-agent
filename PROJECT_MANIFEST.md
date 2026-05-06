@@ -2,7 +2,7 @@
 
 A concise, citation-backed handoff document for cross-LLM context transfer. Every claim below is grounded in `file:line` references so a new collaborator can verify against the source instead of trusting prose.
 
-Last verified: 2026-05-02 against repo state at HEAD.
+Last verified: 2026-05-05 against repo state at HEAD.
 
 ---
 
@@ -93,9 +93,9 @@ Full regime → strategy table in `README.md:82-89`.
 - `VIX_INHIBIT_ZSCORE = 2.0` (`regime.py:117`) — VIX 5-min Δ z > 2 σ inhibits new bullish-premium openings.
 
 ### 1f. Architectural invariants (enforced by `scripts/checks/scan_invariant_check.py`)
-1. **Single C/W floor formula** `|Δ|×(1+edge_buffer)` exists in `risk_manager.py` and `executor.py` only.
+1. **Single C/W floor formula** `|Δ|×(1+edge_buffer)` exists in `chain_scanner.py`, `risk_manager.py`, and `executor.py`.
 2. **Single scoring source** — scoring primitives only in `chain_scanner.py` and `decision_engine.py`. No shadow scorers in any other module.
-3. **Backtester wires through `decision_engine.decide()`** — `streamlit/backtest_ui.py` proves this. Live and backtest paths share one decision function.
+3. **Backtester wires through `decision_engine.decide()`** — `streamlit/backtest_ui.py` must contain at least one `decide(` call. Live and backtest paths share one decision function. See skill 15.
 
 A new LLM should run `python scripts/checks/scan_invariant_check.py` after any structural change.
 
@@ -166,13 +166,52 @@ The runtime imposes no hardware lock. Profile guidance lives in `setup_intellige
 - Paper trading is the default; live URLs would need to be overridden via `alpaca_base_url`.
 - IEX feed limitation: thin volume on sector ETFs (XLF, XLK, XLY, XLE, XLV, XLP, XLC, XLB, XLU, XLRE) means `get_5min_return_series` often returns `None` for these on weekends or after the open-bar-skip cut. Setting `ALPACA_STOCKS_FEED=sip` requires a paid SIP subscription.
 
+### 3c-bis. Multi-provider market-data routing (added 2026-05-05)
+The market-data plane is now hexagonal — three providers live behind the
+same `MarketDataPort` Protocol and the surface chooses one via env var.
+Alpaca is still the **execution broker** in every config; only the data
+plane is swappable.
+
+- `MarketDataProvider` (`market_data.py`) — Alpaca; default.
+- `SchwabMarketDataProvider` (`market_data_schwab.py`) — real-time
+  options + Greeks via Schwab Trader API (OAuth 2.0, 30-min access /
+  7-day refresh tokens, `python -m trading_agent.schwab_oauth login`
+  for the one-time consent flow).
+- `YahooMarketDataProvider` (`market_data_yahoo.py`) — yfinance only;
+  options return `None`, live bid/ask returns `None`.  Suitable for
+  Watchlist + future Backtest surfaces.
+
+`build_market_data_provider(...)` in `market_data_factory.py` walks
+`MARKET_DATA_PROVIDER_<SURFACE>` → `MARKET_DATA_PROVIDER` → `alpaca`.
+Surfaces wired through the factory: agent live cycle (`agent.py:156`,
+`surface="live"`), Watchlist tab (`watchlist_ui.py:_get_data_provider`,
+`surface="watchlist"`), and the dashboard's market-open badge
+(`live_monitor.py:_is_market_open_cached`, `surface="live"`).  The
+`_fetch_account_cached` callsite stays Alpaca-direct intentionally —
+account state has no equivalent shape on Schwab/Yahoo.
+
+See [`docs/skills/16_market_data_provider_routing.md`](docs/skills/16_market_data_provider_routing.md)
+for OCC symbol translation, IV-percent normalization, and the auth
+failure modes the adapter surfaces.
+
 ### 3d. Streamlit UI (4 tabs in `trading_agent/streamlit/app.py:52-73`)
 1. **Live Monitoring** — `live_monitor.py`
-2. **Backtesting** — `backtest_ui.py`
+2. **Backtesting** — `backtest_ui.py` (rewritten 2026-05-04; ~475 lines, down from ~4,057. All trading logic now lives in `trading_agent/backtest/` and reuses live primitives.)
 3. **LLM Extension** — `llm_extension.py`
 4. **Watchlist** — `watchlist_ui.py` (read-only analyst view, no trade routing)
 
 The Watchlist tab is **architecturally isolated**: it does not import `decision_engine`, `chain_scanner`, `executor`, or `risk_manager`, so changes there cannot affect trade decisions.
+
+### 3e. Backtest package — `trading_agent/backtest/` (new 2026-05-04)
+A small replay harness that **wires through live primitives** instead of reimplementing them. See [`docs/skills/15_backtest_live_parity.md`](docs/skills/15_backtest_live_parity.md).
+
+- `clock.py` — calendar-aware iterator (NYSE trading days × intraday bar times). Hybrid cadence: intraday 5-min when window ≤ ~30 days, daily otherwise (yfinance 5-min API limit).
+- `historical_port.py` — `HistoricalPort` wraps `MarketDataProvider`/yfinance with a hard cursor; reading past `now_t` raises `LookaheadError`.
+- `synthetic_chain.py` — builds a `ChainSlice` (the dict shape `decide()` expects) from `(spot, σ-proxy, preset's strike grid)`.
+- `account.py` — `SimAccount` cash + open-market-value ledger; commission $0.65/leg.
+- `sim_position.py` — open-spread bookkeeping with **VIX-proxy IV scaling** for re-marks: `σ_t = σ_entry × (vix_t / vix_entry)`. Exit logic delegates to `PositionMonitor._check_exit`.
+- `cycle.py` — `run_one_cycle` runs PERCEIVE → CLASSIFY → PLAN → RISK → EXECUTE; calls live `decide()`, `RiskManager`, `calculate_position_qty`.
+- `runner.py` — `BacktestRunner` drives the clock, emits a `BacktestResult` (equity curve + closed trades).
 
 ---
 
@@ -249,16 +288,18 @@ Plus the architectural invariant scan: `scripts/checks/scan_invariant_check.py`.
 > I'm working on a trading agent that opens credit-spread positions on US ETFs and large-cap single names through Alpaca's paper-trading API. Read `PROJECT_MANIFEST.md` at the repo root for the full architecture; key facts you should know before suggesting any change:
 >
 > - **DTE is per-strategy and preset-driven**, not a single global. The `Strategy Profile` panel in the Streamlit dashboard sets `dte_vertical`, `dte_iron_condor`, `dte_mean_reversion` independently (Balanced default: 21 / 35 / 14). Persisted to `STRATEGY_PRESET.json`, hot-reloaded each 5-min cycle. The constants `TARGET_DTE = 35` / `DTE_RANGE = (28, 45)` in `strategy.py` are **legacy fallbacks only** — production never uses them. If you change strategy behavior, change the **preset** (`strategy_presets.py`), not the class-level constants.
-> - **Three architectural invariants** (1) single credit-width-floor formula, (2) single scoring source, (3) backtester wires through `decision_engine.decide()`. Verify with `python scripts/checks/scan_invariant_check.py` after any change.
+> - **Three architectural invariants** (1) single credit-width-floor formula `|Δshort|×(1+edge_buffer)` in `chain_scanner.py` + `risk_manager.py` + `executor.py`, (2) single scoring source (`_score_candidate*` / `_quote_credit` defined only in `chain_scanner.py` and `decision_engine.py`), (3) backtester wires through `decision_engine.decide()` — `streamlit/backtest_ui.py` must contain a literal `decide(` call. Verify with `python scripts/checks/scan_invariant_check.py` after any change.
+> - **Backtester is a thin replay shim.** Live trading logic lives in `decision_engine`, `risk_manager`, `executor.calculate_position_qty`, `position_monitor`. The backtest package (`trading_agent/backtest/`) only simulates the *inputs* (cursor-bound historical port, synthetic chain, sim account/position) and threads them through those live primitives. Re-marks use **VIX-proxy IV scaling**: `σ_t = σ_entry × (vix_t / vix_entry)`. See skill 15.
 > - **Watchlist tab is architecturally isolated** — it cannot affect trade decisions. Changes there are safe.
 > - **Regime classifier `_determine_regime` is the single source of truth** — `multi_tf_regime._classify_intraday` reuses it; never write a shadow scorer.
 > - **`RegimeAnalysis` fields are append-only with safe defaults.** Changing existing field types breaks `strategy.py` and `thesis_builder.py`. Add new fields with defaults; don't change `leadership_zscore` from `float` to `Optional[float]`.
 > - **Lead-z renders `— (no data vs X)` when `leadership_signal_available=False`** — that's intentional, not a bug. Indicates Alpaca IEX feed had insufficient 5-min bars (weekend, off-hours, sector-ETF anchor on free feed).
 > - **Default LLM backend is Ollama**; Anthropic / OpenAI / LM Studio are alternatives. MLX is not integrated.
 > - **Six `verify_*.py` harnesses** at `/sessions/determined-eager-goodall/verify_*.py` — these are the regression suite the sandbox runs (no pytest deps required). Run them after any change to `regime.py`, `multi_tf_regime.py`, or `streamlit/watchlist_ui.py`.
+> - **Market-data plane is hexagonal**: three providers (Alpaca / Schwab / Yahoo) sit behind the `MarketDataPort` Protocol, dispatched per-surface by `build_market_data_provider(surface=...)` in `trading_agent/market_data_factory.py`. Env-var resolution: `MARKET_DATA_PROVIDER_<SURFACE>` → `MARKET_DATA_PROVIDER` → `alpaca`. Alpaca is always the execution broker; only the data plane is swappable. Schwab uses OAuth 2.0 (30-min access tokens, 7-day refresh tokens, `python -m trading_agent.schwab_oauth login` to bootstrap). When changing market-data behavior, prefer extending an existing adapter over a new branch in agent code; the agent core only sees the port. Skill 16 is the canonical reference.
 >
-> Before proposing any change, grep the four invariant guards (`scan_invariant_check.py`, `run_journal_split_check.py`, `run_live_vs_backtest_parity_check.py`, `run_unified_backtest_check.py`) under `scripts/checks/` to understand what's protected.
+> Before proposing any change, grep the active invariant guards (`scan_invariant_check.py`, `run_journal_split_check.py`, `run_scan_diagnostics_check.py`) under `scripts/checks/` to understand what's protected. The two parity smoke scripts (`run_unified_backtest_check.py`, `run_live_vs_backtest_parity_check.py`) were retired 2026-05-04 with the backtest rewrite — parity is now structural via the `trading_agent/backtest/` package wiring through `decide()` directly, enforced by AST invariant #2/#3.
 
 ---
 
-*This manifest reflects repo state at 2026-05-02. If you're reading it more than a week later, re-verify the citations — strategy parameters and dataclass fields move quickly.*
+*This manifest reflects repo state at 2026-05-05. If you're reading it more than a week later, re-verify the citations — strategy parameters and dataclass fields move quickly.*

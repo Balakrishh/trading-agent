@@ -37,7 +37,7 @@ import streamlit as st
 from trading_agent.streamlit.components import (
     GUARDRAIL_NAMES,
     equity_curve_chart,
-    guardrail_cards,
+    guardrail_grid,
     metric_row,
     positions_table,
     ungrouped_legs_table,
@@ -106,29 +106,202 @@ DRY_RUN_FLAG   = Path("DRY_RUN_MODE")   # sentinel: inject DRY_RUN + FORCE_MARKE
 REFRESH_INTERVAL   = int(os.environ.get("LIVE_MONITOR_REFRESH_SECS", "3"))
 CYCLE_INTERVAL_SEC = 300  # 5-minute trading cycle
 
-# Keyword fragments for mapping journal check strings → guardrail slots
+# Keyword fragments for mapping journal check strings → guardrail slots.
+# These must match the EXACT strings written by ``risk_manager.evaluate``
+# in lower-case.  Each fragment matched marks the row as belonging to
+# that guardrail slot.  When extending: drop the fragment in
+# lower-case and grep risk_manager.py to confirm the string actually
+# appears.  Examples that motivated each fragment:
+#   slot 0 (Plan Validity):       "Plan is structurally valid" / "Plan invalid: …"
+#   slot 1 (Credit/Width):        "Credit/Width ratio 0.34 ≥ …"
+#   slot 2 (Delta):               "Sold 480.0 |Δ|=0.180 ≤ 0.25"  (UNICODE Δ)
+#   slot 3 (Max Loss):            "Max loss $200 ≤ 2% of …"
+#   slot 4 (Paper Account):       "Account type is PAPER" / "Account type is 'live' — must be 'paper'"
+#   slot 5 (Market Open):         "Market is currently OPEN" / "Market is currently CLOSED"
+#   slot 6 (Bid/Ask Spread):      "Underlying bid/ask spread $0.02 < $0.05"
+#   slot 7 (Buying Power):        "Buying power 40.0% used ≤ 80% limit"
 _GUARDRAIL_KEYWORDS: List[List[str]] = [
-    ["plan invalid", "plan valid"],
+    ["plan invalid", "plan is structurally valid"],
     ["credit/width", "credit ratio"],
-    ["delta"],
+    ["|δ|", "delta"],
     ["max loss"],
-    ["paper"],
-    ["market", "closed", "open"],
-    ["bid", "ask", "spread"],
+    ["account type"],
+    ["market is currently"],
+    ["bid/ask spread", "underlying spread"],
     ["buying power"],
 ]
+
+
+# Per-guardrail regexes for extracting the headline numbers from the
+# verbose check strings written by ``risk_manager.evaluate``.  Each
+# pattern targets the SAME message format the risk manager writes today
+# (see risk_manager.py:95-225).  If the format changes you must update
+# the regex AND keep the contract — the dashboard relies on this to
+# show "$200 ≤ $2000" instead of the raw "Max loss $200 ≤ 2% of …".
+# Credit/Width is special — risk_manager writes two flavours of the
+# floor label depending on whether delta-aware floors are enabled:
+#   static:       "Credit/Width ratio 0.3400 ≥ 0.2"
+#   delta-aware:  "Credit/Width ratio 0.3400 ≥ |Δ|×(1+edge)=0.180×1.10=0.1980"
+# A single greedy regex either eats the floor (in static mode) or grabs
+# the wrong number (the |Δ| value, not the final floor) in delta-aware
+# mode.  Split into a head regex that locks in ratio+operator, then
+# extract the LAST float from the remaining tail — works for both cases.
+_RX_CW_HEAD  = re.compile(r"ratio\s+([0-9.]+)\s*([≥<])")
+_RX_FLOAT    = re.compile(r"[0-9]+\.[0-9]+")
+_RX_DELTA    = re.compile(r"\|Δ\|=([0-9.]+)\s*([≤>])\s*([0-9.]+)")
+_RX_MAXLOSS  = re.compile(r"Max loss\s+\$([0-9.,]+)\s*([≤>])[^=]*=\$([0-9.,]+)")
+_RX_BP       = re.compile(r"Buying power\s+([0-9.]+)%\s+used\s+([≤>])\s+([0-9.]+)%")
+_RX_SPREAD   = re.compile(r"spread\s+\$([0-9.]+)\s*(<|>=)\s*\$([0-9.]+)")
+_RX_STALE    = re.compile(r"=\s*([0-9.]+)%\s*>\s*stale threshold")
+_RX_PAPER_F  = re.compile(r"is\s+'([^']+)'")
+
+
+def _compact_for(name: str, state: str, detail: str) -> str:
+    """Distill a verbose risk-manager check string into a value-bearing
+    chip ≤ ~16 chars for the grid cell.
+
+    Returns ``""`` when there's nothing useful to show (e.g. the cell
+    has no data at all — the renderer falls back to just the emoji).
+    The verbatim ``detail`` is still surfaced via the cell hover, so
+    nothing is lost; the chip is for at-a-glance scanning.
+
+    Examples (input → output)::
+
+        Plan Validity / ok   "Plan is structurally valid"           → "valid"
+        Credit/Width / ok    "Credit/Width ratio 0.3400 ≥ 0.20"     → "0.34 ≥ 0.20"
+        Delta / ok           "Sold 480.0 |Δ|=0.180 ≤ 0.25"          → "Δ=0.18 ≤ 0.25"
+        Max Loss / fail      "Max loss $5000 > 2% of $100,000 (=$2000)"
+                                                                   → "$5000 > $2000"
+        Paper / fail         "Account type is 'live' — must be …"   → "live"
+        Market Open / warn   "Market is currently OPEN (FORCED — …)" → "FORCED"
+        Bid/Ask / ok         "Underlying bid/ask spread $0.0200 < $0.0500 …"
+                                                                   → "$0.02 < $0.05"
+        Buying Power / ok    "Buying power 40.0% used ≤ 80% limit"  → "40% ≤ 80%"
+    """
+    if not detail or detail == "—":
+        return ""
+
+    if name == "Plan Validity":
+        if state == "ok":
+            return "valid"
+        # detail looks like "Plan invalid: <reason>" — strip prefix
+        return detail.removeprefix("Plan invalid: ")[:14] or "invalid"
+
+    if name == "Credit/Width Ratio":
+        m = _RX_CW_HEAD.search(detail)
+        if m:
+            ratio, op = m.group(1), m.group(2)
+            try:
+                ratio_short = f"{float(ratio):.2f}"
+            except ValueError:
+                ratio_short = ratio
+            # Floor is the LAST float after the operator — handles both
+            # the static floor ("0.2") and the delta-aware floor whose
+            # final term is the computed product ("|Δ|×(1+edge)=…=0.1980").
+            tail_text = detail[m.end():]
+            floats = _RX_FLOAT.findall(tail_text)
+            floor_short = ""
+            if floats:
+                try:
+                    floor_short = f"{float(floats[-1]):.2f}"
+                except ValueError:
+                    floor_short = floats[-1]
+            tail = f" {op} {floor_short}" if floor_short else f" {op}"
+            return f"{ratio_short}{tail}"
+        return ""
+
+    if name == "Delta ≤ Max Delta":
+        m = _RX_DELTA.search(detail)
+        if m:
+            d, op, lim = m.group(1), m.group(2), m.group(3)
+            return f"Δ={float(d):.2f} {op} {lim}"
+        return ""
+
+    if name == "Max Loss ≤ 2% Equity":
+        m = _RX_MAXLOSS.search(detail)
+        if m:
+            loss, op, allowed = m.group(1), m.group(2), m.group(3)
+            return f"${loss} {op} ${allowed}"
+        return ""
+
+    if name == "Paper Account":
+        if state == "ok":
+            return "PAPER"
+        m = _RX_PAPER_F.search(detail)
+        return m.group(1) if m else "non-paper"
+
+    if name == "Market Open":
+        if state == "warn":
+            return "FORCED"
+        if state == "fail":
+            return "CLOSED"
+        return "OPEN"
+
+    if name == "Bid/Ask Spread":
+        if "STALE" in detail:
+            m = _RX_STALE.search(detail)
+            return f"STALE {m.group(1)}%" if m else "STALE"
+        m = _RX_SPREAD.search(detail)
+        if m:
+            spread, op, floor = m.group(1), m.group(2), m.group(3)
+            try:
+                spread_short = f"${float(spread):.2f}"
+                floor_short  = f"${float(floor):.2f}"
+            except ValueError:
+                spread_short, floor_short = f"${spread}", f"${floor}"
+            disp_op = "≥" if op == ">=" else op
+            return f"{spread_short} {disp_op} {floor_short}"
+        return ""
+
+    if name == "Buying Power ≤ 80%":
+        m = _RX_BP.search(detail)
+        if m:
+            used, op, lim = m.group(1), m.group(2), m.group(3)
+            return f"{float(used):.0f}% {op} {lim}%"
+        return ""
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
 # Agent loop — runs in a background daemon thread inside the dashboard process
 # ---------------------------------------------------------------------------
 
-def _append_log(line: str, max_lines: int = 200) -> None:
-    """Append one line to AGENT_LOG, keeping only the last max_lines lines."""
+def _safe_read_text(fp: Path) -> str:
+    """``Path.read_text`` that tolerates non-UTF-8 bytes.
+
+    The agent-managed log files (``AGENT_LOG``, ``PAUSE_FLAG``,
+    ``AGENT_PID``) are written by a chain of producers — Python's
+    logging module, subprocess stdout pipes, sentinel writes — and very
+    occasionally a stray non-UTF-8 byte (a Windows-1252 character from
+    a vendor SDK trace, an emoji that got width-clipped, etc.) sneaks
+    through. The default ``Path.read_text()`` raises ``UnicodeDecodeError``
+    on such bytes and crashes the entire dashboard render. We replace
+    bad bytes with U+FFFD instead so the log stays readable and the
+    dashboard never goes down because of a single corrupt character.
+    """
     try:
-        existing = AGENT_LOG.read_text().splitlines() if AGENT_LOG.exists() else []
+        return fp.read_text(encoding="utf-8", errors="replace")
+    except (OSError, FileNotFoundError):
+        return ""
+
+
+def _append_log(line: str, max_lines: int = 200) -> None:
+    """Append one line to AGENT_LOG, keeping only the last max_lines lines.
+
+    Read uses ``_safe_read_text`` so a corrupt byte in the existing log
+    can't lose the whole rolling buffer the way the previous strict-UTF-8
+    decode + bare ``except: pass`` did. The write is always strict UTF-8
+    (``write_text`` defaults), which means a malformed byte gets replaced
+    by U+FFFD on the next read-then-rewrite cycle and self-heals.
+    """
+    try:
+        existing = _safe_read_text(AGENT_LOG).splitlines() if AGENT_LOG.exists() else []
         existing.append(line.rstrip())
-        AGENT_LOG.write_text("\n".join(existing[-max_lines:]) + "\n")
+        AGENT_LOG.write_text(
+            "\n".join(existing[-max_lines:]) + "\n",
+            encoding="utf-8", errors="replace",
+        )
     except Exception:
         pass
 
@@ -160,7 +333,16 @@ def _run_one_cycle(dry_run: bool = False) -> int:
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        # Force UTF-8 with replace on the subprocess stdout pipe so a
+        # stray non-UTF-8 byte from a vendor SDK trace, an emoji
+        # mid-line-buffer, or a Windows-1252 character can't propagate
+        # to AGENT_LOG and crash the dashboard render. Without this
+        # the default locale-encoding choice on macOS sometimes lets
+        # bytes like 0x80 (€ in CP1252) slip into the log and trigger
+        # UnicodeDecodeError when the live-monitor tab tries to render.
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(repo_root),
         env=env,
     )
@@ -234,6 +416,47 @@ def _start_agent(dry_run: bool = False) -> None:
     st.session_state["_agent_thread"] = t
 
 
+def _ensure_loop_alive_if_intended() -> bool:
+    """Self-heal a zombie sentinel after a Streamlit auto-reload.
+
+    The agent loop runs in a ``daemon=True`` thread inside the Streamlit
+    process. When Streamlit's file watcher detects a code change it
+    restarts the Python process — daemon threads die with the old
+    process, but the on-disk ``AGENT_RUNNING`` sentinel survives. The
+    new process then boots into a "looks running but isn't" state:
+    the dashboard shows the Stop-Agent button and "ACTIVE [LIVE]"
+    status because the sentinel exists, but no cycle subprocess ever
+    spawns (the thread that would call ``_run_one_cycle`` is dead).
+
+    This helper runs at the top of ``render_live_monitor`` and:
+      1. If the sentinel says we should be running, AND
+      2. No live thread is recorded in ``st.session_state``, OR the
+         recorded thread is no longer alive,
+      → restarts the loop in a fresh daemon thread, preserving the
+        existing dry-run flag.
+
+    Returns True iff the loop was just revived (lets the caller surface
+    a one-shot info banner so the user knows what happened).
+    """
+    if not AGENT_RUNNING.exists():
+        return False  # User has stopped — nothing to revive.
+
+    existing = st.session_state.get("_agent_thread")
+    if existing is not None and existing.is_alive():
+        return False  # Already healthy — leave it alone.
+
+    # Zombie state: sentinel says run, no live thread → revive.
+    dry_run = DRY_RUN_FLAG.exists()
+    t = threading.Thread(target=_agent_loop, daemon=True, name="agent-loop")
+    t.start()
+    st.session_state["_agent_thread"] = t
+    _append_log(
+        f"[{_now()}] Auto-revived agent loop after process restart "
+        f"(dry_run={dry_run}). Sentinel was set but the thread had died."
+    )
+    return True
+
+
 def _stop_agent() -> None:
     """Remove sentinel — the loop will exit after the current cycle completes."""
     AGENT_RUNNING.unlink(missing_ok=True)
@@ -268,7 +491,8 @@ def _get_config():
 def _empty_journal_df() -> pd.DataFrame:
     return pd.DataFrame(
         columns=["timestamp", "account_balance", "ticker", "action",
-                 "regime", "checks_passed", "checks_failed", "notes",
+                 "regime", "mode", "checks_passed", "checks_failed",
+                 "notes", "reason",
                  "rsi_14", "sma_50", "sma_200", "scan_results"]
     )
 
@@ -297,16 +521,46 @@ def _parse_journal_df(path: str, version: int, mtime: float, size: int) -> pd.Da
                     continue
                 try:
                     rec = json.loads(line)
-                    rs = rec.get("raw_signal", {})
+                    rs = rec.get("raw_signal", {}) or {}
+                    action = rec.get("action", "") or ""
+                    notes_raw = rec.get("notes", "") or ""
+                    reason = (rs.get("reason") or "").strip()
+                    # ``notes`` is supposed to be a human-readable
+                    # description of what happened. The agent's
+                    # ``log_signal`` for some action types (notably
+                    # ``skipped_existing``) writes notes equal to the
+                    # action label itself ("skipped_existing"), which is
+                    # a useless duplicate — the meaningful explanation
+                    # lives in ``raw_signal.reason`` (e.g. "Existing
+                    # open position or pending order"). Promote the
+                    # reason whenever notes is missing or just echoes
+                    # the action label, so the journal table actually
+                    # tells the operator WHY a cycle was skipped.
+                    if reason and (
+                        not notes_raw or notes_raw.strip() == action
+                    ):
+                        notes = reason
+                    else:
+                        notes = notes_raw
                     rows.append({
                         "timestamp":       pd.to_datetime(rec.get("timestamp")),
                         "account_balance": rs.get("account_balance", 0) or 0,
                         "ticker":          rec.get("ticker", ""),
-                        "action":          rec.get("action", ""),
+                        "action":          action,
                         "regime":          rs.get("regime", "unknown"),
+                        # Empty string on legacy rows that pre-date the mode
+                        # field — _guardrail_status_from_journal treats those
+                        # as LIVE so historical data isn't silently filtered out.
+                        "mode":            rs.get("mode", "") or "",
                         "checks_passed":   rs.get("checks_passed") or [],
                         "checks_failed":   rs.get("checks_failed") or [],
-                        "notes":           rec.get("notes", ""),
+                        "notes":           notes,
+                        # Keep the raw reason as a separate column so the
+                        # guardrail grid's SKIPPED branch can use it without
+                        # re-parsing the JSON or guessing whether ``notes``
+                        # was promoted. Empty string on rows that don't have
+                        # a reason field (most rejected / submitted rows).
+                        "reason":          reason,
                         "rsi_14":          rs.get("rsi_14", 0) or 0,
                         "sma_50":          rs.get("sma_50", 0) or 0,
                         "sma_200":         rs.get("sma_200", 0) or 0,
@@ -437,6 +691,73 @@ def _scanner_diagnostics_from_journal(
     return latest_df, reject_hist, side_counts
 
 
+def _render_closed_today(journal_df: pd.DataFrame) -> None:
+    """
+    Render the "Closed Today" expander above Open Positions.
+
+    Source of truth: journal rows where ``action == "closed"`` and the
+    timestamp is today (UTC).  These are written by
+    ``agent.py:_journal_close_event`` after every successful (or
+    partial) close — strike_proximity / profit_target / hard_stop /
+    regime_shift / dte_safety / expired.
+
+    Behavior
+    --------
+    * If no close events today → hidden (no empty section).
+    * If ≥1 → collapsible expander with a per-row table:
+        Time · Ticker · Strategy · Exit Signal · P&L · Reason · Fill Status
+      Plus a footer with the running net P&L summed across closes.
+    """
+    if journal_df is None or journal_df.empty:
+        return
+    if "action" not in journal_df.columns:
+        return
+
+    closed = journal_df[journal_df["action"] == "closed"].copy()
+    if closed.empty:
+        return
+
+    # Filter to today (UTC) so a long-running agent doesn't stack
+    # weeks of closes into one panel.
+    today_utc = pd.Timestamp.utcnow().normalize()
+    closed = closed[pd.to_datetime(closed["timestamp"], utc=True)
+                    >= today_utc]
+    if closed.empty:
+        return
+
+    closed = closed.sort_values("timestamp", ascending=False)
+
+    rows = []
+    net_pl = 0.0
+    for _, r in closed.iterrows():
+        rs = r.get("raw_signal") or {}
+        if not isinstance(rs, dict):
+            rs = {}
+        pl = float(rs.get("net_unrealized_pl") or 0.0)
+        net_pl += pl
+        rows.append({
+            "Time":         pd.Timestamp(r["timestamp"]).strftime("%H:%M:%S"),
+            "Ticker":       r.get("ticker", ""),
+            "Strategy":     rs.get("strategy", ""),
+            "Exit Signal":  rs.get("exit_signal", ""),
+            "P&L ($)":      f"{'+' if pl >= 0 else ''}{pl:.2f}",
+            "Reason":       (rs.get("exit_reason") or "")[:80],
+            "Fill":         rs.get("fill_status", ""),
+        })
+
+    label = (f"🚪 Closed Today ({len(rows)} exit"
+             f"{'s' if len(rows) != 1 else ''}, net P&L "
+             f"{'+' if net_pl >= 0 else ''}${net_pl:,.2f})")
+    with st.expander(label, expanded=True):
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        if net_pl != 0:
+            st.caption(
+                f"Running total: {len(rows)} close{'s' if len(rows) != 1 else ''} "
+                f"today · net P&L "
+                f"{'+' if net_pl >= 0 else ''}${net_pl:,.2f}"
+            )
+
+
 def _render_scanner_diagnostics_panel(journal_df: pd.DataFrame) -> None:
     """
     Render the "Adaptive Scanner Diagnostics" expander. No-op-friendly:
@@ -515,12 +836,308 @@ def _render_scanner_diagnostics_panel(journal_df: pd.DataFrame) -> None:
                 st.caption("—")
 
 
-def _guardrail_status_from_journal(df: pd.DataFrame) -> List[Dict]:
-    defaults = [{"name": n, "passed": True, "detail": "No data"} for n in GUARDRAIL_NAMES]
+def _guardrail_grid_from_journal(
+    df: pd.DataFrame,
+    *,
+    current_mode: Optional[str] = None,
+    window_minutes: int = 10,
+    held_tickers: Optional[set] = None,
+) -> List[Dict]:
+    """One row per ticker for the most recent cycle.
+
+    The "most recent cycle" is defined as every journal row within
+    ``window_minutes`` of the latest timestamp (after filtering by
+    ``current_mode``).  We then keep the last row per ticker so a
+    ticker that was journaled twice in the same cycle (e.g. once as
+    ``rejected`` then once on a retry) shows the most recent verdict.
+
+    Each result dict has the shape::
+
+        {
+          "ticker":    str,
+          "timestamp": pd.Timestamp,
+          "regime":    str,
+          "approved":  bool,
+          "cells":     List[{"name": str, "state": str, "detail": str}],
+        }
+
+    where ``state`` is one of ``"ok" | "warn" | "fail"`` — the same
+    contract as :func:`guardrail_cards` so the renderer can colour
+    cells uniformly.
+
+    The grid is ordered alphabetically by ticker for stable presentation
+    across cycles (sorting by approved/state would make the table jump
+    around as guardrail outcomes flip from cycle to cycle).
+    """
+    if df.empty:
+        return []
+    if current_mode is not None and "mode" in df.columns:
+        normalised = df["mode"].fillna("").replace("", "LIVE")
+        df = df[normalised == current_mode]
+        if df.empty:
+            return []
+
+    # Drop orphan event-only rows (cycle_error / after_hours_shutdown
+    # entries) before computing the latest cycle timestamp. Those rows
+    # have no ticker/action/checks_passed and otherwise drag max_ts
+    # forward — producing a phantom "blank-ticker ✅APPROVED" row in
+    # the grid because drop_duplicates("ticker") collapses all the
+    # null-ticker rows into one and the cells default to ok when both
+    # checks_passed and checks_failed are empty.
+    if "ticker" in df.columns:
+        df = df[df["ticker"].notna() & (df["ticker"].astype(str).str.strip() != "")]
+        if df.empty:
+            return []
+
+    df = df.sort_values("timestamp")
+    max_ts = df["timestamp"].max()
+    cutoff = max_ts - pd.Timedelta(minutes=window_minutes)
+    latest = df[df["timestamp"] >= cutoff]
+    latest = latest.drop_duplicates("ticker", keep="last")
+
+    # Build a per-ticker lookup of "the most recent submitted entry
+    # trade" from the FULL journal (not just the latest cycle window).
+    # Used to substitute meaningful entry-trade details into rows where
+    # the latest action was ``skipped_existing`` — the user wants to
+    # see what was true *when the open position was opened*, not a
+    # blank "we skipped this cycle because the position exists".
+    last_entry_by_ticker: Dict[str, pd.Series] = {}
+    if "action" in df.columns:
+        # An "entry trade" is a row whose action contains "submitted"
+        # (the agent emits ``action="submitted"`` after a successful
+        # Alpaca POST /v2/orders). Fall back to "approved" rows if no
+        # submitted exists, which catches dry-run cycles where the
+        # risk manager signed off but no real order was placed.
+        candidate_actions = ["submitted", "approved"]
+        entries = df[df["action"].isin(candidate_actions)]
+        if not entries.empty:
+            for ticker, grp in entries.groupby("ticker"):
+                last_entry_by_ticker[ticker] = grp.sort_values(
+                    "timestamp"
+                ).iloc[-1]
+
+    rows: List[Dict] = []
+    for _, r in latest.iterrows():
+        action = (r.get("action") or "").lower()
+        ticker = r["ticker"]
+
+        # Status taxonomy — derived from the journal's ``action`` field,
+        # which is the single source of truth for the END outcome of
+        # the cycle. We deliberately do NOT infer status from
+        # ``checks_failed`` alone, because a trade can be:
+        #
+        #   * approved by the risk manager (checks_failed = []) AND
+        #     subsequently rejected by the executor downstream
+        #     (live-credit recheck failure, qty=0 sizing, fill error,
+        #     Alpaca POST error). In that case the journal logs
+        #     ``action="rejected"`` even though every individual
+        #     guardrail passed. Treating those as APPROVED would
+        #     blatantly contradict the journal.
+        #
+        # Status values:
+        #   "approved" — action="submitted" (risk approved AND order placed)
+        #   "rejected" — action="rejected"  (regardless of checks_failed
+        #                content — could be pre- OR post-approval)
+        #   "holding"  — action starts with "skipped" AND the ticker is
+        #                actually in held_tickers AND there's an entry
+        #                trade in the journal to substitute checks from
+        #   "skipped"  — action starts with "skipped" but one of the
+        #                holding preconditions is missing
+        #   (legacy)   — falls back to checks-based heuristic for any
+        #                action label we don't recognise
+        if action.startswith("skipped"):
+            entry = last_entry_by_ticker.get(ticker)
+            # Three sub-states for skipped rows, distinguished by
+            # whether an entry trade exists in the journal AND whether
+            # the broker is currently holding the position:
+            #
+            #   1. holding  — entry trade exists AND ticker is in
+            #                 held_tickers → position is filled and live
+            #   2. pending  — entry trade exists but ticker is NOT held
+            #                 → limit order is on the book waiting to fill
+            #                 (or stale-order canceller hasn't run yet)
+            #   3. skipped  — no entry trade on record → truly nothing
+            #                 to display, fall back to em-dash cells
+            #
+            # ``held_tickers=None`` (caller didn't pass a set) is treated
+            # as "trust the entry trade" — preserves backward compat for
+            # callers that haven't been updated. Production callers
+            # always pass the set, so the holding/pending distinction
+            # always fires correctly in the dashboard.
+            ticker_is_actually_held = (
+                held_tickers is None or ticker in held_tickers
+            )
+            if entry is not None:
+                # Substitute cells from the entry trade in BOTH holding
+                # and pending — operator wants the same detail either
+                # way; only the verdict label and palette change.
+                src = entry
+                passed_list: List[str] = src.get("checks_passed") or []
+                failed_list: List[str] = src.get("checks_failed") or []
+                display_timestamp = src["timestamp"]
+                display_regime = src.get("regime") or ""
+                if ticker_is_actually_held:
+                    status = "holding"
+                else:
+                    status = "pending"
+            else:
+                # No entry trade — truly nothing to substitute. Fall
+                # back to em-dash cells with the journal's reason
+                # surfaced as a tooltip.
+                status = "skipped"
+                passed_list = []
+                failed_list = []
+                display_timestamp = r["timestamp"]
+                display_regime = r.get("regime") or ""
+        else:
+            passed_list = r.get("checks_passed") or []
+            failed_list = r.get("checks_failed") or []
+            display_timestamp = r["timestamp"]
+            display_regime = r.get("regime") or ""
+            # Trust the action field — this is what the agent ACTUALLY
+            # decided, after all gates including any post-approval
+            # executor-side rejections. ``submitted`` means risk manager
+            # approved AND the order was successfully placed at Alpaca.
+            # ``rejected`` means SOMETHING blocked the trade — we don't
+            # claim approved just because the risk-manager checks
+            # happen to all pass. The cells below still render based
+            # on the per-check passed/failed strings (so individual
+            # cells can show ✅ where checks did pass), but the overall
+            # verdict cell honours the journal's action.
+            if action == "submitted":
+                status = "approved"
+            elif action == "rejected":
+                status = "rejected"
+            elif action == "closed":
+                # Position-monitor exit fired (strike_proximity / profit_target
+                # / hard_stop / regime_shift / dte_safety / expired). The grid
+                # row carries the exit-signal label as the verdict and the
+                # P&L + reason as the per-cell tooltip.  See
+                # ``agent.py:_journal_close_event`` for the schema.
+                status = "closed"
+            else:
+                # Legacy / unknown action label — fall back to the
+                # checks-based heuristic for backward compatibility.
+                status = "rejected" if failed_list else "approved"
+
+        # When the row is in SKIPPED status, every cell gets the same
+        # neutral em-dash detail (the risk manager didn't run, so we
+        # have nothing factual to claim per-guardrail). The detail
+        # string surfaces the ACTUAL reason from the journal row's
+        # ``reason`` column whenever it's populated — typically
+        # "Existing open position or pending order" for skipped_existing
+        # rows, or whatever the agent's gate logged for skipped_bias /
+        # skipped_defense_first / skipped_rsi_gate. Fallback to a
+        # generic message preserves behaviour on legacy rows that
+        # pre-date the parser's notes/reason promotion.
+        skip_detail: str = "Skipped — agent short-circuited before risk check"
+        if status == "skipped":
+            j_reason = (r.get("reason") or "").strip() if hasattr(r, "get") else ""
+            if not j_reason:
+                # Fallback to notes (which may have been promoted by
+                # _parse_journal_df when reason was empty in the source).
+                j_reason = (r.get("notes") or "").strip() if hasattr(r, "get") else ""
+            if j_reason:
+                skip_detail = f"Skipped — {j_reason}"
+
+        cells: List[Dict] = []
+        for idx, keywords in enumerate(_GUARDRAIL_KEYWORDS):
+            state = "ok"
+            detail = "—"
+            for fcheck in failed_list:
+                if any(kw in fcheck.lower() for kw in keywords):
+                    state = "fail"
+                    detail = fcheck[:80]
+                    break
+            if state == "ok":
+                for pcheck in passed_list:
+                    if any(kw in pcheck.lower() for kw in keywords):
+                        detail = pcheck[:80]
+                        break
+            # Same FORCED contract as the legacy 8-card panel — see
+            # risk_manager.py:155 and _guardrail_status_from_journal.
+            if state == "ok" and "FORCED" in detail:
+                state = "warn"
+            # SKIPPED rows: replace state + detail with the row-level
+            # skip context. Every cell gets the same neutral em-dash on
+            # grey + the same hover tooltip with the actual reason.
+            # We only enter this branch when there's no entry trade to
+            # substitute from — the risk manager truly didn't run, so
+            # per-guardrail claims would be misleading.
+            #
+            # HOLDING and PENDING rows already had their cells
+            # populated from the entry trade's checks_passed list above
+            # (see the ``passed_list = src.get(...)`` substitution in
+            # the skipped-action branch); the cells render identically
+            # to APPROVED. Only the verdict cell + palette change to
+            # communicate filled vs unfilled vs skipped.
+            if status == "skipped":
+                state = "skipped"
+                detail = skip_detail
+            name = GUARDRAIL_NAMES[idx]
+            cells.append({
+                "name":    name,
+                "state":   state,
+                "detail":  detail,
+                # ``summary`` is the value-bearing chip rendered inside
+                # the cell next to the emoji.  ``detail`` is still the
+                # full string, surfaced via the cell hover.
+                "summary": _compact_for(name, state, detail),
+            })
+        rows.append({
+            "ticker":    ticker,
+            "timestamp": display_timestamp,
+            "regime":    display_regime,
+            # Backward-compat: legacy callers expect a boolean
+            # ``approved`` field. APPROVED, HOLDING, and PENDING all
+            # represent positions where the risk manager signed off —
+            # the only difference is whether the order has filled
+            # (HOLDING) or is still on the book (PENDING). SKIPPED
+            # (no entry-trade history) and REJECTED count as not-approved.
+            "approved":  status in ("approved", "holding", "pending"),
+            "status":    status,
+            #            ^^^ "approved" | "rejected" | "holding"
+            #                | "pending" | "skipped"
+            "cells":     cells,
+        })
+    rows.sort(key=lambda r: r["ticker"])
+    return rows
+
+
+def _guardrail_status_from_journal(
+    df: pd.DataFrame,
+    *,
+    current_mode: Optional[str] = None,
+) -> List[Dict]:
+    """Project the latest journal row's checks into 8 guardrail cards.
+
+    ``current_mode`` (``"LIVE"`` or ``"DRY-RUN"``) filters the journal so
+    cross-mode verdicts don't bleed through after the operator switches
+    modes.  When None we fall back to the last row regardless of mode
+    (preserves behaviour for callers that don't yet know the active
+    mode).  Rows from before this column was introduced have
+    ``mode == ""`` and are treated as LIVE for filtering.
+
+    Each result dict carries ``state`` ∈ {"ok","warn","fail"}.  The
+    dry-run forced-market-open pass is mapped to ``"warn"`` via the
+    "FORCED" substring contract written by ``risk_manager.py:155``.
+    """
+    defaults = [
+        {"name": n, "passed": True, "state": "ok", "detail": "No data"}
+        for n in GUARDRAIL_NAMES
+    ]
     if df.empty:
         return defaults
 
-    last = df.iloc[-1]
+    if current_mode is not None and "mode" in df.columns:
+        normalised = df["mode"].fillna("").replace("", "LIVE")
+        scoped = df[normalised == current_mode]
+        if scoped.empty:
+            return defaults
+        last = scoped.iloc[-1]
+    else:
+        last = df.iloc[-1]
+
     passed_list: List[str] = last.get("checks_passed") or []
     failed_list: List[str] = last.get("checks_failed") or []
 
@@ -538,7 +1155,20 @@ def _guardrail_status_from_journal(df: pd.DataFrame) -> List[Dict]:
                 if any(kw in pcheck.lower() for kw in keywords):
                     detail = pcheck[:70]
                     break
-        results.append({"name": GUARDRAIL_NAMES[idx], "passed": passed, "detail": detail})
+        # "Passed but synthetic" — keyed off the FORCED substring written
+        # by risk_manager when force_market_open=True overrode a closed
+        # market.  Card flips amber so the operator sees that the OK is
+        # courtesy of the dry-run override, not a true open market.
+        if passed and "FORCED" in detail:
+            state = "warn"
+        else:
+            state = "ok" if passed else "fail"
+        results.append({
+            "name": GUARDRAIL_NAMES[idx],
+            "passed": passed,
+            "state": state,
+            "detail": detail,
+        })
     return results
 
 
@@ -550,11 +1180,39 @@ def _guardrail_status_from_journal(df: pd.DataFrame) -> List[Dict]:
 BROKER_STATE_TTL_SECS = int(os.environ.get("BROKER_STATE_TTL_SECS", "30"))
 
 
+@st.cache_resource
+def _broker_fetch_marker() -> Dict:
+    """Process-wide flag that records "the dashboard has fetched broker
+    state at least once since this Streamlit process started".
+
+    Lives in ``@st.cache_resource`` (NOT ``@st.cache_data`` and NOT
+    ``st.session_state``) on purpose — those two scopes either die on
+    Streamlit's ``cache_data.clear()`` or on browser reload (new
+    session). ``cache_resource`` is process-scoped and survives both.
+
+    Once set, ``render_live_monitor`` routes every render through the
+    cached broker-fetch path. The ``ttl=30s`` on those cache_data
+    decorators absorbs fragment ticks (cache hit = microseconds, no
+    Alpaca call), so we still poll Alpaca at the same rate as before —
+    but a page reload no longer blanks the Open-Positions table.
+    """
+    return {"activated": False}
+
+
 @st.cache_data(ttl=BROKER_STATE_TTL_SECS, show_spinner=False)
 def _fetch_account_cached(api_key: str, secret_key: str,
                           data_url: str, base_url: str) -> Dict:
     """Cached Alpaca account fetch. Cache key is the credential tuple so
-    multiple environments (paper / live) cache independently."""
+    multiple environments (paper / live) cache independently.
+
+    NOTE: this call is intentionally NOT routed through the
+    market-data factory.  ``get_account_info`` is an *AccountPort*
+    operation — it returns Alpaca-specific account state (equity,
+    buying power, paper-vs-live flag) that has no equivalent shape on
+    Schwab or Yahoo, and the executor talks to Alpaca regardless of
+    which market-data provider is selected.  Hard-wiring Alpaca here
+    keeps the broker-state cache reliable.
+    """
     try:
         from trading_agent.market_data import MarketDataProvider
         provider = MarketDataProvider(
@@ -643,6 +1301,12 @@ def _fetch_spreads_cached(
 
     spread_objs = monitor.group_into_spreads(positions, trade_plans)
 
+    # ``group_into_spreads`` now folds in inferred spreads for legs whose
+    # trade_plan_*.json was rotated out of state_history (or never
+    # existed). Each SpreadPosition carries an ``origin`` field —
+    # "trade_plan" or "inferred" — that we surface in the table so the
+    # operator can tell at a glance which positions have full plan
+    # context vs which were reconstructed from leg structure.
     spreads = [
         {
             "underlying":        s.underlying,
@@ -651,11 +1315,16 @@ def _fetch_spreads_cached(
             "net_unrealized_pl": s.net_unrealized_pl,
             "expiration":        s.expiration,
             "exit_signal":       s.exit_signal.value,
+            "origin":            getattr(s, "origin", "trade_plan"),
         }
         for s in spread_objs
     ]
 
-    # Any leg whose symbol didn't end up in a matched spread is "ungrouped".
+    # Pure leftovers — broker has these symbols but inference couldn't
+    # parse them into a spread (e.g. malformed OCC symbol, unsupported
+    # leg combination). These are rare; we still surface them so the
+    # user knows something exists at the broker that the dashboard
+    # can't classify.
     matched_symbols = {leg.symbol for s in spread_objs for leg in s.legs}
     ungrouped_legs = []
     for p in positions:
@@ -683,12 +1352,22 @@ def _fetch_spreads_cached(
 @st.cache_data(ttl=BROKER_STATE_TTL_SECS, show_spinner=False)
 def _is_market_open_cached(api_key: str, secret_key: str,
                            data_url: str, base_url: str) -> Optional[bool]:
-    from trading_agent.market_data import MarketDataProvider
-    provider = MarketDataProvider(
+    """
+    Cached market-open check for the dashboard's badge.
+
+    Routed through the factory so the answer comes from whichever
+    provider the operator selected for the LIVE surface.  Alpaca uses
+    its `/clock` endpoint; Schwab uses `/markets?markets=equity`;
+    Yahoo falls back to a Mon-Fri 9:30-16:00 ET heuristic.  Keeps the
+    badge honest when MARKET_DATA_PROVIDER_LIVE != alpaca.
+    """
+    from trading_agent.market_data_factory import build_market_data_provider
+    provider = build_market_data_provider(
         alpaca_api_key=api_key,
         alpaca_secret_key=secret_key,
         alpaca_data_url=data_url,
         alpaca_base_url=base_url,
+        surface="live",
     )
     return provider.is_market_open()
 
@@ -922,7 +1601,10 @@ def render_strategy_profile_panel() -> None:
 
     with st.expander(
         f"Strategy Profile — {current.to_summary_line()}",
-        expanded=not is_loop_running,
+        # User preference: keep configuration grids collapsed by default.
+        # The summary line in the header is enough to know what's active
+        # at a glance; expand only when tweaking.
+        expanded=False,
     ):
         st.markdown(
             "Pick a risk profile + directional bias. Changes are written to "
@@ -1072,6 +1754,15 @@ def render_strategy_profile_panel() -> None:
 def render_live_monitor() -> None:
     """Render the Live Monitoring tab — single entry point for the trading agent."""
 
+    # ── Self-heal a zombie agent loop ─────────────────────────────────────
+    # Streamlit's file watcher restarts the Python process on code edits,
+    # killing the daemon thread that runs the agent loop while leaving
+    # the AGENT_RUNNING sentinel on disk. Without this check the UI shows
+    # "ACTIVE [LIVE]" / "Stop Agent" but no cycle subprocess ever spawns
+    # because there's no live thread to call ``_run_one_cycle``. See
+    # ``_ensure_loop_alive_if_intended`` for the full rationale.
+    revived = _ensure_loop_alive_if_intended()
+
     loop_running  = _is_loop_running()
     cycle_running = AGENT_PID.exists()
     dry_mode      = _is_dry_run_mode()
@@ -1079,13 +1770,28 @@ def render_live_monitor() -> None:
     # ── Header row ────────────────────────────────────────────────────────
     st.subheader("Live Portfolio Monitor")
 
+    if revived:
+        # Surface what just happened so the user understands why their UI
+        # says "Stop" but the most-recent log line is timestamped before
+        # this rerun — the loop was sleeping behind a dead thread until
+        # this render call woke it back up.
+        st.warning(
+            "🔄 Agent loop was auto-revived after a Streamlit code reload. "
+            "Cycle activity will resume on the next tick. If you didn't "
+            "expect this — click **Stop Agent** to halt cleanly, then "
+            "Start again."
+        )
+
     # ── Strategy profile panel (first — pick risk + bias BEFORE starting) ─
     render_strategy_profile_panel()
 
     # ── Dry Run toggle (most prominent choice — pick BEFORE starting) ─────
     with st.expander(
         "Dry Run Mode — simulate after hours without real orders",
-        expanded=not loop_running,
+        # User preference: collapsed by default. The toggle inside is a
+        # niche option that only matters once per session, so it
+        # shouldn't take vertical space when not in use.
+        expanded=False,
     ):
         dry_col, info_col = st.columns([1, 2])
         with dry_col:
@@ -1196,7 +1902,7 @@ def render_live_monitor() -> None:
             st.success(f"Agent is **ACTIVE [LIVE]** — waiting for next cycle")
     elif PAUSE_FLAG.exists():
         st.warning(
-            f"Agent is **PAUSED** since {PAUSE_FLAG.read_text()[:19]} UTC. "
+            f"Agent is **PAUSED** since {_safe_read_text(PAUSE_FLAG)[:19]} UTC. "
             "Click ▶ Resume to continue."
         )
     else:
@@ -1217,39 +1923,114 @@ def render_live_monitor() -> None:
     ungrouped_legs: List[Dict] = []
 
     # ── Broker-state fetch gating ─────────────────────────────────────────
-    # Only hit Alpaca (positions + account + market-open) when the agent
-    # loop is actually running, OR when the user explicitly clicks the
-    # one-off "Refresh broker state" button below. With the agent stopped
-    # there's no fresh signal to monitor — equity falls back to the last
-    # journal entry's account_balance, which is what the operator cares
-    # about anyway. Eliminates the "Fetched N positions" log spam every
-    # 3 s while the dashboard sits idle.
+    # Goal: don't hammer Alpaca during idle, but ALSO don't blank the
+    # Open-Positions table the moment the user reloads the page.
+    #
+    # Original design: only call ``_fetch_spreads`` when the agent loop
+    # is running OR a one-shot ``_bm_force_refresh`` flag is set. That
+    # was great for log-spam reduction but broke two ways:
+    #   1. Auto-refresh fragment ticks ~3 s later wiped the
+    #      just-displayed spreads (the flag is a one-shot).
+    #   2. A browser reload creates a fresh ``st.session_state``, so
+    #      any session-scoped snapshot dies on F5 → "No open positions"
+    #      reappears even when the broker has filled positions.
+    #
+    # Fix: track "did the user ask for broker data at least once since
+    # this Streamlit process started" via ``_broker_fetch_marker``,
+    # which is backed by ``@st.cache_resource`` (process-scoped — it
+    # survives session resets). Once that marker is set, EVERY render
+    # routes through ``_fetch_spreads_cached``. The 30 s
+    # ``@st.cache_data`` TTL on that function absorbs fragment ticks
+    # (cache hit = microseconds, no Alpaca call), so we hit Alpaca at
+    # most ~once per 30 s — same rate as before — while the displayed
+    # data stays continuous across reloads, fragment ticks, and
+    # tab-switches within the TTL window.
     fetch_broker_now = st.session_state.pop("_bm_force_refresh", False)
-    should_fetch_broker = bool(config) and (loop_running or fetch_broker_now)
+    marker = _broker_fetch_marker()
+    if fetch_broker_now or loop_running:
+        marker["activated"] = True
+
+    should_fetch_broker = bool(config) and (
+        loop_running or fetch_broker_now or marker["activated"]
+    )
     if should_fetch_broker:
         account = _fetch_account(config)
         equity = float(account.get("equity") or 0)
-        total_pnl = float(account.get("unrealized_pl") or 0)
         spreads, ungrouped_legs = _fetch_spreads(config)
+        # Compute total Unrealized P&L by SUMMING what's actually shown
+        # in the Open Positions table. The previous version read
+        # ``account.unrealized_pl`` directly from Alpaca's /v2/account
+        # endpoint, but that field is unreliable for option positions
+        # on paper accounts — Alpaca consistently reports 0 even when
+        # individual leg snapshots have correct unrealized_pl values.
+        # Summing per-spread (+ per-leg for any unclassified) gives a
+        # number that always matches the table the user is looking at.
+        # Falls back to the broker's account-level field only if our
+        # local sum is exactly zero — covers the edge case of an
+        # account holding only long stock with no option spreads.
+        total_pnl = (
+            sum(float(s.get("net_unrealized_pl") or 0) for s in spreads)
+            + sum(float(L.get("unrealized_pl") or 0) for L in ungrouped_legs)
+        )
+        if total_pnl == 0.0:
+            total_pnl = float(account.get("unrealized_pl") or 0)
 
     if equity == 0.0 and not journal_df.empty:
         nonzero = journal_df[journal_df["account_balance"] > 0]["account_balance"]
         if not nonzero.empty:
             equity = nonzero.iloc[-1]
 
+    # ── Dominant Regime ───────────────────────────────────────────────
+    # Take the mode regime across the last 50 *classified* journal rows.
+    # We exclude rows whose regime field is empty / "unknown" because
+    # those are predominantly ``skipped_existing`` entries — the agent
+    # skips a ticker before classification fires when it already has an
+    # open position or pending order, so no regime label is recorded.
+    # Once you hold positions on 3+ tickers (typical), those skip rows
+    # outnumber the genuinely-classified rejected/submitted rows in any
+    # 20-row window and would push the mode to "unknown" — exactly the
+    # UI bug we're fixing here.
+    #
+    # Widening the window from 20 → 50 also helps so a single cycle's
+    # batch of skip rows doesn't dominate the count when classification
+    # rows from earlier cycles are still relevant context.
     regime = "unknown"
     if not journal_df.empty:
-        recent = journal_df.tail(20)
-        valid = recent[(recent["regime"].notna()) & (recent["regime"] != "")]
+        recent = journal_df.tail(50)
+        valid = recent[
+            recent["regime"].notna()
+            & (recent["regime"] != "")
+            & (recent["regime"] != "unknown")
+        ]
         if not valid.empty:
             regime = valid["regime"].value_counts().idxmax()
 
-    now = datetime.now()
-    cycle_secs = max(0, CYCLE_INTERVAL_SEC - (now.minute * 60 + now.second) % CYCLE_INTERVAL_SEC)
+    # The countdown is only meaningful when the background loop is alive
+    # — otherwise nothing is going to fire when the wall clock hits zero.
+    # Pass ``None`` so ``metric_row`` renders "—" + a "Stopped" chip instead
+    # of a misleading "290s" timer.
+    if loop_running:
+        now = datetime.now()
+        cycle_secs: Optional[int] = max(
+            0,
+            CYCLE_INTERVAL_SEC - (now.minute * 60 + now.second) % CYCLE_INTERVAL_SEC,
+        )
+    else:
+        cycle_secs = None
 
     # ── Metrics row ────────────────────────────────────────────────────────
     metric_row(equity, total_pnl, regime, cycle_secs)
     st.divider()
+
+    # ── Closed Today (collapsible) ────────────────────────────────────────
+    # Lists every spread the position-monitor closed today via an exit
+    # signal (strike_proximity / profit_target / hard_stop / regime_shift
+    # / dte_safety / expired) along with the realised P&L and the exit
+    # justification.  Sourced from journal rows where action="closed" —
+    # written by ``agent.py:_journal_close_event`` (added 2026-05-06).
+    # If no closes happened today the expander is hidden so the operator
+    # doesn't see an empty section.
+    _render_closed_today(journal_df)
 
     # ── Open positions ─────────────────────────────────────────────────────
     op_hdr_col, op_btn_col = st.columns([4, 1])
@@ -1285,53 +2066,100 @@ def render_live_monitor() -> None:
         )
     positions_table(spreads)
 
+    # Origin breakdown — concise inline summary so the operator can tell
+    # at a glance how many spreads have full trade-plan context vs were
+    # reconstructed from leg structure (still tradeable; just less rich
+    # exit-rule context).
+    n_matched = sum(1 for s in spreads if s.get("origin") == "trade_plan")
+    n_inferred = sum(1 for s in spreads if s.get("origin") == "inferred")
+    if n_inferred > 0:
+        st.caption(
+            f"📋 {n_matched} spread(s) matched to a `trade_plan_*.json`, "
+            f"{n_inferred} **inferred** from broker leg structure (no "
+            "matching plan — likely an older fill whose plan history "
+            "was rotated out, or opened manually). Inferred rows still "
+            "compute live P&L from leg snapshots; their `original_credit` "
+            "is recovered from each leg's `avg_entry_price`."
+        )
+
+    # Truly malformed legs (failed OCC parse, etc.) still surface as a
+    # last-resort fallback so nothing on the broker is silently hidden.
     if ungrouped_legs:
         st.caption(
-            f"Ungrouped Alpaca legs ({len(ungrouped_legs)}) — open option "
-            "positions in your broker account that don't match any local "
-            "`trade_plan_*.json`. These were likely opened outside the agent "
-            "or have missing/rotated plan files. Exit signals do not apply."
+            f"⚠️ Unclassifiable legs ({len(ungrouped_legs)}) — broker "
+            "positions whose OCC symbol couldn't be parsed or whose leg "
+            "combination doesn't fit a known spread shape."
         )
         ungrouped_legs_table(ungrouped_legs)
     st.divider()
 
-    # ── Equity curve ───────────────────────────────────────────────────────
+    # ── Equity curve (collapsed by default per user preference) ───────────
     equity_df = journal_df[journal_df["account_balance"] > 0].copy()
     if not equity_df.empty:
-        st.subheader("Equity Curve")
-        st.plotly_chart(equity_curve_chart(equity_df), width='stretch')
-        st.divider()
+        with st.expander("📈 Equity Curve", expanded=False):
+            st.plotly_chart(equity_curve_chart(equity_df), width='stretch')
 
-    # ── Guardrail status ───────────────────────────────────────────────────
-    st.subheader("Risk Guardrail Status")
-    guardrail_cards(_guardrail_status_from_journal(journal_df))
-    st.divider()
+    # ── Guardrail status (always expanded per user preference) ────────────
+    # Per-ticker × per-guardrail grid for the latest cycle (mode-scoped).
+    # Each cell carries the value-bearing chip (e.g. "0.34 ≥ 0.20",
+    # "$200 ≤ $2000", "FORCED") computed by ``_compact_for`` so the
+    # operator can see WHY a check passed/failed without hovering.
+    # Hover the cell for the verbatim risk-manager string.  The legacy
+    # single-row 8-card panel was removed because the grid now carries
+    # strictly more information for every ticker in the cycle.
+    active_mode = "DRY-RUN" if dry_mode else "LIVE"
+    # Build the held-tickers set from the same broker fetch that drives
+    # the Open Positions table — single source of truth. Passed to the
+    # guardrail grid so a ticker can only show as "🔒 HOLDING" when its
+    # position genuinely exists at the broker right now. Without this
+    # cross-check, a ticker whose limit order was submitted earlier and
+    # then cancelled (stale-order maintenance / DAY-tif expiry / manual
+    # cancel) would keep showing HOLDING for the rest of the day even
+    # though nothing is actually open.
+    held_tickers = {s.get("underlying", "") for s in spreads}
+    held_tickers.discard("")  # defensive — drop any blank symbols
+    with st.expander(
+        f"🛡️ Risk Guardrail Status — Latest Cycle [{active_mode}]",
+        expanded=True,
+    ):
+        guardrail_grid(
+            _guardrail_grid_from_journal(
+                journal_df,
+                current_mode=active_mode,
+                held_tickers=held_tickers,
+            )
+        )
 
-    # ── Market status + SMA drift ──────────────────────────────────────────
-    st.subheader("Market Status")
-    if config:
-        open_flag = _is_market_open(config)
-        if open_flag is None:
-            st.info("Market status unavailable (Alpaca unreachable).")
-        else:
-            label = "OPEN" if open_flag else "CLOSED"
-            color = "green" if open_flag else "red"
-            st.markdown(f"Market is currently :{color}[**{label}**]")
-    else:
-        st.info("Config unavailable — set ALPACA_API_KEY in .env.")
-
+    # ── SMA drift caption (Market OPEN/CLOSED moved to page header) ───────
+    # The OPEN/CLOSED status now lives as a coloured badge in the
+    # top-right of the page header (rendered in app.py), so it's always
+    # visible from any tab without taking vertical space here. We keep
+    # only the SMA50/SMA200 drift + RSI line as a compact one-line
+    # caption, which is genuinely scrollable context that isn't
+    # redundant with the header badge.
     if not journal_df.empty:
         last = journal_df.iloc[-1]
         sma50, sma200, rsi = last.get("sma_50", 0), last.get("sma_200", 0), last.get("rsi_14", 0)
         if sma50 and sma200:
             drift = (sma50 - sma200) / sma200 * 100
-            st.caption(f"Last signal — SMA50/SMA200 drift: {drift:+.2f}%  |  RSI-14: {rsi:.1f}")
+            st.caption(
+                f"Last signal — SMA50/SMA200 drift: {drift:+.2f}%  |  "
+                f"RSI-14: {rsi:.1f}"
+            )
     st.divider()
 
     # ── Agent log expander ─────────────────────────────────────────────────
-    with st.expander("Agent Log (last 50 lines)", expanded=loop_running):
+    # User preference: collapsed by default. The log is a verbose debug
+    # tool; users who need it can click open. Default-collapse keeps the
+    # important panels above the fold.
+    with st.expander("Agent Log (last 50 lines)", expanded=False):
         if AGENT_LOG.exists():
-            lines = AGENT_LOG.read_text().splitlines()
+            # _safe_read_text handles the rare case where a non-UTF-8
+            # byte slips into the log (e.g. a Windows-1252 char from a
+            # vendor SDK trace). The previous strict ``read_text()``
+            # crashed the entire dashboard render with
+            # ``UnicodeDecodeError`` when this happened.
+            lines = _safe_read_text(AGENT_LOG).splitlines()
             log_text = "\n".join(lines[-50:])
             st.code(log_text, language="text")
         else:
@@ -1344,7 +2172,12 @@ def render_live_monitor() -> None:
     _render_scanner_diagnostics_panel(journal_df)
 
     # ── Journal expander ───────────────────────────────────────────────────
-    with st.expander("Recent Journal Entries", expanded=False):
+    # User preference: ALWAYS expanded. Journal entries are the operator's
+    # primary signal stream — what the agent decided this cycle, why
+    # candidates were rejected, what got submitted. They want this open
+    # at all times so they can scroll through cycle history without
+    # clicking.
+    with st.expander("Recent Journal Entries", expanded=True):
         if journal_df.empty:
             st.info(
                 "No journal entries found at "
@@ -1352,13 +2185,34 @@ def render_live_monitor() -> None:
                 "(or legacy trade_journal/signals.jsonl)."
             )
         else:
+            # Filter out orphan event-only rows (cycle_error /
+            # after_hours_shutdown entries written by the stale-order
+            # canceller and the after-hours guard). They have no
+            # ticker/action and otherwise pollute the table with
+            # rows full of blanks + regime="unknown". A separate caption
+            # below counts them so the operator still sees the activity.
+            display_df = journal_df
+            n_orphans = 0
+            if "ticker" in display_df.columns:
+                has_ticker = display_df["ticker"].notna() & (
+                    display_df["ticker"].astype(str).str.strip() != ""
+                )
+                n_orphans = int((~has_ticker).sum())
+                display_df = display_df[has_ticker]
+
             cols = ["timestamp", "ticker", "action", "regime", "notes"]
-            cols = [c for c in cols if c in journal_df.columns]
+            cols = [c for c in cols if c in display_df.columns]
             st.dataframe(
-                journal_df[cols].tail(100).iloc[::-1],
+                display_df[cols].tail(100).iloc[::-1],
                 width='stretch',
                 hide_index=True,
             )
+            if n_orphans:
+                st.caption(
+                    f"ℹ️ Hiding {n_orphans} agent-event row(s) "
+                    "(after-hours shutdown / stale-order cancellation "
+                    "logs) that have no ticker/action context."
+                )
 
     # ── Manual refresh ─────────────────────────────────────────────────────
     # Note: auto-refresh is handled by @st.fragment(run_every=REFRESH_INTERVAL)

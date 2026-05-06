@@ -68,6 +68,7 @@ from trading_agent.ports import (
     OrdersPort,
 )
 from trading_agent.regime import Regime, RegimeClassifier, RegimeAnalysis
+from trading_agent.rsi_gate import evaluate_rsi_gate
 from trading_agent.strategy import StrategyPlanner, SpreadPlan
 from trading_agent.strategy_presets import (
     PresetConfig,
@@ -149,14 +150,40 @@ class TradingAgent:
     def __init__(self, config: AppConfig):
         self.config = config
 
+        # ── Cycle singleton lock ────────────────────────────────────────
+        # Only one cycle may run at a time per agent instance. The
+        # Streamlit watchdog observer + auto-refresh + scheduled timer
+        # can all fire simultaneously; on 2026-05-06 nine cycles
+        # started within 38 seconds of each other after Schwab began
+        # feeding chains successfully, and two of them raced to submit
+        # SPY Bear Call spreads only 2 seconds apart (orders 462b61ba
+        # and 9d271dc7 — same strikes, doubled risk).
+        #
+        # ``_cycle_lock.acquire(blocking=False)`` at the top of
+        # ``run_cycle`` makes the second concurrent caller short-
+        # circuit cleanly instead of running a full duplicate cycle.
+        # Non-reentrant: if a cycle internally calls run_cycle (it
+        # shouldn't), the second call returns the skip result.
+        self._cycle_lock = threading.Lock()
+
         # MarketDataProvider now satisfies both MarketDataPort and
         # AccountPort (its get_account_info/is_market_open methods no
         # longer accept base_url — the adapter owns its endpoint).
-        self.data_provider: MarketDataPort = MarketDataProvider(
+        #
+        # The factory routes between Alpaca / Schwab / Yahoo based on
+        # the surface tag and per-surface env vars. The agent's main
+        # cycle is the LIVE surface, so it looks up
+        # MARKET_DATA_PROVIDER_LIVE first, then MARKET_DATA_PROVIDER,
+        # then defaults to Alpaca. Schwab gives retail brokerage
+        # holders real-time options data without Alpaca's OPRA tier;
+        # Alpaca remains the execution broker either way.
+        from trading_agent.market_data_factory import build_market_data_provider
+        self.data_provider: MarketDataPort = build_market_data_provider(
             alpaca_api_key=config.alpaca.api_key,
             alpaca_secret_key=config.alpaca.secret_key,
             alpaca_data_url=config.alpaca.data_url,
             alpaca_base_url=config.alpaca.base_url,
+            surface="live",
         )
 
         # Load the active Strategy-Profile preset (Conservative / Balanced /
@@ -352,7 +379,35 @@ class TradingAgent:
         If the cycle exceeds CYCLE_TIMEOUT_SECONDS the guard logs a
         TIMEOUT event to JournalKB and terminates the process so the
         scheduler can launch the next run cleanly.
+
+        Concurrency
+        -----------
+        Singleton via ``self._cycle_lock``.  Only one cycle runs at a
+        time per agent instance.  Concurrent callers (Streamlit's
+        watchdog observer + auto-refresh + scheduled timer all firing
+        on the same tick) get a fast-path "skip" result without
+        starting a second cycle, so the dedup gate never sees a
+        race-window where Alpaca hasn't yet listed an in-flight order.
         """
+        # ── Singleton acquire (non-blocking) ─────────────────────────────
+        if not self._cycle_lock.acquire(blocking=False):
+            logger.info(
+                "run_cycle skipped — another cycle is already in progress; "
+                "this trigger is dropped to prevent duplicate submissions.")
+            return {
+                "status": "skipped_concurrent",
+                "reason": "another cycle already in progress",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+        try:
+            return self._run_cycle_with_timeout_guard()
+        finally:
+            self._cycle_lock.release()
+
+    def _run_cycle_with_timeout_guard(self) -> Dict:
+        """Inner: timeout guard + exception handling, original body of
+        ``run_cycle`` before the singleton wrapper was added."""
         # --- Timeout guard -----------------------------------------------
         def _on_timeout():
             reason = (
@@ -566,6 +621,39 @@ class TradingAgent:
         logger.info("STAGE 2 — OPEN NEW POSITIONS")
         logger.info("=" * 70)
 
+        # ── Fail-closed dedup gate ──────────────────────────────────────
+        # If Stage 1 couldn't read open positions from the broker (RPC
+        # failure — Connection reset, timeout, 5xx), we don't actually
+        # know what's already on the book.  In that state, opening new
+        # positions is a duplicate-submission risk: on 2026-05-05 a
+        # 100ms TCP reset led to a duplicate DIA Iron Condor.  Skip
+        # the new-trade loop entirely and try again next cycle when
+        # the broker call recovers.  Stage 1's exit/close path already
+        # short-circuited (no spreads to evaluate), so this is purely
+        # about not adding new exposure under uncertainty.
+        if monitor_results.get("fetch_failed"):
+            logger.warning(
+                "STAGE 2 SKIPPED — broker position fetch failed in "
+                "Stage 1.  Refusing to open new positions until the "
+                "next cycle confirms current account state.  This is "
+                "the fail-closed dedup gate; transient broker outages "
+                "should not cause duplicate orders.")
+            self.journal_kb.log_cycle_error(
+                "stage2_skipped_position_fetch_failed",
+                {"reason": "broker_position_fetch_returned_none"},
+            )
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "account_balance": account_balance,
+                "monitor": monitor_results,
+                "new_trades": [],
+                "order_summary": {
+                    "open_orders": {"total": 0},
+                    "recent_fills": {"total": 0},
+                    "skipped_reason": "stage2_skipped_position_fetch_failed",
+                },
+            }
+
         new_trade_results = []
         for ticker in tickers:
             # Check for shutdown between tickers so a SIGTERM mid-cycle
@@ -669,11 +757,34 @@ class TradingAgent:
         """
         Fetch positions, classify regimes, evaluate exit signals,
         and close spreads that need closing.
+
+        Return-shape contract
+        ---------------------
+        Always returns a dict with keys ``total_spreads`` (int),
+        ``positions`` (list), ``closed`` (list).  When the broker
+        position fetch fails, the dict additionally carries
+        ``fetch_failed=True`` so the calling cycle can fail closed
+        on Stage 2 (don't open new positions when we don't know what
+        already exists).  An empty broker response (``[]``) is
+        distinct from a failed RPC (``None``) — the former returns
+        ``fetch_failed=False`` (clean slate), the latter
+        ``fetch_failed=True`` (unknown state).
         """
         positions = self.position_monitor.fetch_open_positions()
+
+        if positions is None:
+            # RPC failed — propagate the unknown state up so Stage 2
+            # can short-circuit. Don't conflate with "no positions."
+            logger.warning(
+                "Position fetch failed — Stage 2 will skip new entries "
+                "this cycle to avoid duplicate-submission bugs.")
+            return {"total_spreads": 0, "positions": [], "closed": [],
+                    "fetch_failed": True}
+
         if not positions:
             logger.info("No open option positions found.")
-            return {"total_spreads": 0, "positions": [], "closed": []}
+            return {"total_spreads": 0, "positions": [], "closed": [],
+                    "fetch_failed": False}
 
         trade_plans = self._load_trade_plans()
         spreads = self.position_monitor.group_into_spreads(positions, trade_plans)
@@ -704,6 +815,26 @@ class TradingAgent:
         closed = []
         for spread in spreads:
             if spread.exit_signal != ExitSignal.HOLD and self._should_exit_spread(spread):
+                # Capture pre-close state for the audit-trail journal entry —
+                # spread.legs may be partially populated after close_spread()
+                # mutates leg statuses, so snapshot what the user is paying
+                # for now.
+                close_context = {
+                    "strategy":       spread.strategy_name,
+                    "exit_signal":    spread.exit_signal.value,
+                    "exit_reason":    spread.exit_reason,
+                    "exit_immediate": spread.exit_signal in IMMEDIATE_EXIT_SIGNALS,
+                    "net_unrealized_pl": float(getattr(spread, "net_unrealized_pl", 0) or 0),
+                    "original_credit":   float(getattr(spread, "original_credit", 0) or 0),
+                    "max_loss":          float(getattr(spread, "max_loss", 0) or 0),
+                    "spread_width":      float(getattr(spread, "spread_width", 0) or 0),
+                    "expiration":        getattr(spread, "expiration", "") or "",
+                    "short_strikes":     list(getattr(spread, "short_strikes", []) or []),
+                    "regime_at_close":   (current_regimes.get(spread.underlying).value
+                                          if current_regimes.get(spread.underlying) is not None
+                                          else "unknown"),
+                    "origin":            getattr(spread, "origin", "trade_plan"),
+                }
                 if self.config.trading.dry_run:
                     logger.info(
                         "[%s] DRY RUN — would close %s (%s: %s)",
@@ -716,9 +847,22 @@ class TradingAgent:
                         "reason": spread.exit_reason,
                         "action": "dry_run_close",
                     })
+                    self._journal_close_event(
+                        spread, close_context, leg_results=[],
+                        fill_status="dry_run", dry_run=True,
+                    )
                 else:
                     result = self.executor.close_spread(spread)
                     closed.append(result)
+                    leg_results = result.get("leg_results", []) if isinstance(result, dict) else []
+                    fill_status = (
+                        "complete" if (isinstance(result, dict) and result.get("all_closed"))
+                        else "partial"
+                    )
+                    self._journal_close_event(
+                        spread, close_context, leg_results=leg_results,
+                        fill_status=fill_status, dry_run=False,
+                    )
 
                 if self.llm_analyst:
                     self._learn_from_close(spread)
@@ -726,6 +870,72 @@ class TradingAgent:
         summary = self.position_monitor.summary(spreads)
         summary["closed"] = closed
         return summary
+
+    def _journal_close_event(self, spread, ctx: Dict,
+                             leg_results: List[Dict], fill_status: str,
+                             dry_run: bool) -> None:
+        """
+        Emit a structured ``action="closed"`` row to ``signals_live.jsonl``.
+
+        Why this exists
+        ---------------
+        Pre-2026-05-06 the agent logged exit signals only to
+        ``logs/trading_agent.log`` (rolling Python log).  The
+        ``signals_live.jsonl`` journal — which feeds the dashboard's
+        Risk Guardrail grid, the Latest Trades panel, and any future
+        replay tooling — only had ``submitted`` / ``rejected`` /
+        ``skipped_*`` rows.  Closed positions effectively "disappeared"
+        from the dashboard's view: they vanished from Open Positions
+        when the broker reported them gone, but no journal row
+        explained why.  This helper closes the gap so every close has
+        an audit-trail entry with the exit signal as justification.
+
+        Schema (action="closed")
+        ------------------------
+        ::
+
+          notes:
+              "closed: <Strategy>, P&L=<±$X>, <exit_reason>"
+          raw_signal:
+              {strategy, exit_signal, exit_reason, exit_immediate,
+               net_unrealized_pl, original_credit, max_loss,
+               spread_width, expiration, short_strikes,
+               regime_at_close, origin,
+               leg_close_results: [{symbol, status}, ...],
+               fill_status: "complete" | "partial" | "failed" | "dry_run",
+               mode: "live" | "dry_run"}
+        """
+        try:
+            pl = ctx["net_unrealized_pl"]
+            sign = "+" if pl >= 0 else ""
+            note = (
+                f"closed: {ctx['strategy']}, P&L={sign}${pl:.2f}, "
+                f"{ctx['exit_signal']}"
+            )
+            payload: Dict[str, Any] = dict(ctx)
+            payload["leg_close_results"] = [
+                {"symbol": leg.get("symbol", ""),
+                 "status": leg.get("status", "unknown")}
+                for leg in (leg_results or [])
+                if isinstance(leg, dict)
+            ]
+            payload["fill_status"] = fill_status
+            payload["mode"] = "dry_run" if dry_run else "live"
+            self.journal_kb.log_signal(
+                ticker=spread.underlying,
+                action="closed",
+                price=self._cached_price(spread.underlying),
+                exec_status=f"closed_{ctx['exit_signal']}",
+                notes=note,
+                raw_signal=payload,
+            )
+        except Exception as exc:                                # noqa: BLE001
+            # Never let a journaling failure break the cycle — the close
+            # itself already happened.  Log the error and move on.
+            logger.warning(
+                "[%s] Failed to journal close event: %s",
+                getattr(spread, "underlying", "?"), exc,
+            )
 
     def _load_trade_plans(self) -> List[Dict]:
         """
@@ -812,6 +1022,69 @@ class TradingAgent:
                 "status": "skipped",
                 "reason": reason,
             }
+
+        # --- RSI gate (opt-in, off by default) ---------------------------
+        # Refines the strategy choice using RSI alongside the regime. See
+        # ``trading_agent/rsi_gate.py`` for the full decision matrix and
+        # rationale. Three possible outcomes:
+        #   * skip cycle      — RSI says momentum is too active for the
+        #                       regime's default strategy
+        #   * proceed as-is   — gate has no opinion, planner uses
+        #                       ``analysis.regime`` unchanged
+        #   * regime override — gate downgrades a sideways/IC plan to a
+        #                       single-side vertical (Bull Put or Bear Call);
+        #                       we clone ``analysis`` with the new regime
+        #                       so the planner picks the right strategy
+        #                       AND the journal records the actual choice
+        #
+        # Toggle via the RSI_GATE_ENABLED env var (default off) so the
+        # change can be A/B tested in the backtester without code rolls.
+        # When the gate is disabled OR the env var is unset, this block
+        # is a no-op and the original regime → strategy mapping applies.
+        rsi_gate_enabled = os.environ.get(
+            "RSI_GATE_ENABLED", "false"
+        ).strip().lower() in ("true", "1", "yes", "on")
+        if rsi_gate_enabled:
+            decision = evaluate_rsi_gate(analysis.regime, analysis.rsi_14)
+            if not decision.allow:
+                logger.info(
+                    "[%s] RSI gate skipped cycle — %s", ticker, decision.reason
+                )
+                self.journal_kb.log_signal(
+                    ticker=ticker,
+                    action="skipped_rsi_gate",
+                    price=analysis.current_price,
+                    raw_signal={
+                        "regime":   analysis.regime.value,
+                        "rsi_14":   analysis.rsi_14,
+                        "reason":   decision.reason,
+                        "preset":   self.preset.name,
+                    },
+                )
+                return {
+                    "ticker": ticker,
+                    "regime": analysis.regime.value,
+                    "strategy": "skipped_rsi_gate",
+                    "plan_valid": False,
+                    "risk_approved": False,
+                    "status": "skipped",
+                    "reason": decision.reason,
+                }
+            if decision.override_regime is not None:
+                logger.info(
+                    "[%s] RSI gate override — %s", ticker, decision.reason
+                )
+                # Substitute the analysis with the new regime so the
+                # planner picks Bull Put / Bear Call instead of the
+                # original Iron Condor. ``RegimeAnalysis`` is a regular
+                # dataclass; ``replace`` clones it field-for-field with
+                # only the regime swapped. Every downstream consumer
+                # (planner, risk manager, journal) sees a consistent
+                # view of the cycle's intent.
+                import dataclasses
+                analysis = dataclasses.replace(
+                    analysis, regime=decision.override_regime
+                )
 
         # --- High-IV block: IV rank > 95th pct blocks all new entries ---
         if getattr(analysis, "high_iv_warning", False):
@@ -1083,6 +1356,14 @@ class TradingAgent:
         thesis = build_thesis(analysis, plan, verdict)
 
         raw: Dict = {
+            # ``mode`` distinguishes dry-run cycles from live cycles within
+            # the same signals_live.jsonl stream.  The dashboard uses this
+            # to scope its "latest verdict" guardrail panel to the active
+            # mode so a stale LIVE row doesn't display while DRY-RUN is
+            # selected (or vice-versa).  Legacy rows without this field
+            # are treated as LIVE for filtering — see
+            # streamlit/live_monitor.py:_guardrail_status_from_journal.
+            "mode": "DRY-RUN" if self.config.trading.dry_run else "LIVE",
             "regime": analysis.regime.value,
             "strategy": plan.strategy_name,
             "plan_valid": plan.valid,

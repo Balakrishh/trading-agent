@@ -5,7 +5,7 @@ import os
 import pytest
 from unittest.mock import MagicMock, patch
 
-from trading_agent.executor import OrderExecutor, MAX_HISTORY
+from trading_agent.executor import OrderExecutor, MAX_HISTORY, calculate_position_qty
 from trading_agent.risk_manager import RiskVerdict
 from trading_agent.strategy import SpreadPlan, SpreadLeg
 
@@ -435,9 +435,19 @@ class TestLiveCreditRecheck:
         assert result["status"] == "submitted"
 
     def test_recheck_skipped_content_when_refresh_fails(self, tmp_path):
-        """When refresh fails we fall back to plan.net_credit — the
-        recheck runs against that same credit, so it's effectively a
-        no-op (plan was already approved at planning time)."""
+        """When refresh fails we fall back to plan.net_credit *minus*
+        FALLBACK_HAIRCUT_PCT (Task #49 — keeps the limit fillable when
+        the synthetic mid is richer than the live bid).  The recheck
+        runs against the post-haircut credit; the order still submits
+        as long as the haircut credit clears the C/W floor.
+
+        Plan values here are sized so post-haircut credit/width still
+        beats min_credit_ratio=0.33:
+          * net_credit              = 2.10
+          * 15% fallback haircut    → 1.785
+          * 1-tick fill haircut     → 1.735
+          * ratio = 1.735/5.0       = 0.347 > 0.33  ✓
+        """
         provider = MagicMock()
         provider.fetch_option_quotes.return_value = {}   # refresh fails
         executor = OrderExecutor(
@@ -448,9 +458,9 @@ class TestLiveCreditRecheck:
         )
         plan = _make_plan()
         plan.spread_width = 5.0
-        plan.net_credit = 1.70
-        plan.credit_to_width_ratio = 0.34
-        plan.max_loss = 330.0
+        plan.net_credit = 2.10
+        plan.credit_to_width_ratio = 0.42
+        plan.max_loss = 290.0
 
         with patch("trading_agent.executor.requests.post") as mock_post:
             mock_post.return_value = MagicMock(
@@ -459,8 +469,8 @@ class TestLiveCreditRecheck:
             )
             result = executor.execute(_make_verdict(approved=True, plan=plan))
 
-        # Refresh failed → fell back to plan.net_credit → recheck passes →
-        # order still submitted (fallback behavior from Task #6 preserved).
+        # Refresh failed → fell back to plan.net_credit × (1 - haircut)
+        # → recheck passes against the haircut credit → order submitted.
         assert mock_post.called
         assert result["status"] == "submitted"
 
@@ -492,3 +502,90 @@ class TestLiveCreditRecheck:
             plan, live_credit=1.70, account_balance=100_000)
         assert ok is True
         assert reason == ""
+
+
+# ------------------------------------------------------------------
+# Module-level sizing primitive — single source for live + backtest
+# ------------------------------------------------------------------
+
+class TestCalculatePositionQty:
+    """
+    Pin the numerical behaviour of :func:`calculate_position_qty` across a
+    representative grid of cases.  This is the single sizing math that
+    both the live executor and the backtester import; if any of these
+    pinned outputs drift, both code paths drift in lockstep — and *that*
+    is exactly the silent-drift failure mode CLAUDE.md warns about.
+
+    The instance method ``OrderExecutor._calculate_qty`` is verified
+    elsewhere (see ``TestPositionSizing``) — those tests now indirectly
+    exercise this free function via the delegator.
+    """
+
+    def test_baseline_two_percent_risk_yields_floored_qty(self):
+        """width=5, credit=0.40, equity=$100k, 2% risk → 4 contracts.
+
+        budget = 0.02 × 100_000   = $2,000
+        max_loss_per_contract = (5 - 0.40) × 100 = $460
+        qty = floor(2000 / 460)   = 4
+        """
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.40)
+        assert calculate_position_qty(
+            plan, account_balance=100_000, max_risk_pct=0.02
+        ) == 4
+
+    def test_proportional_to_max_risk_pct(self):
+        """Doubling max_risk_pct doubles the budget → ~2× the contracts."""
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.40)
+        # 0.01 → floor(1000 / 460) = 2
+        assert calculate_position_qty(plan, 100_000, 0.01) == 2
+        # 0.02 → floor(2000 / 460) = 4
+        assert calculate_position_qty(plan, 100_000, 0.02) == 4
+        # 0.03 → floor(3000 / 460) = 6
+        assert calculate_position_qty(plan, 100_000, 0.03) == 6
+
+    def test_live_credit_override_changes_qty(self):
+        """A wider plan whose live credit collapses should size down."""
+        plan = _make_sized_plan(spread_width=10.0, net_credit=4.00)
+        # Plan credit: max_loss = $600, budget $2000 → qty = 3
+        assert calculate_position_qty(plan, 100_000, 0.02) == 3
+        # Live credit drops to $1.50: max_loss = $850 → qty = 2
+        assert calculate_position_qty(
+            plan, 100_000, 0.02, live_credit=1.50) == 2
+
+    def test_qty_zero_when_one_contract_exceeds_budget(self):
+        """Tiny equity + wide spread → no integer qty fits inside budget.
+
+        budget = 0.02 × 20_000 = $400
+        max_loss_per_contract = (5 - 0.10) × 100 = $490
+        floor(400 / 490) = 0  — abort, not floor-to-1.
+        """
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.10)
+        assert calculate_position_qty(plan, 20_000, 0.02) == 0
+
+    def test_qty_zero_for_non_positive_max_loss(self):
+        """credit ≥ width is structurally invalid → max_loss ≤ 0 → qty=0."""
+        bad = _make_sized_plan(spread_width=5.0, net_credit=5.0)
+        assert calculate_position_qty(bad, 100_000, 0.02) == 0
+
+    def test_qty_zero_for_non_positive_equity(self):
+        """Zero or negative equity must produce qty=0 unconditionally —
+        the executor's downstream guard relies on this signal."""
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.40)
+        assert calculate_position_qty(plan, 0.0, 0.02) == 0
+        assert calculate_position_qty(plan, -1.0, 0.02) == 0
+
+    def test_method_delegates_to_free_function(self, tmp_path):
+        """``OrderExecutor._calculate_qty`` is a pure delegator — the free
+        function with the same args must return the same number for every
+        case.  This is the seam that prevents live/backtest sizing drift."""
+        plan = _make_sized_plan(spread_width=5.0, net_credit=0.40)
+        for pct in (0.01, 0.02, 0.03):
+            for equity in (10_000, 50_000, 100_000, 500_000):
+                ex = OrderExecutor(
+                    api_key="k", secret_key="s",
+                    trade_plan_dir=str(tmp_path), dry_run=True,
+                    max_risk_pct=pct,
+                )
+                assert ex._calculate_qty(plan, equity) == \
+                       calculate_position_qty(plan, equity, pct), (
+                    f"delegator drift at pct={pct} equity={equity}")

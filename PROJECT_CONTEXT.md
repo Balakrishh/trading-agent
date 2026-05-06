@@ -19,9 +19,12 @@ The same scoring logic powers two surfaces:
 
 - **Live agent** — `python -m trading_agent.agent` runs one cycle (or a
   loop). Designed to be cron-driven every 5 minutes during market hours.
-- **Backtester** — runs from the Streamlit UI; replays historical chains
-  through the same decision engine the live agent uses (when
-  `use_unified_engine=True`).
+- **Backtester** — runs from the Streamlit UI; replays historical bars
+  through the same decision engine, risk manager, sizer, and exit-monitor
+  the live agent uses. Lives in `trading_agent/backtest/` (added
+  May 2026, see skill 15); the legacy `Backtester` class with its
+  `use_unified_engine` / `use_alpaca_historical` toggles was retired in
+  the same change.
 
 Repo root: `trading-agent/`. Python 3.11+ is the support floor.
 
@@ -58,7 +61,10 @@ A definition anywhere else is a "shadow scorer" — the AST check
 `trading_agent/streamlit/backtest_ui.py` must contain at least one call
 to `decide(...)` — the imported `decision_engine.decide` entrypoint. If
 that call disappears the unified path becomes dead code and the
-backtester silently regresses to its old σ-distance heuristic.
+backtester silently regresses (the old σ-distance heuristic class is
+gone, but a new shadow path could be reintroduced). Today the literal
+`decide(` lives inside `_preview_decision`, the diagnostic shim that
+also doubles as a "what would the engine pick now?" UI panel.
 
 ### 2.4 Journal-file split
 
@@ -105,8 +111,8 @@ chain_scanner.py            ← pure helpers (_quote_credit, _score_candidate_wi
         ▼
 decision_engine.decide()    ← pure scoring entrypoint (no I/O)
         │
-        ├──── ChainScanner.scan()                          (live)
-        └──── Backtester._build_alpaca_plan_via_decide()   (backtest)
+        ├──── ChainScanner.scan()                  (live)
+        └──── trading_agent.backtest.run_one_cycle (backtest)
 ```
 
 `decision_engine.decide(DecisionInput) → DecisionOutput` is pure: no
@@ -319,7 +325,7 @@ trading-agent/
 │   └── streamlit/
 │       ├── app.py                    # 4-tab entrypoint
 │       ├── live_monitor.py           # Live tab (broker-gated, watchdog-driven)
-│       ├── backtest_ui.py            # Backtest tab (Backtester + unified-engine toggle)
+│       ├── backtest_ui.py            # Backtest tab (thin shim around trading_agent.backtest.BacktestRunner)
 │       ├── llm_extension.py          # LLM tab (RAG over signals_live.jsonl)
 │       ├── watchlist_ui.py           # Watchlist tab — multi-tf regime table + macro strip
 │       ├── watchlist_chart.py        # Watchlist tab — 4-row Plotly chart, pure-pandas indicators
@@ -330,9 +336,7 @@ trading-agent/
 │   ├── README.md                     # When-X-fails troubleshooting
 │   ├── scan_invariant_check.py       # AST: floor formula + scoring source + decide() wired
 │   ├── run_scan_diagnostics_check.py
-│   ├── run_unified_backtest_check.py
-│   ├── run_journal_split_check.py
-│   └── run_live_vs_backtest_parity_check.py
+│   └── run_journal_split_check.py    # (legacy parity scripts retired 2026-05-04)
 │
 ├── tests/                            # pytest suite
 │
@@ -417,42 +421,24 @@ The behaviour is pinned by `TestResolveJournalPath` in
 
 ## 7. Pitfalls / things that have bitten us
 
-### 7.1 Backtester drift
+### 7.1 Backtester drift (post-rewrite, May 2026)
 
-Three drift sources are documented as "still open" — don't claim to
-have fixed them without writing a regression test:
+The pre-rewrite drift sources (adaptive spread width, σ-distance δ
+labelling, σ-horizon projection, structured reject reasons in
+`_alpaca_historical_plan`) are all gone — the legacy `Backtester` class
+that owned them was deleted with skill 15. New residual drift sources
+to keep an eye on:
 
-1. **Adaptive spread width** — backtester uses fixed `spread_width`; live
-   scales with spot/grid. Material on $500+ underlyings.
-2. **Chain-sourced δ picker** — δ is *labelled* via the analytic
-   `_delta_from_sigma_distance` mapping, not read from the chain's
-   listed `delta` column. Near-no-op when realized σ ≈ implied σ.
-3. **Mean-Reversion priority** — Priority 1 of live `plan()` is absent
-   from the backtest run-loop.
-4. **Bid/ask spread modelling** — Alpaca-historical uses `close − close`;
-   live fills against bid/ask. Slightly over-estimates real credit.
-
-### 7.2 Recently closed gaps (Apr 2026) — verify in next backtest
-
-- Friday-weekly preference in `_pick_alpaca_expiration` (penalty for
-  non-Friday expirations). Regression: `TestPickAlpacaExpirationFridayPreference`.
-- Credit-ratio gate now fires in alpaca-historical mode (was silently
-  bypassed). Regression: `TestCreditRatioGateAlpacaHistorical`.
-- Structured rejection reasons in `_alpaca_historical_plan` (returns
-  `(plan, reason)` instead of `Optional[Dict]`).
-- Trade-journal `expiry_date` reflects actual OCC contract expiration
-  (was always `entry+1d` before).
-- Expiration-fallback loop on data-availability failures (up to 3
-  retries; new token `no_bars_after_fallbacks`). Regression:
-  `TestAlpacaHistoricalPlanFallback`.
-
-### 7.3 σ-horizon fix
-
-The backtester used to project σ over the full DTE, producing intraday
-strikes ~13 % OTM (|Δ| ≈ 0.02). It now projects σ over the **hold
-horizon** (`hold_bars / bars_per_year`), landing strikes ~1 % OTM
-(|Δ| ≈ 0.20) — apples-to-apples with live's `MIN_DELTA(0.15) ≤ |Δ| ≤ 0.20`.
-Regression: `TestAlpacaHistoricalSigmaHorizon`.
+1. **Bid/ask modelling** — synthetic chain treats mid = bid = ask.
+   Compensated partially by the per-leg commission ($0.65) charged on
+   open and close, but live fills still come in slightly worse.
+2. **Mean-Reversion priority** — Priority 1 of live `plan()` (3-σ
+   Bollinger touch override) is not yet wired through the new
+   `run_one_cycle`. Vertical and Iron Condor coverage is full.
+3. **Greeks from BS, not chain** — listed `delta` is the BS delta at
+   the synthetic IV, not a broker-reported Greek. Near-no-op when
+   synthetic IV ≈ implied; can pick neighbouring strikes when they
+   diverge significantly.
 
 ### 7.4 Alpaca timeouts
 
@@ -527,11 +513,9 @@ python run_risk_manager_quick.py                   # static vs adaptive smoke
 # Drift-prevention smoke checks (CI)
 python3 scripts/checks/scan_invariant_check.py
 python3 scripts/checks/run_scan_diagnostics_check.py
-python3 scripts/checks/run_unified_backtest_check.py
 python3 scripts/checks/run_journal_split_check.py
-python3 scripts/checks/run_live_vs_backtest_parity_check.py
 
-# All five at once
+# All three at once
 for f in scripts/checks/*.py; do python3 "$f" || break; done
 
 # Static HTML report
@@ -602,12 +586,15 @@ verify the invariants in §2 still hold afterwards.
    (canonical attribute) instead of hardcoded `signals.jsonl`. Streamlit
    tests patch both `JOURNAL_PATH` and `LEGACY_JOURNAL_PATH`.
 
-2. **Unified Decision Engine toggle in Streamlit.** Backtest tab now
-   has a "Unified Decision Engine" expander with on/off toggle and a
-   preset selectbox. `_run_cached` accepts `preset_name` +
-   `use_unified_engine`; resolves `PresetConfig` via
-   `PRESETS.get(preset_name)`. Run caption appends
-   `· unified-engine=ON (preset=<name>)` when active.
+2. **Unified Decision Engine toggle in Streamlit.** Backtest tab gained
+   a "Unified Decision Engine" expander with on/off toggle and a
+   preset selectbox. `_run_cached` accepted `preset_name` plus a
+   "use unified engine" flag and resolved `PresetConfig` via
+   `PRESETS.get(preset_name)`. *Superseded* by the May-2026 backtest
+   rewrite (entry #16 below): the toggle is gone — `decide()` is now
+   the only path, wired structurally through
+   `trading_agent/backtest/run_one_cycle.py`. The preset selectbox
+   remains.
 
 3. **Watchdog integration (Phases A+B+D).**
    - Phase A: `trading_agent/streamlit/file_watcher.py` (per-process
@@ -643,16 +630,24 @@ verify the invariants in §2 still hold afterwards.
    `STRATEGY_PRESET.json`, `knowledge_base/`, `.idea/`,
    `daily_report.html`, `reports/`.
 
-8. **Smoke checks moved to `scripts/checks/`.** Five files:
+8. **Smoke checks moved to `scripts/checks/`.** Originally five files:
    `scan_invariant_check.py`, `run_journal_split_check.py`,
    `run_live_vs_backtest_parity_check.py`,
    `run_unified_backtest_check.py`,
    `run_scan_diagnostics_check.py`. `sys.path` inserts updated to walk
    two levels up. New `scripts/checks/README.md` with troubleshooting.
+   *Note:* `run_unified_backtest_check.py` and
+   `run_live_vs_backtest_parity_check.py` were retired 2026-05-04 with
+   the backtest rewrite (entry #16); they exercised
+   `Backtester._build_alpaca_plan_via_decide`, a method that no longer
+   exists. Three smoke checks remain.
 
 9. **`.github/workflows/ci.yml` added.** Two jobs: `invariants` (AST
    checks, runs first as fast gate) → `tests` (Python 3.11/3.12 matrix
-   running pytest then the four runtime smoke checks).
+   running pytest then the runtime smoke checks). Smoke-check count
+   dropped from four to two (`run_scan_diagnostics_check.py`,
+   `run_journal_split_check.py`) when the two parity scripts were
+   retired in entry #16.
 
 10. **Logging volume pass.** Demoted hot-path INFO → DEBUG in
     `position_monitor.py` (Fetched N positions / Grouped into N
@@ -723,6 +718,33 @@ verify the invariants in §2 still hold afterwards.
     `verify_adx_dtype_fix.py` (4 cases incl. flat tape, trending,
     short-input, NaN-laden).
 
+16. **Backtest rewrite (skill 15, 4 PRs, 2026-05-04).** The legacy
+    `Backtester` class (with `use_unified_engine` /
+    `use_alpaca_historical` toggles, `sigma_mult`, and
+    `_build_alpaca_plan_via_decide`) was retired and replaced by a
+    purpose-built `trading_agent/backtest/` package:
+    - **PR #1** Foundations — `black_scholes.py` (pure-stdlib BS via
+      `math.erf`, no scipy), `historical_port.py` (cursor-bound
+      `HistoricalPort` raising `LookaheadError` on access past `now_t`),
+      `synthetic_chain.py` (chain reconstruction from `(spot, σ-proxy,
+      preset's strike grid)`), `types.py` (`SimAccount`,
+      `SimPosition`, `ClosedTrade`, `EquityPoint`, `CycleOutcome`,
+      `BacktestResult`, `BacktestConfig`).
+    - **PR #2** Core loop — `run_one_cycle.py` calls `decide()`
+      directly (CI invariant #2/#3); IV-scaling formula
+      `σ_t = σ_entry × (vix_t / vix_entry)`; hybrid intraday-5m /
+      daily cadence (yfinance ~30-day intraday limit).
+    - **PR #3** Streamlit UI — `streamlit/backtest_ui.py` rewritten
+      around `BacktestRunner`. The literal `decide(` call is preserved
+      via `_preview_decision` so CI invariant #3 still passes.
+    - **PR #4** Docs + CI cleanup — new
+      `docs/skills/15_backtest_live_parity.md`; README, manifest, and
+      this file rewritten; `run_unified_backtest_check.py` and
+      `run_live_vs_backtest_parity_check.py` deleted along with their
+      CI steps; legacy test files (`tests/test_streamlit/test_backtest_ui.py`,
+      `tests/test_backtest/test_black_scholes.py`) replaced /
+      corrected to match the new public surface.
+
 ---
 
 ## 11. Open / not-yet-done
@@ -754,4 +776,7 @@ Suggested opening prompt:
 
 For change requests that touch scoring, pricing, or the C/W floor:
 remind the LLM to run `scripts/checks/scan_invariant_check.py` and
-`scripts/checks/run_live_vs_backtest_parity_check.py` after the change.
+the full `pytest tests/` suite after the change. (The dedicated
+`run_live_vs_backtest_parity_check.py` smoke script was retired
+2026-05-04 — parity is now structural: the backtest package wires
+through `decide()` directly and the AST scanner enforces it.)

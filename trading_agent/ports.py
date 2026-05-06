@@ -158,9 +158,20 @@ class ExecutionPort(Protocol):
 # ---------------------------------------------------------------------------
 @runtime_checkable
 class PositionsPort(Protocol):
-    """Fetch broker-held positions and decide whether any should exit."""
+    """Fetch broker-held positions and decide whether any should exit.
 
-    def fetch_open_positions(self) -> List[Any]: ...
+    fetch_open_positions contract
+    -----------------------------
+    Returns ``None`` on RPC failure (connection reset, timeout, 5xx);
+    returns ``[]`` only when the broker genuinely reports zero
+    positions.  Callers (Stage 1 of the trading cycle) MUST distinguish
+    these two cases — confusing them caused a duplicate DIA submission
+    on 2026-05-05.  See
+    :meth:`trading_agent.position_monitor.PositionMonitor.fetch_open_positions`
+    docstring for the historical context.
+    """
+
+    def fetch_open_positions(self) -> Optional[List[Any]]: ...
 
     def group_into_spreads(self, positions: List[Any],
                            trade_plans: List[Any]) -> List[Any]: ...

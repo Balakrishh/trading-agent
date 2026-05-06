@@ -5,7 +5,7 @@ All chart-building logic lives here so live_monitor, backtest_ui, and
 llm_extension never import plotly directly.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -139,8 +139,20 @@ def regime_bar_chart(regime_df: pd.DataFrame) -> go.Figure:
 # UI Primitives
 # ---------------------------------------------------------------------------
 
-def metric_row(equity: float, pnl: float, regime: str, cycle_secs: int) -> None:
-    """Four-column metrics bar: equity · P&L · regime badge · cycle countdown."""
+def metric_row(
+    equity: float,
+    pnl: float,
+    regime: str,
+    cycle_secs: Optional[int],
+) -> None:
+    """Four-column metrics bar: equity · P&L · regime badge · cycle countdown.
+
+    ``cycle_secs`` is ``None`` when the agent loop is stopped — we render an
+    em-dash and a ``Stopped`` caption rather than a wall-clock countdown,
+    because there is no real cycle to count down to. Passing the wall-clock
+    value when the loop isn't running misleads the operator into believing
+    the agent is about to act.
+    """
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Portfolio Equity", f"${equity:,.2f}")
 
@@ -158,7 +170,10 @@ def metric_row(equity: float, pnl: float, regime: str, cycle_secs: int) -> None:
             unsafe_allow_html=True,
         )
 
-    c4.metric("Next Cycle In", f"{cycle_secs}s")
+    if cycle_secs is None:
+        c4.metric("Next Cycle In", "—", delta="Stopped", delta_color="off")
+    else:
+        c4.metric("Next Cycle In", f"{cycle_secs}s", delta=" ", delta_color="off")
 
 
 def guardrail_cards(guardrail_status: List[Dict]) -> None:
@@ -166,7 +181,19 @@ def guardrail_cards(guardrail_status: List[Dict]) -> None:
     Two rows of 4 guardrail status cards.
 
     Each dict must have keys: name (str), passed (bool), detail (str).
+
+    Optional key ``state`` (str): one of ``"ok"``, ``"warn"``, ``"fail"``.
+    When present, overrides the green/red colour scheme derived from
+    ``passed``.  ``"warn"`` renders an amber card with a ⚠️ icon — used
+    for dry-run forced-open and other "passed but synthetic" states so
+    the operator can see *why* the check passed.  When absent we fall
+    back to the legacy two-state ``passed → ok|fail`` mapping.
     """
+    state_styles = {
+        "ok":   ("✅", "#e8f5e9", "#4caf50"),
+        "warn": ("⚠️", "#fff8e1", "#ffb300"),
+        "fail": ("❌", "#ffebee", "#ef5350"),
+    }
     for row_start in (0, 4):
         cols = st.columns(4)
         for offset, col in enumerate(cols):
@@ -174,9 +201,8 @@ def guardrail_cards(guardrail_status: List[Dict]) -> None:
             if idx >= len(guardrail_status):
                 break
             g = guardrail_status[idx]
-            icon = "✅" if g["passed"] else "❌"
-            bg = "#e8f5e9" if g["passed"] else "#ffebee"
-            border = "#4caf50" if g["passed"] else "#ef5350"
+            state = g.get("state") or ("ok" if g["passed"] else "fail")
+            icon, bg, border = state_styles.get(state, state_styles["ok"])
             col.markdown(
                 f"""<div style="background:{bg};border-left:4px solid {border};
                 padding:8px 10px;border-radius:4px;margin-bottom:6px;min-height:60px">
@@ -187,8 +213,196 @@ def guardrail_cards(guardrail_status: List[Dict]) -> None:
             )
 
 
+def guardrail_grid(grid_rows: List[Dict]) -> None:
+    """Per-ticker × per-guardrail status grid for the latest cycle.
+
+    ``grid_rows`` comes from
+    :func:`live_monitor._guardrail_grid_from_journal` — see its
+    docstring for the row-shape contract.
+
+    We render a hand-rolled HTML table because Streamlit's native
+    ``st.dataframe`` cannot colour cells AND show hover tooltips for
+    the per-check detail string.  The 8 guardrails become the columns
+    so an operator can scan a single row to see which check failed for
+    a given ticker, or scan a single column to see which tickers tripped
+    the same gate this cycle.
+
+    Hover any cell to reveal the verbatim check string from the
+    journal.  Cells are colour-coded:
+
+      ✅ green   — guardrail passed
+      ⚠️ amber   — guardrail passed under a synthetic override
+                   (currently only ``FORCED`` market-open in dry-run)
+      ❌ red     — guardrail failed
+    """
+    if not grid_rows:
+        st.info(
+            "No guardrail data for the current mode yet — start a "
+            "cycle to populate."
+        )
+        return
+
+    # ``skipped`` is the fallback state for tickers with an open
+    # position whose entry-trade history has been rotated out of the
+    # journal — em-dash cells on grey, signalling "we hold something
+    # but don't have its entry context any more". HOLDING rows (the
+    # common case — entry trade is still on record) substitute the
+    # entry trade's actual checks_passed/failed values, so they render
+    # with the same green ``ok`` cells as a fresh APPROVED row.
+    state_emoji   = {"ok": "✅", "warn": "⚠️", "fail": "❌", "skipped": "—"}
+    state_bg      = {"ok": "#e8f5e9", "warn": "#fff8e1",
+                     "fail": "#ffebee", "skipped": "#f5f5f5"}
+    state_text_fg = {"ok": "#1b5e20", "warn": "#8d6e00",
+                     "fail": "#b71c1c", "skipped": "#888888"}
+
+    cols = GUARDRAIL_NAMES
+    th_style = (
+        "text-align:center;padding:6px 6px;font-size:0.78em;"
+        "color:#555;font-weight:600;background:#fafafa;"
+        "border-bottom:1px solid #e0e0e0;white-space:nowrap"
+    )
+    th_first = (
+        "text-align:left;padding:6px 8px;font-size:0.85em;"
+        "color:#555;font-weight:600;background:#fafafa;"
+        "border-bottom:1px solid #e0e0e0"
+    )
+    header = ["Ticker", "Cycle", "Approved"] + cols
+    header_html = "".join(
+        f"<th style='{th_first if i == 0 else th_style}' title='{name}'>{name}</th>"
+        for i, name in enumerate(header)
+    )
+
+    def _esc(s: str) -> str:
+        # Escape for use inside a title="..." attribute.
+        return (
+            s.replace("&", "&amp;")
+             .replace("'", "&#39;")
+             .replace('"', "&quot;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+        )
+
+    body_parts: List[str] = []
+    for row in grid_rows:
+        ts = pd.Timestamp(row["timestamp"]).strftime("%H:%M:%S")
+        # Five-state rendering for the verdict cell:
+        #   approved → ✅ APPROVED   on green (risk manager ran, all checks passed)
+        #   rejected → ❌ REJECTED   on red   (risk manager ran, ≥1 check failed)
+        #   holding  → 🔒 HOLDING    on green (substituted entry-trade
+        #              checks for a FILLED position — the broker is
+        #              currently holding this spread)
+        #   pending  → ⏳ PENDING    on amber (substituted entry-trade
+        #              checks for a SUBMITTED but UNFILLED limit
+        #              order — order is on the book waiting for a
+        #              counterparty; not yet a real position)
+        #   skipped  → ⏸ SKIPPED     on grey  (no entry trade in journal,
+        #              cells render as em-dashes with the journal's
+        #              skip reason as a hover tooltip)
+        # The grid's ``status`` field is the source of truth; we keep
+        # the legacy ``approved`` boolean for back-compat callers.
+        status = row.get("status") or (
+            "approved" if row.get("approved") else "rejected"
+        )
+        if status == "skipped":
+            approved_emoji = "⏸"
+            approved_bg    = state_bg["skipped"]
+            approved_label = "SKIPPED"
+            approved_fg    = state_text_fg["skipped"]
+        elif status == "holding":
+            # Same green palette as APPROVED — visually communicates
+            # "this position cleared the risk manager when it was
+            # opened AND is currently held at the broker". The 🔒
+            # emoji + HOLDING label disambiguates from a freshly-
+            # approved row.
+            approved_emoji = "🔒"
+            approved_bg    = state_bg["ok"]
+            approved_label = "HOLDING"
+            approved_fg    = state_text_fg["ok"]
+        elif status == "pending":
+            # Amber/warn palette — visually distinct from HOLDING's
+            # green so the operator can scan the grid and tell at a
+            # glance which positions are filled vs which are still
+            # waiting. The cells themselves carry the same checks-
+            # passed values as HOLDING (substituted from the entry
+            # trade), so the per-guardrail context is identical.
+            approved_emoji = "⏳"
+            approved_bg    = state_bg["warn"]
+            approved_label = "PENDING"
+            approved_fg    = state_text_fg["warn"]
+        elif status == "closed":
+            # Position-monitor exit fired (added 2026-05-06).  Greyish-
+            # purple distinguishes a closed-this-cycle row from
+            # SKIPPED's "we did nothing" grey and APPROVED's "live
+            # holding" green.  The verdict label says EXITED so the
+            # operator immediately knows the spread is out — and the
+            # journal row's ``raw_signal.exit_signal`` /
+            # ``exit_reason`` carry the justification (rendered into
+            # the row tooltip via ``skip_detail`` upstream).
+            approved_emoji = "🚪"
+            approved_bg    = "#ede7f6"     # very light purple
+            approved_label = "EXITED"
+            approved_fg    = "#4527a0"     # deep purple text
+        elif status == "approved":
+            approved_emoji = state_emoji["ok"]
+            approved_bg    = state_bg["ok"]
+            approved_label = "APPROVED"
+            approved_fg    = state_text_fg["ok"]
+        else:  # "rejected"
+            approved_emoji = state_emoji["fail"]
+            approved_bg    = state_bg["fail"]
+            approved_label = "REJECTED"
+            approved_fg    = state_text_fg["fail"]
+
+        cells_html = [
+            f"<td style='padding:6px 8px;font-weight:600;white-space:nowrap'>{row['ticker']}</td>",
+            f"<td style='padding:6px 8px;color:#777;font-size:0.85em;white-space:nowrap'>{ts}</td>",
+            (
+                f"<td style='padding:6px 8px;text-align:center;background:{approved_bg};"
+                f"color:{approved_fg};font-weight:600;font-size:0.78em;white-space:nowrap'>"
+                f"{approved_emoji} {approved_label}</td>"
+            ),
+        ]
+        for cell in row["cells"]:
+            state    = cell["state"]
+            emoji    = state_emoji.get(state, "·")
+            bg       = state_bg.get(state, "#ffffff")
+            fg       = state_text_fg.get(state, "#444")
+            summary  = cell.get("summary", "") or ""
+            chip     = f"{emoji} {summary}" if summary else emoji
+            cells_html.append(
+                f"<td style='padding:6px 8px;text-align:center;background:{bg};"
+                f"color:{fg};font-size:0.78em;white-space:nowrap;cursor:help' "
+                f"title='{_esc(cell['detail'])}'>{chip}</td>"
+            )
+        body_parts.append(f"<tr>{''.join(cells_html)}</tr>")
+
+    table_html = (
+        "<div style='overflow-x:auto;border:1px solid #e0e0e0;border-radius:4px'>"
+        "<table style='border-collapse:collapse;width:100%;"
+        "font-family:-apple-system,BlinkMacSystemFont,sans-serif'>"
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(body_parts)}</tbody>"
+        "</table>"
+        "</div>"
+        "<p style='font-size:0.75em;color:#888;margin-top:6px'>"
+        "Numbers in each cell are the values that drove the verdict; "
+        "hover for the verbatim check string from the risk manager. "
+        "⚠️ amber = passed under a synthetic override (e.g. dry-run "
+        "FORCED market-open)."
+        "</p>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 def positions_table(spreads: List[Dict]) -> None:
-    """Styled positions table. Each dict is a serialised SpreadPosition."""
+    """Styled positions table. Each dict is a serialised SpreadPosition.
+
+    The ``Source`` column distinguishes plan-matched rows ("📋 plan") from
+    inferred rows ("🔮 inferred") — the latter are spreads reconstructed
+    from broker leg structure when no ``trade_plan_*.json`` matched.
+    Both kinds carry live P&L and exit-signal info; only the recorded
+    entry credit differs in fidelity.
+    """
     if not spreads:
         st.info("No open positions.")
         return
@@ -197,6 +411,8 @@ def positions_table(spreads: List[Dict]) -> None:
         credit = round(s.get("original_credit", 0) * 100, 2)
         pnl = round(s.get("net_unrealized_pl", 0), 2)
         pct = f"{pnl / credit * 100:.1f}%" if credit else "—"
+        origin = s.get("origin", "trade_plan")
+        source_label = "📋 plan" if origin == "trade_plan" else "🔮 inferred"
         rows.append(
             {
                 "Symbol": s.get("underlying", ""),
@@ -206,6 +422,7 @@ def positions_table(spreads: List[Dict]) -> None:
                 "% Profit": pct,
                 "Expiry": s.get("expiration", ""),
                 "Exit Signal": s.get("exit_signal", "hold"),
+                "Source": source_label,
             }
         )
     st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
@@ -245,3 +462,49 @@ def ungrouped_legs_table(legs: List[Dict]) -> None:
 def alert_box(message: str, level: str = "warning") -> None:
     """Render an alert at the given severity level (info/warning/error/success)."""
     getattr(st, level, st.warning)(message)
+
+
+# ---------------------------------------------------------------------------
+# Backtest closed-trades table
+# ---------------------------------------------------------------------------
+
+def closed_trades_table(closed_trades: List) -> None:
+    """Render a sortable table of ``ClosedTrade`` records from a backtest run.
+
+    Mirrors the live dashboard's ``positions_table`` styling so the operator
+    can scan a backtest the same way they scan the live portfolio. Each
+    ``ClosedTrade`` is the immutable record produced by
+    ``trading_agent.backtest.sim_position.SimPosition.close()``.
+    """
+    if not closed_trades:
+        st.info("No closed trades.")
+        return
+
+    rows = []
+    for t in closed_trades:
+        credit = round(float(t.credit_open) * 100.0 * int(t.qty), 2)
+        pnl = round(float(t.realised_pnl or 0.0), 2)
+        pct = f"{pnl / credit * 100:.1f}%" if credit else "—"
+        rows.append(
+            {
+                "Ticker":         t.ticker,
+                "Side":           t.side,
+                "Entry":          getattr(t, "entry_t", None),
+                "Exit":           getattr(t, "exit_t", None),
+                "Days Held":      getattr(t, "days_held", None),
+                "Short K":        round(float(t.short_strike), 2),
+                "Long K":         round(float(t.long_strike), 2),
+                "Width":          round(float(t.spread_width), 2),
+                "Qty":             int(t.qty),
+                "Credit ($)":     round(float(t.credit_open), 2),
+                "Debit Close ($)": round(float(t.debit_close or 0.0), 2),
+                "Realised P&L ($)": pnl,
+                "% Profit":       pct,
+                "σ Entry":        round(float(t.sigma_entry), 4),
+                "σ Exit":         round(float(t.sigma_exit or 0.0), 4),
+                "Exit Signal":    t.exit_signal,
+                "Reason":         t.exit_reason,
+            }
+        )
+    df = pd.DataFrame(rows)
+    st.dataframe(df, width='stretch', hide_index=True)

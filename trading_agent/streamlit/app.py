@@ -46,8 +46,69 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("📈 Trading Agent Dashboard")
-st.caption("Credit-spread options agent · Paper trading · Alpaca Markets")
+# ── Page header with Market-Status badge in the top-right ────────────────
+# Layout: title + caption on the left, OPEN/CLOSED badge floated to the
+# right. Lives at the page root (above ``st.tabs``) so the badge is
+# visible from every tab — the operator never has to scroll into a
+# specific tab to know whether the market is currently in session.
+#
+# The badge consults ``is_within_market_hours()`` which uses the NYSE
+# pandas_market_calendar (correctly handles weekends + holidays + the
+# 5-minute open/close buffers). Same primitive the live agent loop uses,
+# so the badge and the agent's "should-I-trade" decision agree by
+# construction.
+from trading_agent.market_hours import is_within_market_hours  # noqa: E402
+
+_hdr_left, _hdr_right = st.columns([5, 1])
+with _hdr_left:
+    st.title("📈 Trading Agent Dashboard")
+    st.caption("Credit-spread options agent · Paper trading · Alpaca Markets")
+with _hdr_right:
+    # Inline-styled badge — full background fill so it reads at a glance
+    # even on a dense dashboard. Right-aligned via a flex wrapper so the
+    # badge hugs the column's right edge regardless of text length.
+    try:
+        _market_open = is_within_market_hours()
+    except Exception:
+        _market_open = None  # calendar lookup failed — show neutral state
+
+    if _market_open is True:
+        _bg, _label = "#1b8a3a", "🟢 MARKET OPEN"
+    elif _market_open is False:
+        _bg, _label = "#a62a2a", "🔴 MARKET CLOSED"
+    else:
+        _bg, _label = "#5a5a5a", "⚪ MARKET STATUS UNKNOWN"
+
+    st.markdown(
+        f"""
+        <div style="display:flex;justify-content:flex-end;
+                    align-items:center;height:100%;padding-top:1rem">
+          <span style="background:{_bg};color:#fff;padding:0.4rem 0.9rem;
+                       border-radius:6px;font-weight:600;
+                       font-size:0.95rem;letter-spacing:0.02em;
+                       white-space:nowrap;
+                       box-shadow:0 2px 6px rgba(0,0,0,0.18)">
+            {_label}
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# Inject the global busy-overlay stylesheet AND reserve a top-level
+# placeholder for the overlay BEFORE st.tabs(). The placeholder MUST live
+# above the tabs, because Streamlit hides inactive tab panels with
+# `display: none` — and CSS `position: fixed` cannot escape a
+# `display: none` ancestor. An overlay rendered inside the (currently
+# hidden) watchlist tab while the user is on Live tab would be invisible.
+# See trading_agent/streamlit/_busy.py for the full rationale.
+from trading_agent.streamlit._busy import (  # noqa: E402
+    inject_overlay_css,
+    register_top_level_slot,
+)
+
+inject_overlay_css()
+register_top_level_slot()
 
 tab_live, tab_backtest, tab_llm, tab_watchlist = st.tabs(
     ["📡 Live Monitoring", "📊 Backtesting", "🤖 LLM Extension", "📊 Watchlist"]

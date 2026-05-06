@@ -153,8 +153,18 @@ class RiskManager:
             failed.append(f"Account type is '{account_type}' — must be 'paper'")
 
         # --- Check 6: market hours ---
-        if market_open or force_market_open:
+        # Tri-state so the dashboard can distinguish a *real* open from a
+        # dry-run-forced open and render the latter as a warning chip
+        # rather than a green ✅.  The "FORCED — dry-run override" suffix
+        # is the contract — ``streamlit/live_monitor.py`` keys off the
+        # substring ``FORCED`` to flip the guardrail card to amber.  Do
+        # NOT change this string without updating the dashboard sniff.
+        if market_open:
             passed.append("Market is currently OPEN")
+        elif force_market_open:
+            passed.append(
+                "Market is currently OPEN (FORCED — dry-run override)"
+            )
         else:
             failed.append("Market is currently CLOSED")
 

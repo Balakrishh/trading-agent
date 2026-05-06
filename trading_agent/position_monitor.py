@@ -76,6 +76,22 @@ class SpreadPosition:
     """
     Aggregated view of a credit spread (2 or 4 legs) linked back to
     the original trade plan.
+
+    Origin
+    ------
+    ``origin == "trade_plan"`` (default) — every field was sourced from
+    the matching ``trade_plan_*.json``. ``original_credit``, ``max_loss``,
+    ``spread_width`` are the recorded entry economics.
+
+    ``origin == "inferred"`` — the broker has these legs but no
+    ``trade_plan_*.json`` entry matches their symbols (history was
+    rotated out, or the position was opened manually outside the agent).
+    The ``strategy_name`` was reconstructed from the leg structure;
+    ``original_credit`` falls back to the ``cost_basis`` derived from
+    each leg's ``avg_entry_price`` (still useful for monitoring),
+    ``max_loss`` and ``spread_width`` are computed from the strikes.
+    The exit-signal logic still works because it consumes
+    ``current_price`` and ``unrealized_pl`` directly off the legs.
     """
     underlying: str
     strategy_name: str
@@ -88,6 +104,7 @@ class SpreadPosition:
     short_strikes: List[float] = field(default_factory=list)  # short-leg strikes
     exit_signal: ExitSignal = ExitSignal.HOLD
     exit_reason: str = ""
+    origin: str = "trade_plan"    # "trade_plan" | "inferred"
 
 
 class PositionMonitor:
@@ -132,8 +149,34 @@ class PositionMonitor:
     # Fetch positions from Alpaca
     # ------------------------------------------------------------------
 
-    def fetch_open_positions(self) -> List[PositionSnapshot]:
-        """GET /v2/positions — filters to us_option only."""
+    def fetch_open_positions(self) -> Optional[List[PositionSnapshot]]:
+        """GET /v2/positions — filters to us_option only.
+
+        Returns
+        -------
+        list[PositionSnapshot]
+            One entry per open option leg.  Empty list (``[]``) when
+            the broker genuinely reports zero positions — a clean slate.
+        None
+            The HTTP call failed (connection reset, DNS, 5xx, timeout).
+            **The caller MUST treat this as "I don't know what's open"
+            and fail closed** — do NOT confuse it with the empty-list
+            success case, or you'll re-open positions that already
+            exist on the broker.
+
+        Why distinguish None from []
+        ----------------------------
+        Pre-2026-05-05 this method returned ``[]`` on RequestException,
+        which made transient broker outages indistinguishable from a
+        truly empty account.  On 2026-05-05 a single 100 ms TCP reset
+        during Stage 1 of a cycle caused the dedup gate to fail open
+        and submit a duplicate DIA Iron Condor on top of an existing
+        one.  See ``docs/skills/12_multi_timeframe_resolution.md`` §4
+        for the same `*_signal_available: bool` pattern applied
+        elsewhere; this method uses the simpler ``Optional[List]``
+        shape because the caller already had to handle ``not positions``
+        either way.
+        """
         url = f"{self.base_url}/positions"
         try:
             resp = requests.get(url, headers=self._headers(), timeout=ALPACA_TIMEOUT)
@@ -165,29 +208,89 @@ class PositionMonitor:
             return option_positions
 
         except requests.RequestException as exc:
-            logger.error("Failed to fetch positions: %s", exc)
-            return []
+            logger.error(
+                "Failed to fetch positions: %s — returning None so the "
+                "cycle's dedup gate can fail closed (see method docstring).",
+                exc,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Group legs into spread positions
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _extract_inner_plan(plan: Dict) -> Dict:
+        """Return the inner trade_plan dict regardless of caller shape.
+
+        Two callers feed this method, and they historically built
+        ``trade_plans`` differently:
+
+          * ``agent.py:_load_trade_plans`` appends each ``state_history``
+            entry verbatim — i.e. the *envelope*
+            ``{run_id, timestamp, trade_plan: {...}, risk_verdict, ...}``.
+          * ``streamlit/live_monitor.py:_load_positions_with_plans``
+            pre-unwraps in the loop and appends ``entry["trade_plan"]``
+            — i.e. the *inner* plan ``{ticker, strategy, legs, ...}``
+            directly.
+
+        Before this helper existed, ``group_into_spreads`` blindly did
+        ``plan.get("trade_plan", {})``. With the agent's envelope this
+        unwrapped correctly; with the UI's pre-unwrapped shape it
+        returned ``{}`` and silently produced an empty spread list — so
+        the broker had filled positions but the dashboard's
+        Open-Positions panel rendered nothing. The agent's Stage 1
+        monitor still saw them because it passes the envelope shape.
+
+        The helper now supports both shapes: if the dict carries a
+        ``"trade_plan"`` sub-key, use that; otherwise treat the whole
+        dict as the inner plan. A plan is *only* the envelope if it has
+        BOTH the ``"trade_plan"`` key AND that value is itself a dict —
+        guarding against an inner plan that happens to have a key
+        called ``trade_plan`` (it doesn't, but defensive belt+braces).
+        """
+        inner = plan.get("trade_plan")
+        if isinstance(inner, dict):
+            return inner
+        return plan
+
     def group_into_spreads(self, positions: List[PositionSnapshot],
                            trade_plans: List[Dict]) -> List[SpreadPosition]:
         """
         Match open option positions to their original trade plans using
-        the option symbols in each plan's legs.
+        the option symbols in each plan's legs. Any leg that doesn't
+        match a recorded plan is then INFERRED into a spread by leg
+        structure (see ``_infer_spreads_from_legs``) so the dashboard
+        always shows a meaningful aggregated view rather than dumping
+        legs into a separate "ungrouped" section.
+
+        Accepts both envelope-shaped (``{trade_plan: {...}}``) and
+        inner-shaped (``{ticker, legs, ...}``) plan dicts — see
+        ``_extract_inner_plan`` for the rationale.
         """
         spreads = []
+        matched_symbols: set = set()
 
         for plan in trade_plans:
-            tp = plan.get("trade_plan", {})
+            tp = self._extract_inner_plan(plan)
             plan_legs = tp.get("legs", [])
             plan_symbols = {leg["symbol"] for leg in plan_legs}
             if not plan_symbols:
                 continue
 
-            matched_legs = [p for p in positions if p.symbol in plan_symbols]
+            # Skip plans whose every leg has already been claimed by an
+            # earlier matching plan. ``state_history`` typically retains
+            # several plan entries with the same leg-symbol set (re-runs,
+            # duplicate fills, planner re-emissions); without this guard
+            # the same broker spread shows up as N duplicate rows in the
+            # dashboard.
+            if plan_symbols.issubset(matched_symbols):
+                continue
+
+            matched_legs = [
+                p for p in positions
+                if p.symbol in plan_symbols and p.symbol not in matched_symbols
+            ]
             if not matched_legs:
                 continue
 
@@ -209,12 +312,165 @@ class PositionMonitor:
                 net_unrealized_pl=net_pl,
                 expiration=tp.get("expiration", ""),
                 short_strikes=short_strikes,
+                origin="trade_plan",
             )
             spreads.append(spread)
+            matched_symbols.update(p.symbol for p in matched_legs)
+
+        # ── Inference fallback ──────────────────────────────────────────
+        # Anything still in `positions` but not in matched_symbols belongs
+        # to a spread whose trade_plan was rotated out of state_history,
+        # or was opened manually outside the agent. Reconstruct those
+        # spreads from leg structure so the user sees them in the same
+        # table — strategy name, breakeven, P&L all derived from what we
+        # know about the legs themselves.
+        unmatched = [p for p in positions if p.symbol not in matched_symbols]
+        inferred = self._infer_spreads_from_legs(unmatched)
+        spreads.extend(inferred)
 
         # Same hot-path: per-tick + per-Streamlit-refresh. DEBUG.
-        logger.debug("Grouped positions into %d spread(s)", len(spreads))
+        logger.debug(
+            "Grouped positions into %d spread(s) (%d matched, %d inferred)",
+            len(spreads), len(spreads) - len(inferred), len(inferred),
+        )
         return spreads
+
+    @staticmethod
+    def _parse_occ(symbol: str) -> Optional[Dict]:
+        """Decode an OCC option symbol → {underlying, expiration, type, strike}.
+
+        OCC format: ROOT(1-6) + YYMMDD(6) + C/P(1) + STRIKE(8, x1000).
+        Example: ``DIA260529P00483000`` → underlying=DIA, expiration
+        2026-05-29, type=put, strike=483.0. Returns None on a malformed
+        symbol so the caller can skip it without raising.
+        """
+        if len(symbol) < 16:
+            return None
+        try:
+            # Find the date prefix — ROOT is 1-6 chars, then 6 digits.
+            for root_len in range(1, 7):
+                if (len(symbol) >= root_len + 15
+                        and symbol[root_len:root_len + 6].isdigit()
+                        and symbol[root_len + 6] in ("C", "P")
+                        and symbol[root_len + 7:root_len + 15].isdigit()):
+                    underlying = symbol[:root_len]
+                    yymmdd = symbol[root_len:root_len + 6]
+                    cp = symbol[root_len + 6]
+                    strike = int(symbol[root_len + 7:root_len + 15]) / 1000.0
+                    expiration = (
+                        f"20{yymmdd[:2]}-{yymmdd[2:4]}-{yymmdd[4:6]}"
+                    )
+                    return {
+                        "underlying": underlying,
+                        "expiration": expiration,
+                        "type":       "call" if cp == "C" else "put",
+                        "strike":     strike,
+                    }
+        except (ValueError, IndexError):
+            return None
+        return None
+
+    @classmethod
+    def _infer_spreads_from_legs(
+            cls, legs: List[PositionSnapshot]) -> List[SpreadPosition]:
+        """Infer spread structure for legs with no matching trade plan.
+
+        Groups by (underlying, expiration), then classifies the strategy
+        from the count + sign of put-vs-call legs:
+
+          * 2 puts (one short, one long) only       → "Bull Put Spread"
+          * 2 calls (one short, one long) only      → "Bear Call Spread"
+          * 4 legs spanning both calls + puts       → "Iron Condor"
+          * 1 short leg only                        → "Naked Short"
+          * everything else                         → "Multi-leg Position"
+
+        The credit/max-loss math uses each leg's ``avg_entry_price`` to
+        recover the entry economics. The reconstruction is best-effort —
+        if the leg-mix doesn't fit a clean credit-spread shape, the
+        strategy is labelled "Multi-leg Position" but the table row
+        still aggregates so the user can see what's open and the live
+        P&L without each leg being its own row.
+        """
+        # Bucket legs by (underlying, expiration) — that's the natural
+        # spread grouping. Two strategies on the same underlying with
+        # different expirations are independent positions.
+        buckets: Dict[tuple, List[PositionSnapshot]] = {}
+        for leg in legs:
+            occ = cls._parse_occ(leg.symbol)
+            if occ is None:
+                continue
+            key = (occ["underlying"], occ["expiration"])
+            buckets.setdefault(key, []).append(leg)
+
+        out: List[SpreadPosition] = []
+        for (underlying, expiration), grp in buckets.items():
+            # Decode each leg's strike + type for strategy inference.
+            decoded = []
+            for leg in grp:
+                occ = cls._parse_occ(leg.symbol)
+                if occ is None:
+                    continue
+                decoded.append({
+                    "leg":    leg,
+                    "type":   occ["type"],
+                    "strike": occ["strike"],
+                    "side":   leg.side,         # "short" or "long"
+                })
+
+            shorts = [d for d in decoded if d["side"] == "short"]
+            longs  = [d for d in decoded if d["side"] == "long"]
+            puts   = [d for d in decoded if d["type"] == "put"]
+            calls  = [d for d in decoded if d["type"] == "call"]
+
+            # Classify
+            if len(decoded) == 4 and puts and calls and shorts and longs:
+                strategy = "Iron Condor"
+            elif (len(decoded) == 2 and len(puts) == 2 and len(shorts) == 1):
+                strategy = "Bull Put Spread"
+            elif (len(decoded) == 2 and len(calls) == 2 and len(shorts) == 1):
+                strategy = "Bear Call Spread"
+            elif len(decoded) == 1 and shorts:
+                strategy = "Naked Short"
+            else:
+                strategy = "Multi-leg Position"
+
+            # Compute economics from leg snapshots.
+            #   credit (per share) = Σ(short avg_entry) − Σ(long avg_entry)
+            credit = (
+                sum(d["leg"].avg_entry_price for d in shorts)
+                - sum(d["leg"].avg_entry_price for d in longs)
+            )
+            # Max loss for credit spreads = max single-side spread width − credit.
+            # We compute width per side (call wing + put wing for ICs) and
+            # take the wider as the max single-side loss bound.
+            def _wing_width(side_legs):
+                if len(side_legs) != 2:
+                    return 0.0
+                strikes = sorted(d["strike"] for d in side_legs)
+                return strikes[1] - strikes[0]
+
+            put_width  = _wing_width(puts)
+            call_width = _wing_width(calls)
+            spread_width = max(put_width, call_width, 0.0)
+            max_loss = max(0.0, (spread_width - credit) * 100)
+
+            short_strikes = [d["strike"] for d in shorts]
+            net_pl = sum(d["leg"].unrealized_pl for d in decoded)
+
+            out.append(SpreadPosition(
+                underlying=underlying,
+                strategy_name=strategy,
+                legs=[d["leg"] for d in decoded],
+                original_credit=round(credit, 2),
+                max_loss=round(max_loss, 2),
+                spread_width=spread_width,
+                net_unrealized_pl=net_pl,
+                expiration=expiration,
+                short_strikes=short_strikes,
+                origin="inferred",
+            ))
+
+        return out
 
     # ------------------------------------------------------------------
     # Evaluate exit signals

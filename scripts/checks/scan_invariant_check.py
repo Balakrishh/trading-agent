@@ -1,7 +1,7 @@
 """
 AST integration check — invariants that prevent live↔backtest drift.
 
-Three invariants are asserted in CI:
+Four invariants are asserted in CI:
 
 1. **C/W floor formula parity.**
    The expression ``|Δ|×(1+edge_buffer)`` appears identically in
@@ -21,6 +21,17 @@ Three invariants are asserted in CI:
    ``decide(`` (the imported decision_engine entrypoint). If the call
    disappears the unified path is dead code and the backtester is back
    on its homegrown σ-distance heuristic — that's drift.
+
+4. **No synthetic-pricing leak into the live path.**
+   The backtest module (``trading_agent.backtest.*``) builds chains from
+   Black-Scholes synthetic prices. None of the live-path modules
+   (``agent``, ``strategy``, ``executor``, ``chain_scanner``,
+   ``decision_engine``, ``risk_manager``, ``market_data``,
+   ``streamlit/live_monitor``, ``streamlit/watchlist_ui``,
+   ``streamlit/app``) may import from ``trading_agent.backtest`` —
+   doing so would let synthetic Black-Scholes prices reach a real
+   order-submission path, which is exactly what the architecture
+   forbids.
 
 Exits 0 if all invariants hold, 1 otherwise.
 """
@@ -50,6 +61,25 @@ ALLOWED_SCORING_DEFINERS = ("chain_scanner.py", "decision_engine.py")
 
 # File that must call decide() — the parity seam between live + backtest.
 BACKTEST_FILE = "streamlit/backtest_ui.py"
+
+# Live-path modules that MUST NOT import from trading_agent.backtest.*. The
+# backtest package builds option chains from synthetic Black-Scholes
+# pricing; allowing the live path to reach in would cause synthetic
+# prices to flow into a real Alpaca order. Streamlit's backtest tab is
+# allowed (it's the consumer of the backtest module by design); the
+# live tab and every shared business module are not.
+LIVE_PATH_FILES = (
+    "agent.py",
+    "strategy.py",
+    "executor.py",
+    "chain_scanner.py",
+    "decision_engine.py",
+    "risk_manager.py",
+    "market_data.py",
+    "streamlit/live_monitor.py",
+    "streamlit/watchlist_ui.py",
+    "streamlit/app.py",
+)
 
 
 def _has_floor_formula(tree: ast.AST) -> bool:
@@ -118,6 +148,29 @@ def _calls_decide(tree: ast.AST) -> bool:
     return False
 
 
+def _imports_backtest_module(tree: ast.AST) -> list[str]:
+    """Return any ``trading_agent.backtest.*`` import targets the tree contains.
+
+    Catches both ``import trading_agent.backtest.X`` and
+    ``from trading_agent.backtest[.X] import …`` shapes. Returns the list
+    of imported module strings so the caller can show what leaked.
+    """
+    leaks: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if (alias.name == "trading_agent.backtest"
+                        or alias.name.startswith("trading_agent.backtest.")):
+                    leaks.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "trading_agent.backtest" or \
+               mod.startswith("trading_agent.backtest."):
+                names = ", ".join(a.name for a in node.names)
+                leaks.append(f"{mod} ({names})")
+    return leaks
+
+
 def main() -> int:
     failures = []
 
@@ -178,6 +231,24 @@ def main() -> int:
             )
         else:
             print(f"  OK   {BACKTEST_FILE}: decide() call wired in")
+
+    # ── Invariant 4: live path doesn't import backtest module ────────────
+    print("\nInvariant 4: no synthetic-pricing leak into the live path")
+    print("              (live modules cannot import trading_agent.backtest.*)")
+    for fname in LIVE_PATH_FILES:
+        path = ROOT / fname
+        if not path.exists():
+            failures.append(f"{fname}: file not found (Invariant 4)")
+            continue
+        tree = ast.parse(path.read_text())
+        leaks = _imports_backtest_module(tree)
+        if leaks:
+            failures.append(
+                f"{fname}: imports backtest module(s) {leaks!r} — "
+                f"synthetic-pricing leak forbidden in live path"
+            )
+        else:
+            print(f"  OK   {fname}: no backtest imports")
 
     if failures:
         print("\nFAIL — invariant broken:")

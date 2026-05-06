@@ -27,6 +27,12 @@ JSONL record schema
   "exec_status": str   (mirrors action or final order status)
   "notes":       str   (brief human-readable summary ≤ 120 chars)
   "raw_signal": {
+      "mode":                  str   ("LIVE" | "DRY-RUN") — appended by
+                                      agent.py:_log_signal so the dashboard
+                                      can scope its guardrail panel to the
+                                      currently-selected mode.  Legacy rows
+                                      written before this field existed are
+                                      treated as LIVE for filtering.
       "regime":                str
       "strategy":              str
       "plan_valid":            bool

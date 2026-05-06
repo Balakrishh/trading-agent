@@ -12,6 +12,7 @@ An autonomous trading agent that generates daily income through high-probability
 - [Live ↔ Backtest Unified Decision Engine](#live--backtest-unified-decision-engine)
 - [Intelligence & Sentiment Layers (Optional)](#intelligence--sentiment-layers-optional)
 - [Streamlit Dashboard](#streamlit-dashboard)
+- [Multi-provider market data](#multi-provider-market-data)
 - [Setup & Configuration](#setup--configuration)
 - [Project Structure](#project-structure)
 - [Signal Journal Format](#signal-journal-format)
@@ -154,9 +155,9 @@ Every trade must pass **all eight checks** before execution:
 
 ## Live ↔ Backtest Unified Decision Engine
 
-The previous biggest source of drift was that the live agent ran a `(DTE × Δ × width)` adaptive sweep through `ChainScanner.scan()` while the backtester ran a homegrown σ-distance heuristic in `_alpaca_historical_plan` — different strike picker, different credit pricing, different EV/POP logic, no shared code. Any change on one side could silently diverge the other.
+The previous biggest source of drift was that the live agent ran a `(DTE × Δ × width)` adaptive sweep through `ChainScanner.scan()` while the backtester ran a homegrown σ-distance heuristic with three separate credit-pricing modes — different strike picker, different credit pricing, different EV/POP logic, no shared code. Any change on one side could silently diverge the other.
 
-The May 2026 unification reshapes this around a single pure function:
+The **May 2026 backtester rewrite** (`trading_agent/backtest/`) collapses this entirely. The backtester no longer owns *any* trading logic; it is a thin replay shim that reuses the live primitives:
 
 ```
 chain_scanner.py            ← pure helpers (_quote_credit, _score_candidate_with_reason)
@@ -164,18 +165,29 @@ chain_scanner.py            ← pure helpers (_quote_credit, _score_candidate_wi
         ▼
 decision_engine.decide()    ← pure scoring entrypoint (no I/O)
         │
-        ├──── ChainScanner.scan()                          (live)
-        └──── Backtester._build_alpaca_plan_via_decide()   (backtest)
+        ├──── ChainScanner.scan()                  (live)
+        └──── trading_agent.backtest.run_one_cycle (backtest)
 ```
 
-`decision_engine.decide(DecisionInput) -> DecisionOutput` is a pure function with no I/O, no calendar lookups, no broker calls. It takes `ChainSlice`s in (one expiration's `{strike, delta, bid, ask, symbol}` dicts plus the DTE), runs the full `(Δ × width)` sweep, and returns ranked `SpreadCandidate`s plus a `ScanDiagnostics` block. Both clients (`ChainScanner.scan` and `Backtester._build_alpaca_plan_via_decide`) delegate to it — neither owns the scoring logic.
+`decision_engine.decide(DecisionInput) -> DecisionOutput` is a pure function with no I/O, no calendar lookups, no broker calls. It takes `ChainSlice`s in (one expiration's `{strike, delta, bid, ask, symbol}` dicts plus the DTE), runs the full `(Δ × width)` sweep, and returns ranked `SpreadCandidate`s plus a `ScanDiagnostics` block. Live (`ChainScanner.scan`) and backtest (`run_one_cycle`) both delegate to it — neither owns the scoring logic.
 
-**Backtester opt-in.** Pass `use_unified_engine=True` and `preset=<PresetConfig>` to `Backtester(...)`, or flip the **Unified Decision Engine** toggle in the Streamlit Backtesting tab. When set, `_build_alpaca_plan_for_expiration` synthesises a `ChainSlice` from Alpaca-historical contracts + bars (bar close stands in for both bid and ask; |Δ| approximated from σ_hold via Black-Scholes since Alpaca's historical endpoints don't return Greeks) and delegates to `decide()`. When unset, the legacy σ-distance heuristic still runs — preserved for the existing test suite.
+**Backtest package layout** (`trading_agent/backtest/`, full reference in [`docs/skills/15_backtest_live_parity.md`](docs/skills/15_backtest_live_parity.md)):
+
+| Module | Role |
+|---|---|
+| `clock.py` | Calendar-aware iterator (NYSE trading days × intraday bar times). Hybrid cadence — intraday 5-min when window ≤ ~30 days, daily otherwise. |
+| `historical_port.py` | `HistoricalPort` wraps `MarketDataProvider`/yfinance with a hard cursor; reading past `now_t` raises `LookaheadError`. |
+| `synthetic_chain.py` | Builds a `ChainSlice` (the dict shape `decide()` expects) from `(spot, σ-proxy, preset's strike grid)`. |
+| `account.py` | `SimAccount` cash + open-market-value ledger; commission $0.65/leg. |
+| `sim_position.py` | Open-spread bookkeeping with **VIX-proxy IV scaling** for re-marks: `σ_t = σ_entry × (vix_t / vix_entry)`. Exit logic delegates to `PositionMonitor._check_exit`. |
+| `cycle.py` | `run_one_cycle` — single PERCEIVE → CLASSIFY → PLAN → RISK → EXECUTE step calling live `decide()` / `RiskManager` / `calculate_position_qty`. |
+| `runner.py` | `BacktestRunner` drives the clock, emits a `BacktestResult` (equity curve + closed trades). |
+| `streamlit/backtest_ui.py` | ~475-line UI shim (down from ~4,057 pre-rewrite). Settings → run → render. |
 
 **Drift-prevention enforcement** lives in three places:
 
-1. **`scan_invariant_check.py`** — AST walker (CI). Asserts (a) the `|Δ|×(1+edge_buffer)` C/W floor formula appears in `chain_scanner.py`, `risk_manager.py`, and `executor.py`; (b) no module *outside* `chain_scanner` and `decision_engine` defines `_score_candidate`, `_score_candidate_with_reason`, or `_quote_credit`; (c) `streamlit/backtest_ui.py` contains a `decide(...)` call.
-2. **`run_live_vs_backtest_parity_check.py`** — end-to-end smoke driver that builds a synthetic chain, feeds it to *both* `ChainScanner.scan()` and `Backtester._build_alpaca_plan_via_decide()`, and asserts identical strike picks + matching credit (Δ ≤ $0.01).
+1. **`scan_invariant_check.py`** — AST walker (CI). Asserts (a) the `|Δshort|×(1+edge_buffer)` C/W floor formula appears in `chain_scanner.py`, `risk_manager.py`, and `executor.py`; (b) no module *outside* `chain_scanner` and `decision_engine` defines `_score_candidate`, `_score_candidate_with_reason`, or `_quote_credit`; (c) `streamlit/backtest_ui.py` contains a literal `decide(` call.
+2. **Cursor-bound port.** `HistoricalPort` raises `LookaheadError` if any code path tries to read a bar past `now_t`. Removes a class of "future leakage" bugs by construction.
 3. **Separate journal files.** Live writes `trade_journal/signals_live.jsonl`; backtest writes `trade_journal/signals_backtest.jsonl`. The LLM analyst corpus and the live-monitor diagnostics panel deliberately read only the live file so synthetic backtest counterfactuals can't bias guardrail recommendations. `JournalKB.__init__` accepts `run_mode={"live","backtest"}`; an unknown value raises `ValueError`.
 
 **Smoke checks** (run in CI; see `scripts/checks/README.md`):
@@ -183,49 +195,20 @@ decision_engine.decide()    ← pure scoring entrypoint (no I/O)
 ```bash
 python3 scripts/checks/scan_invariant_check.py                # AST invariants
 python3 scripts/checks/run_scan_diagnostics_check.py          # ChainScanner + decide() integration
-python3 scripts/checks/run_unified_backtest_check.py          # Backtester unified-path smoke
 python3 scripts/checks/run_journal_split_check.py             # JournalKB run_mode split
-python3 scripts/checks/run_live_vs_backtest_parity_check.py   # end-to-end parity
 ```
 
-All five must pass before any change to scoring, pricing, or floor logic ships.
+All three must pass before any change to scoring, pricing, or floor logic ships. (The legacy `run_unified_backtest_check.py` and `run_live_vs_backtest_parity_check.py` were retired with the May 2026 backtest rewrite — live ↔ backtest parity is now structural since the backtest package wires through `decide()` directly.)
 
-### Backtester Parity Matrix (residual drift)
+### Backtest Pricing Model
 
-The backtester runs three credit-pricing paths depending on configuration. Only Alpaca-historical produces a per-bar dynamic credit derived from real option-market data; the others are heuristics.
-
-| Mode | Trigger | Credit formula | Honest window |
-|---|---|---|---|
-| **Alpaca historical** | `use_alpaca_historical=True` | `short_close − long_close` from real `/v1beta1/options/bars` | Last ~30 calendar days |
-| **σ-credit synthetic** | `sigma_mult` set, no Alpaca | `width × clip(0.45 − 0.15·σ_mult, 0.05, 0.45)` | Any range; model not quote |
-| **Legacy fixed-% OTM** | `sigma_mult=None` | `width × credit_pct` (default `5 × 0.30 = $1.50`) | Calibration only |
-
-**Recommended live-parity configuration:**
-
-```python
-Backtester(
-    use_alpaca_historical=True,
-    use_macro_signals=True,        # VIX inhibit + leadership-z bias
-    use_iv_gate=True,
-    use_earnings_gate=True,
-    use_unified_engine=True,       # delegate strike/credit to decision_engine.decide()
-    preset=PRESETS["balanced"],
-    min_credit_ratio=0.33,
-    max_delta=0.20,
-    max_risk_pct=0.02,
-    stop_loss_pct=0.50,
-    profit_target_pct=0.75,
-)
-```
+Per-bar credit comes from a Black-Scholes synthetic chain (`bs_price` in `trading_agent/backtest/black_scholes.py`, no scipy dependency) reconstructed from the historical spot, the preset's strike grid, and an IV proxy seeded from realised σ at entry. Daily re-marks scale that IV by the VIX ratio `vix_t / vix_entry`. This is honest within a single regime; for multi-regime backtests the intraday cadence (≤ 30 days, real 5-min spot bars) gives the most faithful exits.
 
 **Known residual drift sources (track here so they don't get rediscovered as bugs):**
 
-1. **Adaptive spread width** — backtester uses the fixed `spread_width` arg; live scales with spot/grid. Material on $500+ underlyings.
-2. **Chain-sourced δ picker** — δ is *labelled* via the analytic `_delta_from_sigma_distance` mapping, not read from the chain's listed `delta` column. Near-no-op when realized σ ≈ implied σ; can pick neighbouring strikes when they diverge. Regression: `TestAlpacaHistoricalSigmaHorizon`.
-3. **Mean-Reversion priority** — Priority 1 of live `plan()` is absent from the backtest run-loop.
-4. **Bid/ask spread modelling** — Alpaca-historical uses `close − close`; live fills against bid/ask. Slightly over-estimates real credit.
-
-**Recently closed gaps (Apr 2026)** — Friday-weekly preference in `_pick_alpaca_expiration` (penalty for non-Friday expirations); credit-ratio gate now fires in alpaca-historical mode (was silently bypassed); structured rejection reasons in `_alpaca_historical_plan` (`no_expiration_in_window`, `no_bars_on_entry_day`, `long_leg_off_grid`, …); trade-journal `expiry_date` reflects the actual OCC contract expiration; expiration-fallback loop on data-availability failures (up to 3 retries; new token `no_bars_after_fallbacks`).
+1. **Bid/ask spread modelling** — synthetic chain treats mid = bid = ask. Live fills against bid/ask, so backtest credit slightly over-estimates real credit. Compensated partially by the per-leg commission ($0.65) charged on both open and close.
+2. **Mean-Reversion priority** — Priority 1 of live `plan()` is not yet wired through the backtest run-loop. Vertical (Bull Put / Bear Call) and Iron Condor coverage is full.
+3. **Greeks from BS, not from chain** — listed `delta` is the BS delta at the synthetic IV, not the broker-reported Greek. Near-no-op when synthetic IV ≈ implied; can pick neighbouring strikes when they diverge.
 
 ---
 
@@ -323,14 +306,11 @@ The Live Monitoring tab has a Strategy Profile expander that controls the four k
 
 `STRATEGY_PRESET.json` is written atomically (temp + rename). Missing / malformed JSON falls back to **Balanced** (logged) so a fresh install is always operational without touching the dashboard.
 
-### Backtesting Live Quote Refresh
+### Backtest Quote Model
 
-The backtester mirrors the live `executor._refresh_limit_price()` pattern: immediately before simulating each trade it fetches a fresh option chain from Alpaca and re-validates `min_credit_ratio` and per-contract max-loss. Two gates govern when refresh actually runs:
+After the May 2026 rewrite (skill 15) the backtester no longer hits Alpaca for an "is the live quote still good?" refresh — every per-bar credit comes from the Black-Scholes synthetic chain (`trading_agent/backtest/synthetic_chain.py`) reconstructed from the historical spot, the preset's strike grid, and an IV proxy seeded from realised σ at entry. Re-marks scale that IV by the VIX ratio. This eliminates the previous `_SNAPSHOT_FRESH_DAYS` heuristic and the "is this entry too old to refresh?" gating logic; a backtest that reaches the same `(spot, σ, VIX)` triple twice deterministically produces the same credit twice.
 
-1. **Bypassed in `use_alpaca_historical` mode.** Historical mode already fetched the real chain for the actual entry date; refreshing against today's snapshot would produce nonsense drift warnings.
-2. **Gated by `_SNAPSHOT_FRESH_DAYS=3`.** In snapshot mode, an entry older than 3 days is skipped because today's quote is structurally meaningless as a proxy.
-
-Regression: `tests/test_streamlit/test_backtest_ui.py::TestRefreshGating`.
+Regression: `tests/test_backtest/test_black_scholes.py`, `tests/test_backtest/test_synthetic_chain.py`, `tests/test_backtest/test_sim_position.py`.
 
 ### Watchlist Tab
 
@@ -347,6 +327,58 @@ A read-only analyst surface for multi-timeframe regime monitoring. Add tickers v
 **Refresh model.** `@st.cache_data(ttl=WATCHLIST_REFRESH_SECS)` (default 60s) keyed on `(ticker, intervals_tuple, refresh_token)`. The `↻ Refresh` button bumps the token for immediate invalidation; otherwise the cache self-expires every minute so yfinance doesn't get rate-limited.
 
 Regression: `tests/test_market_data.py::TestFetchIntradayBars`, `tests/test_multi_tf_regime.py`, `tests/test_watchlist_store.py`, `tests/test_watchlist_chart.py`.
+
+---
+
+## Multi-provider market data
+
+The agent supports three market-data providers behind the `MarketDataPort` protocol, dispatched per-surface via env vars. Alpaca remains the execution broker regardless — only the **data plane** is swappable.
+
+| Provider | Options + Greeks | Real-time NBBO | Notes |
+|---|---|---|---|
+| `alpaca` (default) | yes | only on paid OPRA tier (`indicative` is 15-min delayed on free) | Same creds the executor uses |
+| `schwab` | yes (real-time) | yes — free for Schwab brokerage holders | OAuth 2.0; tokens rotate every 30 min, re-auth weekly |
+| `yahoo` | **no** (returns `None`) | **no** | yfinance — fine for charts/regime, unsupported for the live trading surface |
+
+**Per-surface routing.** The factory walks `MARKET_DATA_PROVIDER_<SURFACE>` → `MARKET_DATA_PROVIDER` → `alpaca`. Recognised surfaces: `LIVE` (the agent's cycle), `WATCHLIST` (the dashboard's chart + regime tab and market-open badge), `BACKTEST` (reserved). Example mixed config:
+
+```bash
+MARKET_DATA_PROVIDER=alpaca               # global default
+MARKET_DATA_PROVIDER_LIVE=schwab          # agent trades on real-time Schwab quotes
+MARKET_DATA_PROVIDER_WATCHLIST=alpaca     # dashboard reads Alpaca
+MARKET_DATA_PROVIDER_BACKTEST=yahoo       # backtester reads yfinance
+```
+
+The watchlist tab's resolved provider is logged at startup (`MarketData factory: surface='watchlist' → provider=alpaca`).
+
+### Schwab one-time setup
+
+Only required if any surface is set to `schwab`.
+
+1. Register an app at [developer.schwab.com](https://developer.schwab.com/) → "Add a new app", select "Individual Developer", set the redirect URI to `https://127.0.0.1:8182`, choose API Product = **Trader API**. Wait for the status to change to "Ready For Use".
+2. Add the credentials to `.env`:
+   ```
+   MARKET_DATA_PROVIDER_LIVE=schwab
+   SCHWAB_CLIENT_ID=<your app key>
+   SCHWAB_CLIENT_SECRET=<your app secret>
+   SCHWAB_REDIRECT_URI=https://127.0.0.1:8182
+   ```
+3. Run the one-time authorization-code exchange:
+   ```bash
+   python -m trading_agent.schwab_oauth login
+   ```
+   The CLI prints a Schwab login URL — open it in a browser logged into your Schwab account, click Approve. Schwab redirects to `https://127.0.0.1:8182/?code=…&session=…`. Your browser will show a "connection refused" page (expected — nothing's running on port 8182), but the URL bar contains the authorization code. Paste the full URL back into the CLI prompt; it extracts the code, exchanges it for tokens, and persists to `~/.schwab_tokens.json`.
+4. Verify with `python -m trading_agent.schwab_oauth status`.
+
+**Refresh-token lifetime is 7 days, absolute.** The 30-min access token refreshes silently inside the agent loop, but every 7 days you need to re-run `login`. The agent will log a clear WARNING with the exact CLI command when this happens.
+
+**Why a manual login at all?** OAuth's authorization-code flow requires the brokerage account holder to physically click "Approve" once. This is regulatory (data-access consent) and can't be bypassed by storing your username/password — that would violate Schwab's TOS and their API rules.
+
+### Symbol-format note
+
+Schwab option symbols are **space-padded** (`"AMZN  220617C03170000"`); the rest of the agent uses **compact OCC** (`"AMZN220617C03170000"`). Translation happens at the adapter boundary, so the agent always speaks compact OCC. If you ever see a padded symbol in `signals_live.jsonl` or a trade plan, that's a leak worth filing.
+
+See [skill 16](docs/skills/16_market_data_provider_routing.md) for the deeper architectural reference.
 
 ---
 
@@ -387,6 +419,12 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 | `FORCE_MARKET_OPEN` | `false` | Bypass market-hours check (paper testing) |
 | `ALPACA_STOCKS_FEED` | `iex` | `iex` (free) or `sip` (paid SIP) |
 | `ALPACA_OPTIONS_FEED` | `indicative` | `indicative` (free, 15-min delayed) or `opra` (paid real-time) |
+| `MARKET_DATA_PROVIDER` | `alpaca` | Global default provider — `alpaca`, `schwab`, or `yahoo`. See "Multi-provider market data" below. |
+| `MARKET_DATA_PROVIDER_LIVE` | _(inherits)_ | Per-surface override for the trading agent loop |
+| `MARKET_DATA_PROVIDER_WATCHLIST` | _(inherits)_ | Per-surface override for the Watchlist tab + market-open badge |
+| `MARKET_DATA_PROVIDER_BACKTEST` | _(inherits)_ | Reserved — backtester currently uses its own historical port |
+| `SCHWAB_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | _(empty)_ | Required when any surface is set to `schwab`. See setup walkthrough. |
+| `SCHWAB_TOKEN_PATH` | `~/.schwab_tokens.json` | Where the OAuth helper persists access + refresh tokens |
 | `LOG_MAX_BYTES` | `10485760` | Per-file log rotation threshold (10 MB) |
 | `LOG_BACKUP_COUNT` | `7` | Rollover files retained |
 
@@ -514,6 +552,17 @@ trading-agent/
 │   ├── position_monitor.py
 │   ├── order_tracker.py
 │   │
+│   │   # ── Backtesting ──
+│   ├── backtest/
+│   │   ├── black_scholes.py         # Pure stdlib BS pricing + Greeks (no scipy)
+│   │   ├── clock.py                 # NYSE-calendar iterator (intraday vs daily cadence)
+│   │   ├── historical_port.py       # Cursor-bound MarketDataProvider wrapper (LookaheadError)
+│   │   ├── synthetic_chain.py       # Builds ChainSlice from (spot, σ, strike grid)
+│   │   ├── account.py               # SimAccount cash + open-market-value ledger
+│   │   ├── sim_position.py          # Open-spread bookkeeping + VIX-proxy IV scaling
+│   │   ├── cycle.py                 # run_one_cycle: PERCEIVE → CLASSIFY → PLAN → RISK → EXECUTE
+│   │   └── runner.py                # BacktestRunner — drives the clock, emits BacktestResult
+│   │
 │   │   # ── Core Intelligence ──
 │   ├── journal_kb.py                 # Always-on signal logger (live | backtest split)
 │   ├── trade_journal.py              # Full-lifecycle trade logging
@@ -533,7 +582,7 @@ trading-agent/
 │   └── streamlit/
 │       ├── app.py                    # 4-tab dashboard entrypoint
 │       ├── live_monitor.py           # Live tab — broker-gated, watchdog-driven refresh
-│       ├── backtest_ui.py            # Backtest tab — Backtester + unified-engine toggle
+│       ├── backtest_ui.py            # Backtest tab — thin shim around trading_agent.backtest.BacktestRunner
 │       ├── llm_extension.py          # LLM tab — RAG over signals_live.jsonl
 │       ├── watchlist_ui.py           # Watchlist tab — multi-tf regime table + macro strip
 │       ├── watchlist_chart.py        # Watchlist tab — 4-row Plotly chart, pure-pandas indicators

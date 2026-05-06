@@ -52,6 +52,66 @@ logger = logging.getLogger(__name__)
 MAX_HISTORY = 200   # max state_history entries kept per ticker
 
 
+# ----------------------------------------------------------------------
+# Position-sizing primitive — single source of truth
+# ----------------------------------------------------------------------
+#
+# Lifted out of OrderExecutor as a module-level free function so the
+# backtester (``trading_agent/backtest/account.py``) can import the
+# *exact* same sizing math the live executor uses, with no risk of
+# drift.  ``OrderExecutor._calculate_qty`` now delegates here.  This
+# keeps the live↔backtest sizing parity invariant honest by construction
+# — there is one definition, period.
+def calculate_position_qty(plan: SpreadPlan, account_balance: float,
+                           max_risk_pct: float,
+                           live_credit: Optional[float] = None) -> int:
+    """
+    Size contracts so the position's total max loss stays within the
+    same budget the RiskManager validated against (``max_risk_pct ×
+    equity`` — guardrail #4).
+
+    ::
+
+        credit                 = live_credit if provided else plan.net_credit
+        max_loss_per_contract  = (spread_width − credit) × 100
+        qty                    = floor(max_risk_pct × equity
+                                       / max_loss_per_contract)
+
+    Parameters
+    ----------
+    plan
+        The validated ``SpreadPlan`` whose contracts are being sized.
+    account_balance
+        Current equity (live = Alpaca account balance; backtest =
+        ``SimAccount.equity``).
+    max_risk_pct
+        Per-trade ceiling expressed as a fraction of equity.  Must
+        match the value the RiskManager used when approving the plan
+        (typically ``RiskManager.max_risk_pct`` or
+        ``preset.max_risk_pct``) — otherwise sizing and the guardrail
+        would diverge.
+    live_credit
+        When provided, overrides ``plan.net_credit`` — used at
+        submission time to size off the haircut credit the order will
+        actually carry, not the stale planning credit.
+
+    Returns
+    -------
+    int
+        Number of contracts.  **0** when no integer quantity fits
+        inside the budget (e.g. a single contract's max loss alone
+        exceeds the ceiling, or inputs are non-positive).  The caller
+        MUST treat 0 as "abort submission" — never silently floor to 1,
+        which would otherwise bypass the guardrail.
+    """
+    credit = live_credit if live_credit is not None else plan.net_credit
+    max_loss_per_contract = (plan.spread_width - credit) * 100
+    if max_loss_per_contract <= 0 or account_balance <= 0:
+        return 0
+    max_risk_dollars = account_balance * max_risk_pct
+    return int(max_risk_dollars // max_loss_per_contract)
+
+
 class OrderExecutor:
     """
     Fires multi-leg option orders to Alpaca Paper API, or writes
@@ -66,6 +126,17 @@ class OrderExecutor:
     # Submitting at mid - 1 tick lets the order land aggressively enough to
     # actually fill instead of camping at the un-fillable mid.
     OPTION_TICK = 0.05
+
+    # When live quote refresh fails and we fall back to the synthetic
+    # plan.net_credit, apply this haircut before submitting. Synthetic
+    # credit comes from Black-Scholes pricing, which assumes zero
+    # bid-ask spread; real markets always discount that mid by at least
+    # 10-15% on the bid side. Without the haircut the limit lands at an
+    # un-fillable price and the order sits open until day-end (Alpaca
+    # returns DAY-tif orders). The haircut still has to clear the C/W
+    # floor — `_recheck_live_economics` runs after this and rejects the
+    # submission if the post-haircut credit drops below the floor.
+    FALLBACK_HAIRCUT_PCT = 0.15   # 15 %
 
     def __init__(self, api_key: str, secret_key: str,
                  base_url: str = "https://paper-api.alpaca.markets/v2",
@@ -147,33 +218,18 @@ class OrderExecutor:
     def _calculate_qty(self, plan: SpreadPlan, account_balance: float,
                        live_credit: Optional[float] = None) -> int:
         """
-        Size contracts so the position's total max loss stays within the
-        same budget the RiskManager validated against (``max_risk_pct ×
-        equity`` — guardrail #4).
+        Thin instance-bound delegator to the module-level
+        :func:`calculate_position_qty` — kept on the class so existing
+        callers (and the unit-test suite that mocks ``executor`` instances)
+        continue to work unchanged.
 
-        ::
-
-            credit                 = live_credit if provided else plan.net_credit
-            max_loss_per_contract  = (spread_width − credit) × 100
-            qty                    = floor(max_risk_pct × equity
-                                           / max_loss_per_contract)
-
-        Passing ``live_credit`` ensures sizing reflects the refreshed
-        bid/ask at submission time rather than the stale planning-time
-        credit — see ``_submit_order``.
-
-        Returns **0** when no integer quantity fits inside the budget (e.g.
-        a single contract's max loss alone exceeds the ceiling, or inputs
-        are non-positive).  The caller MUST treat 0 as "abort submission"
-        — never silently floor to 1, which would otherwise bypass the
-        guardrail.
+        The math is documented on :func:`calculate_position_qty`.  The
+        live executor and the backtest's ``SimAccount`` import the same
+        free function so sizing is computed by exactly one piece of code.
         """
-        credit = live_credit if live_credit is not None else plan.net_credit
-        max_loss_per_contract = (plan.spread_width - credit) * 100
-        if max_loss_per_contract <= 0 or account_balance <= 0:
-            return 0
-        max_risk_dollars = account_balance * self.max_risk_pct
-        return int(max_risk_dollars // max_loss_per_contract)
+        return calculate_position_qty(
+            plan, account_balance, self.max_risk_pct, live_credit
+        )
 
     def _recheck_live_economics(self, plan: SpreadPlan,
                                 live_credit: float,
@@ -274,12 +330,24 @@ class OrderExecutor:
         # limit_price reflects what the market is actually offering.
         live_credit = self._refresh_limit_price(plan)
         if live_credit is None:
-            # Quote fetch failed — fall back to the planned credit and warn
+            # Quote fetch failed → apply FALLBACK_HAIRCUT_PCT to the
+            # synthetic plan credit so the limit price is more aligned
+            # with what a real market maker is willing to pay. The
+            # original behaviour (use plan.net_credit verbatim) priced
+            # too rich and orders sat open at the limit until DAY-tif
+            # expiry. The post-haircut credit is still re-validated
+            # against the C/W floor below — a haircut that breaches
+            # the floor causes the submission to be rejected, not
+            # silently downgraded.
+            haircut_credit = round(
+                plan.net_credit * (1.0 - self.FALLBACK_HAIRCUT_PCT), 2)
             logger.warning(
-                "[%s] Could not refresh live quotes — using planned "
-                "credit $%.2f as limit_price (may not fill)",
-                plan.ticker, plan.net_credit)
-            live_credit = plan.net_credit
+                "[%s] Quote refresh failed — applying %.0f%% fallback "
+                "haircut: planned $%.2f → submit $%.2f (so the limit "
+                "lands closer to typical bid).",
+                plan.ticker, self.FALLBACK_HAIRCUT_PCT * 100,
+                plan.net_credit, haircut_credit)
+            live_credit = haircut_credit
         else:
             drift = abs(live_credit - plan.net_credit)
             drift_pct = drift / plan.net_credit if plan.net_credit else 0
@@ -489,9 +557,32 @@ class OrderExecutor:
         """
         Close an open credit spread.
         Uses DELETE /v2/positions/{symbol} for each leg individually.
+
+        Leg ordering — close shorts before longs
+        ----------------------------------------
+        Alpaca evaluates "is the account uncovered?" between each leg
+        DELETE.  If we close the long-call hedge first, the remaining
+        short call becomes momentarily *naked*, and Alpaca rejects with
+        ``account not eligible to trade uncovered option contracts``
+        (or "insufficient buying power for cash-secured put" on a
+        put-side leg).
+
+        On 2026-05-06 this produced a flurry of red ERROR lines mid-
+        close — the legs eventually closed (the executor retries until
+        Alpaca accepts) but the log was noisy and the operator couldn't
+        tell at a glance whether the close had succeeded.
+
+        Sorting legs ascending by qty puts shorts (qty<0) first, longs
+        (qty>0) last.  Each intermediate state then has *more* longs
+        than shorts (or equal), so the account is never naked and
+        Alpaca accepts each DELETE on the first try.
         """
+        ordered_legs = sorted(
+            spread.legs,
+            key=lambda leg: getattr(leg, "qty", 0),
+        )
         results = []
-        for leg in spread.legs:
+        for leg in ordered_legs:
             results.append(self._close_single_leg(leg.symbol))
 
         all_ok = all(r.get("status") == "closed" for r in results)

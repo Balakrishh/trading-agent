@@ -924,8 +924,13 @@ class MarketDataProvider:
         feed = os.getenv("ALPACA_OPTIONS_FEED", "indicative").strip() or "indicative"
         params = {"symbols": ",".join(symbols), "feed": feed}
         try:
+            # Use the longer timeout (15s) here — this is the
+            # pre-submission quote refresh and a stale fallback at the
+            # synthetic credit causes orders to sit unfilled all day.
+            # Better to wait an extra 5 seconds than to limit-price at
+            # an un-fillable level.
             resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=ALPACA_TIMEOUT)
+                                params=params, timeout=ALPACA_TIMEOUT_LONG)
             resp.raise_for_status()
             snapshots = resp.json().get("snapshots", {}) or {}
             quotes = {}
