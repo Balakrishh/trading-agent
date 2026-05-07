@@ -2,7 +2,7 @@
 
 A concise, citation-backed handoff document for cross-LLM context transfer. Every claim below is grounded in `file:line` references so a new collaborator can verify against the source instead of trusting prose.
 
-Last verified: 2026-05-05 against repo state at HEAD.
+Last verified: 2026-05-06 against repo state at HEAD.
 
 ---
 
@@ -98,6 +98,13 @@ Full regime → strategy table in `README.md:82-89`.
 3. **Backtester wires through `decision_engine.decide()`** — `streamlit/backtest_ui.py` must contain at least one `decide(` call. Live and backtest paths share one decision function. See skill 15.
 
 A new LLM should run `python scripts/checks/scan_invariant_check.py` after any structural change.
+
+### 1f-bis. Broker-interaction safety (added 2026-05-06)
+Three runtime invariants that aren't AST-enforceable but are equally critical for live trading. See skills 17 and 18.
+
+1. **`client_order_id` on every `POST /v2/orders`.** Generated client-side once per plan, reused across up to 2 retry attempts. Alpaca dedupes server-side so a network-blip retry can never produce a doubled position. Source: `executor.py:_submit_order_with_idempotency`.
+2. **Position-fetch fails closed.** `position_monitor.fetch_open_positions` returns `Optional[List]`; `None` means "I don't know what's open." Stage 2 short-circuits on `None` to prevent duplicate submissions. 2-attempt retry with 0.5s backoff added 2026-05-06.
+3. **Partial-close zombie detection.** After `PARTIAL_CLOSE_COOLDOWN_THRESHOLD=3` consecutive partial fills on a single ticker, auto-close is suppressed for `CLOSE_COOLDOWN_MINUTES=60` and the dashboard renders a 🚨 manual-intervention banner. Pre-cooldown rows show streak (1/3, 2/3) so the lockout doesn't surprise. Source: `agent.py:_record_partial_close`, `agent.py:_journal_close_event`, `streamlit/live_monitor.py:_render_close_failures_today`.
 
 ### 1g. Strategy Profile preset system — the central control surface
 `trading_agent/strategy_presets.py` bundles the four knobs that meaningfully change credit-spread economics into a single `PresetConfig` dataclass: `max_delta`, per-strategy DTE (vertical / iron condor / mean reversion), spread-width policy, C/W floor, max account risk %, directional bias, and the adaptive scan grids.
@@ -264,6 +271,18 @@ A new LLM should **not** re-litigate any of these. Each fix has a regression tes
 ### 4j. Logging volume pass (completed)
 Hot-path logs in `position_monitor.py:162-163` and `market_data.py:185-495` were demoted from INFO to DEBUG to keep the live monitor scrollable.
 
+### 4k. Production-readiness bundle (2026-05-06)
+Eight resolved issues bundled into one pre-live audit. See skills 17, 18, 19 and the updated skill 16 for the full reference; tests under `tests/test_close_cooldown.py` and `tests/test_production_readiness.py`.
+
+- **Order-submission idempotency.** `client_order_id` UUID + 2-attempt retry on `POST /v2/orders`. Skill 18.
+- **Schwab OAuth refresh hardening.** 3 attempts, exponential backoff, distinct permanent-vs-transient handling. Skill 16 §3.
+- **Position fetch + batch snapshot retry.** 2 attempts with 0.5s backoff. Preserves fail-closed `None` semantics on position fetch.
+- **`action="close_failed"` distinct from `action="closed"`.** Partial-fill zombies no longer count toward the "Closed Today" tile; the new "Close Failures Today" panel surfaces them. Skill 17.
+- **Partial-close cooldown.** 3-strike → 60-min lockout per ticker. Cooldown timestamp embedded in the `close_failed` journal row so the dashboard can render a manual-intervention banner without log scraping. Skill 17.
+- **PDT same-day `REGIME_SHIFT` suppression.** On sub-$25K accounts the agent holds same-day-opened positions overnight rather than triggering Alpaca's PDT lockout (HTTP 403 / code 40310100). Real-risk exits (`STRIKE_PROXIMITY`, `HARD_STOP`, `DTE_SAFETY`) still fire. Skill 17.
+- **`action="warning"` journal row.** New `JournalKB.log_warning` helper surfaces retry exhaustion + OAuth failures to the Recent Journal Entries panel. Skill 19.
+- **Daily P&L tile + staleness beacon.** `metric_row` now shows realized + unrealized (was unrealized only); a beacon below it warns at 5min / errors at 10min if the journal is stale.
+
 ---
 
 ## Regression test suite
@@ -296,10 +315,12 @@ Plus the architectural invariant scan: `scripts/checks/scan_invariant_check.py`.
 > - **Lead-z renders `— (no data vs X)` when `leadership_signal_available=False`** — that's intentional, not a bug. Indicates Alpaca IEX feed had insufficient 5-min bars (weekend, off-hours, sector-ETF anchor on free feed).
 > - **Default LLM backend is Ollama**; Anthropic / OpenAI / LM Studio are alternatives. MLX is not integrated.
 > - **Six `verify_*.py` harnesses** at `/sessions/determined-eager-goodall/verify_*.py` — these are the regression suite the sandbox runs (no pytest deps required). Run them after any change to `regime.py`, `multi_tf_regime.py`, or `streamlit/watchlist_ui.py`.
-> - **Market-data plane is hexagonal**: three providers (Alpaca / Schwab / Yahoo) sit behind the `MarketDataPort` Protocol, dispatched per-surface by `build_market_data_provider(surface=...)` in `trading_agent/market_data_factory.py`. Env-var resolution: `MARKET_DATA_PROVIDER_<SURFACE>` → `MARKET_DATA_PROVIDER` → `alpaca`. Alpaca is always the execution broker; only the data plane is swappable. Schwab uses OAuth 2.0 (30-min access tokens, 7-day refresh tokens, `python -m trading_agent.schwab_oauth login` to bootstrap). When changing market-data behavior, prefer extending an existing adapter over a new branch in agent code; the agent core only sees the port. Skill 16 is the canonical reference.
+> - **Market-data plane is hexagonal**: three providers (Alpaca / Schwab / Yahoo) sit behind the `MarketDataPort` Protocol, dispatched per-surface by `build_market_data_provider(surface=...)` in `trading_agent/market_data_factory.py`. Env-var resolution: `MARKET_DATA_PROVIDER_<SURFACE>` → `MARKET_DATA_PROVIDER` → `alpaca`. Alpaca is always the execution broker; only the data plane is swappable. Schwab uses OAuth 2.0 (30-min access tokens, 7-day refresh tokens, `python -m trading_agent.schwab_oauth login` to bootstrap). The OAuth `_refresh` retries 3× with exponential backoff on 5xx/429/network errors and short-circuits on 4xx (revoked refresh-token = re-auth required, no retries wasted). Snapshot + position fetches both retry 2× with 0.5s backoff. When changing market-data behavior, prefer extending an existing adapter over a new branch in agent code; the agent core only sees the port. Skill 16 is the canonical reference.
+> - **Broker-interaction safety story.** Three runtime invariants you must not break: (1) every `POST /v2/orders` carries a `client_order_id` UUID generated client-side and reused across retries (Alpaca dedupes server-side, so a network blip can never produce a doubled position — skill 18); (2) `position_monitor.fetch_open_positions()` returns `Optional[List]` and the dedup gate fails closed on `None` to prevent duplicate submissions during a transient broker outage; (3) partial-fill close zombies are tagged `action="close_failed"` (NOT `"closed"`), counted toward a per-ticker streak, and parked in a 60-min cooldown after 3 strikes — see skill 17. The dashboard's "Close Failures Today" panel auto-expands when any ticker is in active cooldown.
+> - **Journal action enumeration is closed.** Stable string keys live in `journal_kb._DEDUP_BYPASS_ACTIONS` plus the action-handling code in `agent.py` and `streamlit/live_monitor.py`. Adding a new value is a coordinated change — update the bypass set if material, add UI rendering for it, document in skill 19. Today's enum: `submitted | dry_run | rejected | error | warning | closed | dry_run_close | close_failed | skipped_existing | skipped_bias | skipped_rsi_gate | skipped_defense_first | skipped_by_llm | skipped_liquidation_mode | skipped | cycle_timeout | daily_drawdown_circuit_breaker`.
 >
 > Before proposing any change, grep the active invariant guards (`scan_invariant_check.py`, `run_journal_split_check.py`, `run_scan_diagnostics_check.py`) under `scripts/checks/` to understand what's protected. The two parity smoke scripts (`run_unified_backtest_check.py`, `run_live_vs_backtest_parity_check.py`) were retired 2026-05-04 with the backtest rewrite — parity is now structural via the `trading_agent/backtest/` package wiring through `decide()` directly, enforced by AST invariant #2/#3.
 
 ---
 
-*This manifest reflects repo state at 2026-05-05. If you're reading it more than a week later, re-verify the citations — strategy parameters and dataclass fields move quickly.*
+*This manifest reflects repo state at 2026-05-06. If you're reading it more than a week later, re-verify the citations — strategy parameters and dataclass fields move quickly.*

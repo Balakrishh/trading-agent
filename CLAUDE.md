@@ -90,4 +90,4 @@ If the user reaffirms the request after the explanation, proceed — but documen
 
 ---
 
-*Last updated: 2026-05-03 against repo HEAD.*
+*Last updated: 2026-05-06 against repo HEAD.*

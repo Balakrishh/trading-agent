@@ -92,6 +92,38 @@ The one-time login is invoked manually:
 python -m trading_agent.schwab_oauth login
 ```
 
+### Refresh retry policy (added 2026-05-06)
+
+Pre-2026-05-06 `_refresh` was one-shot: it raised `RuntimeError` on the first non-200 response. A single transient 5xx or network blip during the 30-min refresh window halted the agent until manual intervention. For live trading that's an unacceptable single point of failure — a 30-second retry budget is cheap relative to watching the operator's screen forever.
+
+```text
+REFRESH_MAX_ATTEMPTS    = 3
+REFRESH_BACKOFF_BASE    = 2.0      # 2s after attempt 1, 4s after attempt 2
+REFRESH_BACKOFF_CAP_S   = 8.0      # cap so total never exceeds cycle runway
+```
+
+Decision tree per attempt:
+- **200** → success, ingest token, persist atomically.
+- **429 OR 5xx** → transient, sleep and retry.
+- **400 / 401 / other 4xx** → PERMANENT (refresh-token revoked, client credentials wrong, scope issue) — short-circuit immediately and raise `RuntimeError("...permanently failed...refresh-token likely revoked; re-auth required.")`. No retries wasted on permanent failures.
+- **Network exception** (RequestException) → transient, sleep and retry.
+- **All attempts exhausted** → raise `RuntimeError("...failed after N attempts...")`. Surfaced to the operator via the Schwab adapter's WARNING log path; in practice the agent's downstream "no data" symptoms (price=0, regime=unknown) cause cycle skips that the dashboard's staleness beacon then surfaces.
+
+```python
+# trading_agent/schwab_oauth.py:334-462 — see source for the full
+# retry loop. Worst-case latency at all 3 attempts: 15s × 3 + (2s + 4s)
+# backoff = ~51s. Inside the cycle's 270s hard guard.
+```
+
+### Snapshot + position-fetch retry (added 2026-05-06)
+
+`MarketDataProvider.fetch_batch_snapshots` and `PositionMonitor.fetch_open_positions` both got 2-attempt retry with brief backoff on the same date. Rationale:
+
+- `fetch_batch_snapshots` — 09:30 ET market-open surge regularly produced 10s read-timeouts on the snapshot endpoint, blanking regime classification for the entire 5-min cycle. `SNAPSHOT_RETRY_ATTEMPTS=2`, `SNAPSHOT_RETRY_BACKOFF_S=0.5`.
+- `fetch_open_positions` — preserves the fail-closed `None` return on retry exhaustion (so the dedup gate still fails closed) but recovers from a single 100ms TCP reset instead of skipping the cycle. `POSITION_FETCH_RETRY_ATTEMPTS=2`, `POSITION_FETCH_RETRY_BACKOFF_S=0.5`.
+
+Both also emit `journal_kb.log_warning` rows (`action="warning"`) on retry exhaustion so the dashboard surfaces the connectivity issue without requiring a log scrape. See skill 19 for the warning-row schema.
+
 ### Symbol-format quirk — Schwab vs everyone else
 
 Schwab option symbols are **space-padded to 21 chars**: `"AMZN  220617C03170000"` (root padded to 6).  Standard OCC compact: `"AMZN220617C03170000"`.  The adapter exposes `to_schwab_symbol()` / `from_schwab_symbol()` translators so the agent always speaks compact OCC; conversion happens at the adapter boundary in `fetch_option_chain` and `fetch_option_quotes`.
@@ -120,7 +152,10 @@ def from_schwab_symbol(schwab: str) -> str:
 
 - **No tokens on disk** — `SchwabOAuth.get_access_token()` raises `RuntimeError("No Schwab tokens on disk yet…")`.  `SchwabMarketDataProvider._get` catches this, logs a one-time WARNING with the exact CLI fix (`python -m trading_agent.schwab_oauth login`), then drops to DEBUG so the log isn't spammed every cycle.  All Schwab-routed surfaces will see no data until login completes.
 - **Refresh token expired (>7 days)** — Same `RuntimeError` path.  Operator must re-run the login flow.
+- **Refresh-time transient failure (5xx, 429, network blip)** — `_refresh` retries up to 3 times with exponential backoff (2s/4s, capped at 8s).  Pre-2026-05-06 a single 5xx halted the agent until manual restart; the retry budget is tuned to recover from typical gateway hiccups without racing the cycle's 270s hard guard.  See §3 "Refresh retry policy" above.
+- **Refresh-time permanent failure (4xx ≠ 429)** — Refresh-token revoked, client credentials wrong, scope misconfigured.  `_refresh` short-circuits on the first 4xx (no retries) and raises `RuntimeError("...permanently failed...refresh-token likely revoked; re-auth required.")`.  Operator runs the login CLI and the next cycle resumes.
 - **401 mid-flight** — `_get` clears the cached token (`oauth._tokens = None`), refreshes once, retries the request.  If the retry also fails, returns `None` and the caller decides how to degrade.
+- **Snapshot batch timeout (Alpaca)** — `fetch_batch_snapshots` retries once with 0.5s backoff (typical 09:30 ET market-open queue surge).  After exhaustion returns `{}` and the agent's per-cycle skip behaviour kicks in.  Same retry shape on `fetch_open_positions` (`PositionMonitor`), preserving the fail-closed `None` semantics so the dedup gate stays safe.
 - **Schwab IV is in percent** — `volatility=22.31` means 22.31%, not 0.2231.  The adapter divides by 100 in `_normalize_contract` so the rest of the agent sees decimals (matches Alpaca/yfinance convention).
 - **Schwab option symbols have spaces** — Always translate at the adapter boundary; never let a padded symbol leak into the executor or journal.
 - **Yahoo provider on a live surface** — `fetch_option_chain` returns `None` and `fetch_option_quotes` returns `{}`.  The agent's cycle will skip every ticker (no chains → no plans).  Yahoo is intentionally unsupported for the live surface; stick to Alpaca/Schwab there.
@@ -133,8 +168,10 @@ def from_schwab_symbol(schwab: str) -> str:
 
 - `00_sdlc_and_conventions.md` — explains the hexagonal port pattern and why the agent core depends on `MarketDataPort` instead of any concrete provider class.
 - `15_backtest_live_parity.md` — the backtester wires through `decide()` independently of market-data provider routing; the `MARKET_DATA_PROVIDER_BACKTEST` env var is reserved for a future enhancement (the backtester currently uses its own historical port).
+- `18_order_submission_idempotency.md` — companion safety story on the EXECUTION side; together skills 16/18 cover all retry paths against external vendors.
+- `19_journal_schema.md` — `action="warning"` schema used to surface retry-exhausted vendor failures to the dashboard.
 - Setup steps: see [`README.md`](../../README.md) §"Multi-provider market data" for env-var examples and the Schwab OAuth setup walkthrough.
 
 ---
 
-*Last verified against repo HEAD on 2026-05-05.*
+*Last verified against repo HEAD on 2026-05-06.*

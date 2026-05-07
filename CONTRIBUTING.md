@@ -46,6 +46,10 @@ Run through this table. **Every "yes" is a place you must update in the same PR.
 | New `PresetConfig` field | add field with default; update `to_summary_line()`; thread through `agent.py:169-204` to all 3 components; expose in Streamlit panel | review |
 | New rejection reason | add to `REJECT_*` taxonomy in `chain_scanner.py:53-62`; update `_score_candidate_with_reason` | review |
 | New strategy or regime label | update `strategy.py` dispatch, `thesis_builder.py`, watchlist UI, snapshot tests | review |
+| New journal `action` value | add to `_DEDUP_BYPASS_ACTIONS` (`journal_kb.py:95-101`) if material; add UI rendering in `live_monitor.py` (verdict cell + at least one panel/tile); document in skill 19 | review |
+| Order-submission code path | preserve the `client_order_id` UUID generated once per plan and re-used across retries; never generate a fresh UUID in a retry branch (skill 18, CI invariant: see `tests/test_production_readiness.py`) | review + tests |
+| Close path / `close_spread` result handling | partial fills must journal `action="close_failed"` not `"closed"`; call `_record_partial_close` / `_clear_close_cooldown` BEFORE `_journal_close_event` so the row captures resulting cooldown state (skill 17) | review + tests |
+| Vendor retry policy | use the per-call constants (`ORDER_RETRY_*`, `REFRESH_MAX_ATTEMPTS`, `SNAPSHOT_RETRY_*`, `POSITION_FETCH_RETRY_*`); on retry exhaustion call `journal_kb.log_warning(source=...)` so the dashboard surfaces it (skill 19) | review |
 
 If you find yourself unsure whether your change touches a hook, ask in the PR description. "I don't think this touches the C/W floor" is a fine line to write — it makes the reviewer check explicitly.
 
@@ -217,6 +221,11 @@ These are real bugs that have shipped or nearly shipped. Each one has a correspo
 - **Wiring `delta_aware_floor` into 2 of 3 consumers.** Plans pass strategy → fail risk → look like planner bugs. All three components in `agent.py:191-224`.
 - **Forgetting to update `to_summary_line()` for a new preset field.** Field is invisible on the dashboard; nobody knows it's active.
 - **Reformatting a regime reasoning string without updating snapshot tests.** Breaks UI tooltips and the LLM thesis builder.
+- **Generating a fresh UUID inside an order-submission retry branch.** Defeats the whole point of `client_order_id`; broker can't dedupe. The UUID is generated once per plan and threaded into the retry helper as a parameter — keep it that way. Skill 18 §4.
+- **Tagging a partial-fill close as `action="closed"`.** That's how the SPY zombie incident on 2026-05-06 produced 11 false "closed today" rows. Use `"close_failed"` for any `fill_status != "complete"`. Skill 17.
+- **Calling `_journal_close_event` BEFORE the cooldown bookkeeping.** The row will miss the resulting `close_cooldown_until` field and the dashboard banner won't fire. Order: bookkeeping first, then journal. See `agent.py:867-994`.
+- **Adding a journal `action` value without surfacing it in the dashboard.** Rows render in Recent Journal Entries as a vague "rejected" label and the verdict-cell taxonomy doesn't know what to do with them. Update `live_monitor.py:1500+` and at least one panel/tile.
+- **Skipping a `journal_kb.log_warning` after retry exhaustion.** Then the failure is log-only and the dashboard tells the operator everything is fine. Always emit a warning row when a vendor retry budget is exhausted.
 
 ---
 
@@ -236,6 +245,10 @@ Copy this into your PR description and tick before requesting review. The PR tem
 - [ ] Backtest seam — backtest_ui.py still calls `decide(` (CI invariant 3).
 - [ ] `RegimeAnalysis` schema — daily path AND `_classify_intraday()` updated.
 - [ ] New `PresetConfig` field — defaulted, surfaced in `to_summary_line()` + Streamlit panel + threaded through `agent.py:169-204`.
+- [ ] New journal `action` — added to `_DEDUP_BYPASS_ACTIONS` (if material) + UI rendering (`live_monitor.py` verdict cell + at least one panel) + skill 19 documentation.
+- [ ] Order submission code — `client_order_id` UUID still generated once per plan and reused across retries (skill 18).
+- [ ] Close path — partial fills journal `action="close_failed"` (not `"closed"`); cooldown bookkeeping runs BEFORE `_journal_close_event` (skill 17).
+- [ ] Vendor retry — exhaustion paths emit `journal_kb.log_warning(source=...)` so the dashboard surfaces the failure.
 
 ### Conventions (skill 00 §5)
 - [ ] No new class-attr constants — tunables in `PresetConfig`.
@@ -280,4 +293,4 @@ Reviewers should not approve a PR that skips the SDLC, even if the diff "looks f
 
 ---
 
-*Last updated: 2026-05-03 against repo HEAD. Mirrors [`docs/skills/00_sdlc_and_conventions.md`](docs/skills/00_sdlc_and_conventions.md).*
+*Last updated: 2026-05-06 against repo HEAD. Mirrors [`docs/skills/00_sdlc_and_conventions.md`](docs/skills/00_sdlc_and_conventions.md).*

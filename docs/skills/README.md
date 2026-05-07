@@ -6,7 +6,7 @@ Atomic, reusable concepts extracted from the trading agent. Each file is self-co
 
 ---
 
-## Phase 1 (16 skills + meta, dependency-ordered)
+## Phase 1 (19 skills + meta, dependency-ordered)
 
 Read top-to-bottom on a first pass. Each row's "Depends on" column lists the prerequisite skills. **Skill 00 is mandatory first reading** — it's the meta-skill covering glossary, SDLC, and conventions that every other skill assumes you've internalised.
 
@@ -29,19 +29,22 @@ Read top-to-bottom on a first pass. Each row's "Depends on" column lists the pre
 | 14 | [Adaptive vs static scan modes](14_adaptive_vs_static_scan_modes.md) | architecture | `strategy.py:158-205, 302-334` |
 | 15 | [Backtest↔live parity](15_backtest_live_parity.md) | architecture | `trading_agent/backtest/`, `streamlit/backtest_ui.py` |
 | 16 | [Market-data provider routing](16_market_data_provider_routing.md) | architecture | `market_data_factory.py`, `market_data_schwab.py`, `market_data_yahoo.py`, `schwab_oauth.py` |
+| 17 | [Close-failure action + cooldown + PDT](17_close_failure_and_cooldown.md) | risk | `agent.py:124-200, 867-1265`, `streamlit/live_monitor.py:1095-1316` |
+| 18 | [Order-submission idempotency (`client_order_id` + retry)](18_order_submission_idempotency.md) | risk | `executor.py:60-76, 299-541` |
+| 19 | [Signal-journal schema (action enum + dedup bypass)](19_journal_schema.md) | architecture | `journal_kb.py:95-101, 155-432` |
 
 ## Phase 2 (planned, not yet written)
 
 Hygiene and diagnostics. Useful but not edge-defining.
 
-- `17_open_bar_skip.md` — Why we drop the first N bars after the open auction.
-- `18_stale_data_age_detection.md` — `last_bar_ts` + 30-min wall-clock badge.
-- `19_signal_availability_sentinel.md` — The `*_signal_available: bool` design pattern.
-- `20_trend_conflict_detector.md` — 200-SMA slope vs short-term — diagnostic only.
-- `21_bollinger_bandwidth_regime.md` — The 4 % SIDEWAYS rule, in isolation.
-- `22_account_risk_pct_sizing.md` — Conservative 1 % / Balanced 2 % / Aggressive 3 %.
-- `23_regime_to_strategy_routing.md` — The dispatch table from `README.md:82-89`.
-- `24_width_aware_max_loss.md` — `(width − credit) × multiplier`.
+- `20_open_bar_skip.md` — Why we drop the first N bars after the open auction.
+- `21_stale_data_age_detection.md` — `last_bar_ts` + 30-min wall-clock badge.
+- `22_signal_availability_sentinel.md` — The `*_signal_available: bool` design pattern.
+- `23_trend_conflict_detector.md` — 200-SMA slope vs short-term — diagnostic only.
+- `24_bollinger_bandwidth_regime.md` — The 4 % SIDEWAYS rule, in isolation.
+- `25_account_risk_pct_sizing.md` — Conservative 1 % / Balanced 2 % / Aggressive 3 %.
+- `26_regime_to_strategy_routing.md` — The dispatch table from `README.md:82-89`.
+- `27_width_aware_max_loss.md` — `(width − credit) × multiplier`.
 
 ---
 
@@ -72,8 +75,8 @@ If you only have 30 minutes:
 - **Minute 18–25:** Skills 11, 12 — the regime classifier and how it composes across timeframes.
 - **Minute 25–30:** Skill 13 — the preset system, which is the central control surface.
 
-If you have a full afternoon, read 00 first, then all 15 in order.
+If you have a full afternoon, read 00 first, then all 19 in order.
 
 ---
 
-*Last updated: 2026-05-05 against repo HEAD.*
+*Last updated: 2026-05-06 against repo HEAD.*

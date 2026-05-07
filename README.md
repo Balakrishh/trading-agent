@@ -280,7 +280,7 @@ streamlit run trading_agent/streamlit/app.py
 
 | Tab | Features |
 |---|---|
-| **📡 Live Monitoring** | Agent Start / Stop / Dry-Run · cycle PID · equity · P&L · regime badge · open positions · equity curve · 8-guardrail status · agent log · Strategy Profile applier · journal expander |
+| **📡 Live Monitoring** | Agent Start / Stop / Dry-Run · cycle PID · equity · **Daily P&L (realized + unrealized)** · regime badge · **cycle-staleness beacon** · open positions · **Closed Today** + **Close Failures Today** panels · equity curve · 8-guardrail status · agent log · Strategy Profile applier · journal expander |
 | **📊 Backtesting** | Date range · multi-ticker · timeframe (1Day / 5Min) · Live Quote Refresh · **Unified Decision Engine** toggle (preset selector) · simulated P&L · per-regime bars · equity + drawdown · trade log · CSV / JSON / Journal export |
 | **🤖 LLM Extension** | Chat with local Ollama model (RAG over `signals_live.jsonl`) · Optimize Strategy → one-click `.env` update |
 | **📊 Watchlist** | Persistent ticker watchlist (`knowledge_base/watchlist.json`) · multi-timeframe regime table (1d / 4h / 1h / 15m / 5m) · ADX strength badge · VIX-z macro strip · 4-row Plotly chart (Price + overlays / Volume / Oscillators / Trend) with 6 timeframes (5m → 1d) and indicator toggles. **Read-only — never imports `decision_engine`, `chain_scanner`, `executor`, or `risk_manager`.** |
@@ -288,6 +288,18 @@ streamlit run trading_agent/streamlit/app.py
 **Refresh model.** Refresh is event-driven via `watchdog`. A single per-process `Observer` (wrapped in `@st.cache_resource`) watches `trade_journal/` and `trade_plans/`; loaders cache by `(version, mtime, size)` so unrelated reruns hit the cache and only real journal writes invalidate. Default tick is `LIVE_MONITOR_REFRESH_SECS=3` (was 30). Kill switches: `WATCHDOG_DISABLE=1` (fall back to mtime polling) and `WATCHDOG_FORCE_POLLING=1` (NFS / network mounts where inotify is unavailable).
 
 **Broker-state gating.** Alpaca account / positions / clock fetches in the Live Monitor are TTL-cached (`BROKER_STATE_TTL_SECS=30`) and **only run when the agent loop is started** — opening Streamlit alone makes zero broker calls. A manual `↻ Refresh broker state` button is shown when the loop is stopped, for ad-hoc inspection.
+
+### Operator surfaces (added 2026-05-06)
+
+Three pre-live-trading visibility additions worth knowing about:
+
+**Daily P&L tile.** The metric row's "Unrealized P&L" became "Daily P&L" — sum of unrealized from open positions PLUS realized from today's `action="closed"` rows. The split is rendered as the delta caption (`realized $+80 / unrealized $-20`). After the first close of the day the headline number now reflects true daily performance instead of just open-position drift.
+
+**Cycle-staleness beacon.** Sits below the metric row. When the loop is running but the latest journal timestamp is more than 5 minutes old, an orange warning appears; over 10 minutes, a red error directing the operator to logs and the Stop/Start orphan-sweep path. Suppressed when the loop is stopped (the operator already knows nothing's running).
+
+**Closed Today + Close Failures Today.** Two collapsible panels below Open Positions. **Closed Today** counts only complete fills (all legs accepted); **Close Failures Today** filters to `action="close_failed"` rows where Alpaca rejected one or more legs (PDT, uncovered, insufficient buying power) and the position is still open on the broker. The Failures panel auto-expands when any ticker is in a 60-min cooldown and renders a 🚨 manual-intervention banner with the cooldown deadline. Pre-cooldown rows show progress as `2/3` in the Streak column.
+
+See [`docs/skills/17_close_failure_and_cooldown.md`](docs/skills/17_close_failure_and_cooldown.md), [`docs/skills/18_order_submission_idempotency.md`](docs/skills/18_order_submission_idempotency.md), and [`docs/skills/19_journal_schema.md`](docs/skills/19_journal_schema.md) for the underlying mechanics.
 
 ### Strategy Profile
 
@@ -608,7 +620,13 @@ trading-agent/
 
 Live cycles append one JSON object per line to `trade_journal/signals_live.jsonl`; backtests append to `trade_journal/signals_backtest.jsonl`. The two files use identical schema. When the sentiment pipeline is active each record also carries `fingpt_sentiment`, `fingpt_event_risk`, `fingpt_recommendation`, `fingpt_agreement`, `fingpt_hallucination_flags`, and `fingpt_verified_by`.
 
-**Action values:** `dry_run`, `submitted`, `rejected`, `skipped_by_llm`, `skipped_existing`, `skipped_liquidation_mode`, `skipped_bias`, `skipped`, `error`, `cycle_timeout`, `daily_drawdown_circuit_breaker`.
+**Action values:** `dry_run`, `submitted`, `rejected`, `closed`, `close_failed`, `dry_run_close`, `warning`, `skipped_by_llm`, `skipped_existing`, `skipped_liquidation_mode`, `skipped_bias`, `skipped_rsi_gate`, `skipped_defense_first`, `skipped`, `error`, `cycle_timeout`, `daily_drawdown_circuit_breaker`. Full schema reference: [`docs/skills/19_journal_schema.md`](docs/skills/19_journal_schema.md).
+
+**Material actions bypass the dedup gate** — `submitted`, `closed`, `close_failed`, `error`, `warning`, `dry_run`, `dry_run_close` — so successive cycles never silently suppress them. Rejection-spam actions (`rejected`, `skipped_*`) get per-ticker dedup with periodic heartbeat rows (every 12 cycles by default).
+
+**`close_failed`** (added 2026-05-06) tags a partial-fill close where one or more legs were rejected by Alpaca (PDT, uncovered, insufficient buying power); the position is **still open on the broker**. After 3 consecutive partial fills on a single ticker the agent enters a 60-min cooldown and the dashboard's Close Failures Today panel renders a 🚨 manual-intervention banner. See [`docs/skills/17_close_failure_and_cooldown.md`](docs/skills/17_close_failure_and_cooldown.md).
+
+**`warning`** (added 2026-05-06) is emitted by `JournalKB.log_warning(source=...)` when a vendor retry budget is exhausted — order submission timed out N times, Schwab OAuth refresh failed N times, position fetch failed N times. Carries the `client_order_id` (when applicable) so an operator can search the broker UI to confirm whether any attempt landed.
 
 ### `scan_results` block (adaptive scanner only)
 
