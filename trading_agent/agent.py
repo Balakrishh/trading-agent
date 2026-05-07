@@ -45,6 +45,8 @@ Several concerns previously inlined in this file were extracted:
 The TradingAgent class is a thin orchestrator over those modules.
 """
 
+from __future__ import annotations
+
 import contextlib
 import glob
 import json

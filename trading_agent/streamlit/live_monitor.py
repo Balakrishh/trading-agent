@@ -20,6 +20,8 @@ State is persisted in three files:
     AGENT_LOG      — last 200 lines of agent stdout/stderr
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -29,7 +31,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st

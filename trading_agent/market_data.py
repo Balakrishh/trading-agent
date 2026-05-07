@@ -19,6 +19,8 @@ option snapshots from the Alpaca Market Data API.
    tickers in a single Alpaca API call instead of N separate calls.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

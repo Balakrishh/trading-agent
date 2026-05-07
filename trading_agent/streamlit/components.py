@@ -5,6 +5,8 @@ All chart-building logic lives here so live_monitor, backtest_ui, and
 llm_extension never import plotly directly.
 """
 
+from __future__ import annotations
+
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np

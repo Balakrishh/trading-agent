@@ -181,23 +181,18 @@ class TestAfterHoursShutdown:
     def test_after_close_calls_graceful_exit_0(self, tmp_path):
         """After 16:06 ET on a weekday → graceful_exit(0)."""
         agent = self._make_agent(tmp_path)
-        with (
-            patch("trading_agent.agent._is_within_market_hours", return_value=False),
-            patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit,
-        ):
+        with patch("trading_agent.agent._is_within_market_hours", return_value=False), \
+             patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit:
             agent.run_cycle()
             assert mock_exit.called, "graceful_exit must be called after hours"
-            code = mock_exit.call_args[0][0] if mock_exit.call_args[0] \
-                else mock_exit.call_args.kwargs.get("code")
+            code = mock_exit.call_args[0][0] if mock_exit.call_args[0] else mock_exit.call_args.kwargs.get("code")
             assert code == 0, f"Expected graceful_exit(0), got {code}"
 
     def test_after_close_logs_cycle_error(self, tmp_path):
         """After-hours shutdown must write a journal entry."""
         agent = self._make_agent(tmp_path)
-        with (
-            patch("trading_agent.agent._is_within_market_hours", return_value=False),
-            patch("trading_agent.agent._shutdown.graceful_exit"),
-        ):
+        with patch("trading_agent.agent._is_within_market_hours", return_value=False), \
+             patch("trading_agent.agent._shutdown.graceful_exit"):
             agent.run_cycle()
             # The after-hours entry must be the first log_cycle_error call.
             first_call = agent.journal_kb.log_cycle_error.call_args_list[0]
@@ -221,10 +216,8 @@ class TestAfterHoursShutdown:
         dp.get_underlying_bid_ask = MagicMock(return_value=(499.98, 500.01))
         agent.position_monitor.fetch_open_positions = MagicMock(return_value=[])
 
-        with (
-            patch("trading_agent.agent._is_within_market_hours", return_value=True),
-            patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit,
-        ):
+        with patch("trading_agent.agent._is_within_market_hours", return_value=True), \
+             patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit:
             agent.run_cycle()
             # graceful_exit(0) must not fire for after-hours.  It MAY fire
             # for drawdown breaker (code 1) on a degenerate account — assert
@@ -254,10 +247,8 @@ class TestAfterHoursShutdown:
         dp.get_underlying_bid_ask = MagicMock(return_value=(499.98, 500.01))
         agent.position_monitor.fetch_open_positions = MagicMock(return_value=[])
 
-        with (
-            patch("trading_agent.agent._is_within_market_hours", return_value=False),
-            patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit,
-        ):
+        with patch("trading_agent.agent._is_within_market_hours", return_value=False), \
+             patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit:
             agent.run_cycle()
             for call in mock_exit.call_args_list:
                 args = call[0]
@@ -271,26 +262,19 @@ class TestAfterHoursShutdown:
         """Saturday / Sunday must also trigger after-hours shutdown."""
         agent = self._make_agent(tmp_path)
         sat = _et(2026, 4, 4, 12, 0)   # Saturday noon ET
-        with (
-            patch("trading_agent.market_hours.datetime",
-                  **{"now.return_value": sat}),
-            patch("trading_agent.agent.datetime", **{"now.return_value": sat}),
-            patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit,
-        ):
+        with patch("trading_agent.market_hours.datetime", **{"now.return_value": sat}), \
+             patch("trading_agent.agent.datetime", **{"now.return_value": sat}), \
+             patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit:
             agent.run_cycle()
             assert mock_exit.called, "graceful_exit must fire on weekends"
-            code = mock_exit.call_args[0][0] if mock_exit.call_args[0] \
-                else mock_exit.call_args.kwargs.get("code")
+            code = mock_exit.call_args[0][0] if mock_exit.call_args[0] else mock_exit.call_args.kwargs.get("code")
             assert code == 0
 
     def test_exit_code_is_0_not_1(self, tmp_path):
         """After-hours exit must use code 0 (clean stop), not 1 (error)."""
         agent = self._make_agent(tmp_path)
-        with (
-            patch("trading_agent.agent._is_within_market_hours", return_value=False),
-            patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit,
-        ):
+        with patch("trading_agent.agent._is_within_market_hours", return_value=False), \
+             patch("trading_agent.agent._shutdown.graceful_exit") as mock_exit:
             agent.run_cycle()
-            code = mock_exit.call_args[0][0] if mock_exit.call_args[0] \
-                else mock_exit.call_args.kwargs.get("code")
+            code = mock_exit.call_args[0][0] if mock_exit.call_args[0] else mock_exit.call_args.kwargs.get("code")
             assert code == 0, f"Expected graceful_exit(0), got graceful_exit({code})"

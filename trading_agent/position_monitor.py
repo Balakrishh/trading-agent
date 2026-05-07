@@ -14,6 +14,8 @@ Signals marked "immediate" bypass the 3-cycle debounce in agent.py and
 trigger a market-order close without waiting for confirmation.
 """
 
+from __future__ import annotations
+
 import logging
 import time
 from dataclasses import dataclass, field

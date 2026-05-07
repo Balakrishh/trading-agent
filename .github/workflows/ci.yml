@@ -33,7 +33,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # 3.14 added 2026-05-06 to catch the inverse of the bug that
+        # exposed this gap: Python 3.14's PEP 649 deferred annotation
+        # evaluation hides missing-import errors in function signatures
+        # that 3.11/3.12 catch eagerly.  Testing all three keeps the
+        # codebase honest in both directions — code that runs on 3.14
+        # but trips on 3.11/3.12 (e.g. missing `Any` in a typing import)
+        # and code that uses 3.14-only features that won't run on the
+        # older floor.  Most modules already opt-in to PEP 563 / PEP 649
+        # semantics via `from __future__ import annotations`, but the
+        # matrix is the structural guardrail that catches the rest.
+        python-version: ["3.11", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
