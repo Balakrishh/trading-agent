@@ -462,6 +462,87 @@ class TestStalePendingFix:
         # No terminal events → entry is current → PENDING (not held).
         assert dia["status"] == "pending"
 
+    def test_skipped_existing_renders_pending_after_close_with_open_order(self):
+        """XLF 2026-05-07 incident: position closed yesterday, fresh
+        order on the books today, agent emits ``skipped_existing``
+        because Alpaca's open-order endpoint returns XLF.
+
+        Grid must render PENDING — even though the entry trade has
+        been superseded by the close — because ``skipped_existing``
+        is the agent's own oracle saying "broker has something right
+        now". Without this special-case, the supersede filter would
+        zero out the entry trade and the grid would render SKIPPED,
+        hiding the open order from the operator.
+        """
+        df = pd.DataFrame([
+            _row("XLF", "2026-05-06T16:35:30Z", "submitted",
+                 mode="LIVE",
+                 raw_signal={"regime": "sideways", "mode": "LIVE",
+                             "checks_passed": ["Plan valid"],
+                             "checks_failed": []}),
+            _row("XLF", "2026-05-06T18:42:45Z", "closed", mode="LIVE",
+                 raw_signal={"regime": "sideways", "mode": "LIVE",
+                             "net_unrealized_pl": -62.0}),
+            _row("XLF", "2026-05-07T14:50:00Z", "skipped_existing",
+                 mode="LIVE",
+                 reason="Existing open position or pending order"),
+        ])
+
+        # Ticker is NOT in held_tickers — the open order hasn't
+        # filled yet, so /v2/positions returns nothing, but
+        # /v2/orders does carry XLF.
+        grid = _guardrail_grid_from_journal(
+            df, current_mode="LIVE", window_minutes=10,
+            held_tickers=set(),
+        )
+        xlf = next((r for r in grid if r["ticker"] == "XLF"), None)
+        assert xlf is not None
+        assert xlf["status"] == "pending", (
+            f"skipped_existing + not held = PENDING (broker has open "
+            f"order). Got {xlf['status']!r}"
+        )
+
+    def test_skipped_existing_renders_holding_when_position_held(self):
+        """skipped_existing + held → HOLDING regardless of the
+        entry-trade supersede state.  Same oracle argument as above."""
+        df = pd.DataFrame([
+            _row("DIA", "2026-05-05T15:00:00Z", "closed", mode="LIVE",
+                 raw_signal={"regime": "bullish", "mode": "LIVE",
+                             "net_unrealized_pl": 25.0}),
+            _row("DIA", "2026-05-07T14:00:00Z", "submitted",
+                 mode="LIVE"),
+            _row("DIA", "2026-05-07T14:50:00Z", "skipped_existing",
+                 mode="LIVE"),
+        ])
+        grid = _guardrail_grid_from_journal(
+            df, current_mode="LIVE", window_minutes=60,
+            held_tickers={"DIA"},
+        )
+        dia = next((r for r in grid if r["ticker"] == "DIA"), None)
+        assert dia is not None
+        assert dia["status"] == "holding"
+
+    def test_skipped_rsi_gate_still_supersedes_after_close(self):
+        """The supersede-by-close filter must still apply to
+        non-existence skipped_* actions.  SPY 2026-05-07 incident:
+        closed at 13:56, skipped_rsi_gate after.  Status must be
+        SKIPPED, not PENDING — no live broker state implied by the
+        rsi-gate filter."""
+        df = pd.DataFrame([
+            _row("SPY", "2026-05-06T18:53:00Z", "submitted", mode="LIVE"),
+            _row("SPY", "2026-05-07T13:56:00Z", "closed", mode="LIVE",
+                 raw_signal={"regime": "bullish", "mode": "LIVE",
+                             "net_unrealized_pl": 81.0}),
+            _row("SPY", "2026-05-07T14:30:00Z", "skipped_rsi_gate",
+                 mode="LIVE", reason="RSI 71 > 70"),
+        ])
+        grid = _guardrail_grid_from_journal(
+            df, current_mode="LIVE", window_minutes=10, held_tickers=set()
+        )
+        spy = next((r for r in grid if r["ticker"] == "SPY"), None)
+        assert spy is not None
+        assert spy["status"] == "skipped"
+
     def test_mixed_case_mode_field_does_not_drop_close_rows(self):
         """Regression: 2026-05-07 secondary bug.
 

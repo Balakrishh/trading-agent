@@ -1631,48 +1631,81 @@ def _guardrail_grid_from_journal(
         #                action label we don't recognise
         if action.startswith("skipped"):
             entry = last_entry_by_ticker.get(ticker)
-            # Three sub-states for skipped rows, distinguished by
-            # whether an entry trade exists in the journal AND whether
-            # the broker is currently holding the position:
-            #
-            #   1. holding  — entry trade exists AND ticker is in
-            #                 held_tickers → position is filled and live
-            #   2. pending  — entry trade exists but ticker is NOT held
-            #                 → limit order is on the book waiting to fill
-            #                 (or stale-order canceller hasn't run yet)
-            #   3. skipped  — no entry trade on record → truly nothing
-            #                 to display, fall back to em-dash cells
-            #
-            # ``held_tickers=None`` (caller didn't pass a set) is treated
-            # as "trust the entry trade" — preserves backward compat for
-            # callers that haven't been updated. Production callers
-            # always pass the set, so the holding/pending distinction
-            # always fires correctly in the dashboard.
             ticker_is_actually_held = (
                 held_tickers is None or ticker in held_tickers
             )
-            if entry is not None:
-                # Substitute cells from the entry trade in BOTH holding
-                # and pending — operator wants the same detail either
-                # way; only the verdict label and palette change.
-                src = entry
-                passed_list: List[str] = src.get("checks_passed") or []
-                failed_list: List[str] = src.get("checks_failed") or []
-                display_timestamp = src["timestamp"]
-                display_regime = src.get("regime") or ""
+
+            # ``skipped_existing`` is special. It's the agent's pre-flight
+            # dedup gate firing because ``_tickers_with_open_orders()`` /
+            # ``fetch_open_positions()`` saw something at the broker
+            # RIGHT NOW.  The action itself is the oracle — we don't
+            # need a journal entry trade to confirm, because the agent
+            # IS the journaler and would never emit ``skipped_existing``
+            # without seeing existing state.
+            #
+            # Sub-states for skipped_existing:
+            #   * held → HOLDING  (the position is filled, live)
+            #   * not held → PENDING  (open order on the book, not
+            #                          yet filled — typical when a
+            #                          limit was placed today and the
+            #                          mid hasn't moved enough)
+            #
+            # The journal entry trade still feeds per-cell detail when
+            # available; absence falls back to em-dash cells.  XLF
+            # 2026-05-07 incident: position closed yesterday, fresh
+            # order placed (manually or via stale-survival), today's
+            # cycle correctly emits skipped_existing — pre-fix the
+            # supersede filter dropped the entry trade and the grid
+            # rendered SKIPPED instead of PENDING, hiding the open
+            # order from the operator.
+            if action == "skipped_existing":
                 if ticker_is_actually_held:
                     status = "holding"
                 else:
                     status = "pending"
+                if entry is not None:
+                    src = entry
+                    passed_list: List[str] = src.get("checks_passed") or []
+                    failed_list: List[str] = src.get("checks_failed") or []
+                    display_timestamp = src["timestamp"]
+                    display_regime = src.get("regime") or ""
+                else:
+                    passed_list = []
+                    failed_list = []
+                    display_timestamp = r["timestamp"]
+                    display_regime = r.get("regime") or ""
             else:
-                # No entry trade — truly nothing to substitute. Fall
-                # back to em-dash cells with the journal's reason
-                # surfaced as a tooltip.
-                status = "skipped"
-                passed_list = []
-                failed_list = []
-                display_timestamp = r["timestamp"]
-                display_regime = r.get("regime") or ""
+                # All other skipped_* actions are FILTER skips (rsi_gate,
+                # bias, defense_first, by_llm, liquidation_mode).  These
+                # don't imply broker state — they imply the agent's
+                # internal gate rejected this cycle's trade attempt.
+                # Sub-states require an unsuperseded entry trade:
+                #
+                #   1. holding  — entry trade exists AND ticker is held
+                #   2. pending  — entry trade exists but ticker is NOT held
+                #   3. skipped  — no entry trade (or superseded by a close)
+                #
+                # The ``last_entry_by_ticker`` lookup already filters
+                # out entries that have a ``closed`` / ``close_failed``
+                # event after them (skill 17), which keeps the
+                # dashboard honest about positions that have been
+                # closed since.  See the SPY 2026-05-07 PENDING bug.
+                if entry is not None:
+                    src = entry
+                    passed_list = src.get("checks_passed") or []
+                    failed_list = src.get("checks_failed") or []
+                    display_timestamp = src["timestamp"]
+                    display_regime = src.get("regime") or ""
+                    if ticker_is_actually_held:
+                        status = "holding"
+                    else:
+                        status = "pending"
+                else:
+                    status = "skipped"
+                    passed_list = []
+                    failed_list = []
+                    display_timestamp = r["timestamp"]
+                    display_regime = r.get("regime") or ""
         else:
             passed_list = r.get("checks_passed") or []
             failed_list = r.get("checks_failed") or []
