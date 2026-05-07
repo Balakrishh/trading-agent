@@ -75,11 +75,18 @@ class TestLogSignal:
         record = json.loads(open(jkb.jsonl_path).readline())
         assert record["exec_status"] == "dry_run_ok"
 
-    def test_notes_truncated_to_120_chars(self, jkb):
-        long_note = "x" * 200
+    def test_notes_truncated_to_200_chars(self, jkb):
+        # Limit raised from 120 → 200 on 2026-05-06.  Chain-scanner
+        # rejection-reason strings regularly run 150-180 chars and were
+        # getting truncated mid-paren in the dashboard's Recent Journal
+        # Entries panel, losing the most diagnostic part.  See the
+        # ``log_signal.notes`` docstring for the rationale.
+        long_note = "x" * 300
         jkb.log_signal("SPY", "error", 0.0, {}, notes=long_note)
         record = json.loads(open(jkb.jsonl_path).readline())
-        assert len(record["notes"]) <= 120
+        assert len(record["notes"]) <= 200
+        # Sanity: the cap should actually have fired on a 300-char input.
+        assert len(record["notes"]) == 200
 
     def test_pipe_chars_escaped_in_markdown(self, jkb):
         jkb.log_signal("SPY", "dry_run", 500.0, {},
