@@ -1124,7 +1124,15 @@ class TradingAgent:
                 if isinstance(leg, dict)
             ]
             payload["fill_status"] = fill_status
-            payload["mode"] = "dry_run" if dry_run else "live"
+            # Mode tag MUST match the value written by _log_signal so the
+            # dashboard's current_mode filter (case-sensitive equality) keeps
+            # close rows in the same view as their corresponding submitted
+            # rows.  Pre-2026-05-07 this wrote lowercase ("live") while
+            # _log_signal wrote uppercase ("LIVE"), which dropped close rows
+            # whenever the dashboard filtered by mode — and that hid them
+            # from the supersede-PENDING-on-close logic in the grid (the
+            # SPY 2026-05-07 PENDING bug).
+            payload["mode"] = "DRY-RUN" if dry_run else "LIVE"
 
             # ── Cooldown surface ──────────────────────────────────────
             # When a close_failed row is written AND the ticker has hit

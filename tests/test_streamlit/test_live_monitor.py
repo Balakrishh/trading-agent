@@ -319,3 +319,184 @@ class TestRenderLiveMonitorSmoke:
             # Should not blow up regardless of pause flag state
             if at.exception:
                 assert "rerun" in str(at.exception).lower()
+
+
+# ---------------------------------------------------------------------------
+# Regression: stale-PENDING grid bug (2026-05-07)
+# ---------------------------------------------------------------------------
+# Symptom on 2026-05-07: SPY rendered ⏳ PENDING in the guardrail grid
+# even though the position had been opened, traded out, and closed
+# (+$81 profit_target) several hours earlier.
+#
+# Root cause: `last_entry_by_ticker` picked the most recent
+# action="submitted" row with no awareness of whether a later
+# action="closed" or action="close_failed" superseded it. The
+# verdict-cell logic then saw "entry exists, ticker not held →
+# PENDING" and rendered indefinitely until a NEW submission overwrote
+# the lookup.
+#
+# Fix: filter out entry trades that have a terminal event (closed,
+# close_failed) at a timestamp ≥ the entry timestamp.
+
+from trading_agent.streamlit.live_monitor import _guardrail_grid_from_journal
+
+
+def _row(ticker, ts, action, **extra):
+    """Helper: minimum-viable journal row in DataFrame-row shape."""
+    base = {
+        "ticker": ticker,
+        "timestamp": pd.to_datetime(ts, utc=True),
+        "action": action,
+        "price": 100.0,
+        "regime": "bullish",
+        "mode": "live",
+        "checks_passed": [],
+        "checks_failed": [],
+        "notes": action,
+        "reason": "",
+        "rsi_14": 50.0,
+        "sma_50": 100.0,
+        "sma_200": 100.0,
+        "scan_results": {},
+        "raw_signal": {"regime": "bullish", "mode": "live"},
+        "account_balance": 5000.0,
+    }
+    base.update(extra)
+    return base
+
+
+class TestStalePendingFix:
+    def test_closed_after_submitted_supersedes_entry(self):
+        """Entry trade followed by a close → grid must NOT show PENDING."""
+        # Submitted yesterday → closed today → skipped now.
+        df = pd.DataFrame([
+            _row("SPY", "2026-05-06T18:53:00Z", "submitted"),
+            _row("SPY", "2026-05-07T13:56:00Z", "closed",
+                 raw_signal={"regime": "bullish", "mode": "live",
+                             "net_unrealized_pl": 81.0}),
+            _row("SPY", "2026-05-07T14:30:00Z", "skipped_rsi_gate",
+                 reason="RSI 71 > 70"),
+        ])
+
+        grid = _guardrail_grid_from_journal(
+            df, current_mode=None, window_minutes=10, held_tickers=set()
+        )
+        spy = next((r for r in grid if r["ticker"] == "SPY"), None)
+        assert spy is not None
+        # Status must be skipped, not pending — there's no live order.
+        assert spy["status"] == "skipped", (
+            f"Expected 'skipped' (closed event supersedes entry), "
+            f"got {spy['status']!r}"
+        )
+
+    def test_submitted_then_skipped_no_close_still_pending(self):
+        """No close event → entry is current → PENDING when not held."""
+        df = pd.DataFrame([
+            _row("AAPL", "2026-05-07T13:00:00Z", "submitted"),
+            _row("AAPL", "2026-05-07T13:30:00Z", "skipped_existing",
+                 reason="Existing open position or pending order"),
+        ])
+
+        grid = _guardrail_grid_from_journal(
+            df, current_mode=None, window_minutes=60, held_tickers=set()
+        )
+        aapl = next((r for r in grid if r["ticker"] == "AAPL"), None)
+        assert aapl is not None
+        assert aapl["status"] == "pending", (
+            "Submitted with no later closed event → entry is current → "
+            "PENDING when not held."
+        )
+
+    def test_held_ticker_renders_holding_regardless_of_close_history(self):
+        """Even if there was a past close, a CURRENTLY-held ticker is HOLDING."""
+        # Old close, then re-submitted, ticker now held.
+        df = pd.DataFrame([
+            _row("QQQ", "2026-05-05T15:00:00Z", "closed",
+                 raw_signal={"regime": "bullish", "mode": "live",
+                             "net_unrealized_pl": 25.0}),
+            _row("QQQ", "2026-05-07T14:00:00Z", "submitted"),
+            _row("QQQ", "2026-05-07T14:35:00Z", "skipped_existing"),
+        ])
+
+        grid = _guardrail_grid_from_journal(
+            df, current_mode=None, window_minutes=60,
+            held_tickers={"QQQ"},
+        )
+        qqq = next((r for r in grid if r["ticker"] == "QQQ"), None)
+        assert qqq is not None
+        # The 2026-05-05 close is older than the 2026-05-07 submitted
+        # row, so it does NOT supersede the entry.
+        assert qqq["status"] == "holding"
+
+    def test_close_failed_also_supersedes_entry(self):
+        """A close_failed terminal event clears the entry the same way."""
+        df = pd.DataFrame([
+            _row("XLF", "2026-05-06T18:00:00Z", "submitted"),
+            _row("XLF", "2026-05-07T13:00:00Z", "close_failed",
+                 raw_signal={"regime": "bearish", "mode": "live",
+                             "fill_status": "partial"}),
+            _row("XLF", "2026-05-07T14:30:00Z", "skipped_rsi_gate"),
+        ])
+
+        grid = _guardrail_grid_from_journal(
+            df, current_mode=None, window_minutes=10, held_tickers=set()
+        )
+        xlf = next((r for r in grid if r["ticker"] == "XLF"), None)
+        assert xlf is not None
+        # close_failed is terminal-for-our-purposes (cooldown will block
+        # auto-retry); rendering PENDING would be misleading.
+        assert xlf["status"] == "skipped"
+
+    def test_no_terminal_events_preserves_legacy_behavior(self):
+        """When the close-tracking dict is empty, fall back to old logic."""
+        df = pd.DataFrame([
+            _row("DIA", "2026-05-07T13:00:00Z", "submitted"),
+            _row("DIA", "2026-05-07T14:00:00Z", "skipped_existing"),
+        ])
+
+        grid = _guardrail_grid_from_journal(
+            df, current_mode=None, window_minutes=60, held_tickers=set()
+        )
+        dia = next((r for r in grid if r["ticker"] == "DIA"), None)
+        assert dia is not None
+        # No terminal events → entry is current → PENDING (not held).
+        assert dia["status"] == "pending"
+
+    def test_mixed_case_mode_field_does_not_drop_close_rows(self):
+        """Regression: 2026-05-07 secondary bug.
+
+        Pre-fix the journal carried "LIVE" from _log_signal and "live"
+        from _journal_close_event.  The grid's case-sensitive
+        ``current_mode == row.mode`` filter dropped the close rows
+        before the supersede-PENDING check ran, so the SPY close at
+        13:56 was invisible even though it was correctly journaled.
+        Fix normalises both sides to uppercase.
+        """
+        df = pd.DataFrame([
+            # Old code path emits uppercase.
+            _row("SPY", "2026-05-06T18:53:00Z", "submitted",
+                 mode="LIVE",
+                 raw_signal={"regime": "bullish", "mode": "LIVE"}),
+            # _journal_close_event used to emit lowercase.
+            _row("SPY", "2026-05-07T13:56:00Z", "closed",
+                 mode="live",
+                 raw_signal={"regime": "bullish", "mode": "live",
+                             "net_unrealized_pl": 81.0}),
+            # Today's skipped rows from _log_signal — uppercase.
+            _row("SPY", "2026-05-07T14:30:00Z", "skipped_rsi_gate",
+                 mode="LIVE", reason="RSI 71 > 70"),
+        ])
+        # Filter by current_mode="LIVE" — exactly what the dashboard
+        # passes for the live tab.
+        grid = _guardrail_grid_from_journal(
+            df, current_mode="LIVE", window_minutes=10, held_tickers=set()
+        )
+        spy = next((r for r in grid if r["ticker"] == "SPY"), None)
+        assert spy is not None
+        # The close row, despite being journalled with mode="live",
+        # must reach the supersede check — so SPY ends up "skipped"
+        # rather than the buggy "pending" the user saw on 2026-05-07.
+        assert spy["status"] == "skipped", (
+            f"Expected 'skipped' (close at 'live' mode survives the "
+            f"case-insensitive LIVE filter), got {spy['status']!r}"
+        )

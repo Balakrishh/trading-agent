@@ -1508,8 +1508,21 @@ def _guardrail_grid_from_journal(
     if df.empty:
         return []
     if current_mode is not None and "mode" in df.columns:
-        normalised = df["mode"].fillna("").replace("", "LIVE")
-        df = df[normalised == current_mode]
+        # Case-insensitive comparison — pre-2026-05-07 the journal had a
+        # mix of "LIVE" (from _log_signal) and "live" (from
+        # _journal_close_event) for the same conceptual mode, and a
+        # strict equality filter dropped close rows from the LIVE view.
+        # That broke the supersede-PENDING-on-close logic below because
+        # close events vanished from the df before the lookup ran.
+        # Both writers now emit uppercase, but rows journaled before the
+        # fix still exist on disk; normalising on read keeps them
+        # readable.  fillna("") then replace("", "LIVE") preserves the
+        # legacy "no-mode-tag means LIVE" interpretation for rows that
+        # pre-date the mode field entirely.
+        normalised = (df["mode"].fillna("").astype(str)
+                      .str.upper().replace("", "LIVE"))
+        target = current_mode.upper()
+        df = df[normalised == target]
         if df.empty:
             return []
 
@@ -1537,8 +1550,39 @@ def _guardrail_grid_from_journal(
     # the latest action was ``skipped_existing`` — the user wants to
     # see what was true *when the open position was opened*, not a
     # blank "we skipped this cycle because the position exists".
+    #
+    # Stale-PENDING fix (2026-05-07)
+    # ------------------------------
+    # An entry trade is "current" only until the position is closed.
+    # If a ``closed`` (or ``close_failed`` zombie eventually resolved)
+    # row appears for the same ticker AFTER the entry trade, the
+    # position is gone and the entry-trade lookup must NOT treat the
+    # ticker as having a current position.  Without this filter the
+    # grid renders ⏳ PENDING for tickers whose orders closed days ago
+    # — the entry trade is still in the journal, and the ticker isn't
+    # in held_tickers (because the position is closed), so the
+    # ``skipped → not-held → PENDING`` branch fires forever.  Filtering
+    # out superseded entries fixes the lie.
     last_entry_by_ticker: Dict[str, pd.Series] = {}
     if "action" in df.columns:
+        # Latest closed-event timestamp per ticker.  Both ``closed`` and
+        # ``close_failed`` are considered terminal: a partial-fill
+        # zombie that subsequently completes will produce a follow-up
+        # ``closed`` row whose timestamp wins, so this is safe.
+        # ``close_failed`` rows on their own (no eventual ``closed``)
+        # mean the position is still open at the broker — we treat
+        # those as terminal-for-our-purposes too because the agent
+        # cooldown will block further auto-closes anyway, and
+        # rendering PENDING for them would also be misleading
+        # (the position is held, not pending; held_tickers will
+        # carry it correctly into the HOLDING branch).
+        terminal_actions = ("closed", "close_failed")
+        last_close_ts: Dict[str, pd.Timestamp] = {}
+        terminal = df[df["action"].isin(terminal_actions)]
+        if not terminal.empty:
+            for ticker, grp in terminal.groupby("ticker"):
+                last_close_ts[ticker] = grp["timestamp"].max()
+
         # An "entry trade" is a row whose action contains "submitted"
         # (the agent emits ``action="submitted"`` after a successful
         # Alpaca POST /v2/orders). Fall back to "approved" rows if no
@@ -1548,9 +1592,13 @@ def _guardrail_grid_from_journal(
         entries = df[df["action"].isin(candidate_actions)]
         if not entries.empty:
             for ticker, grp in entries.groupby("ticker"):
-                last_entry_by_ticker[ticker] = grp.sort_values(
-                    "timestamp"
-                ).iloc[-1]
+                latest_entry = grp.sort_values("timestamp").iloc[-1]
+                # Skip the entry if a terminal event came after it —
+                # the position has been closed since.
+                close_ts = last_close_ts.get(ticker)
+                if close_ts is not None and close_ts >= latest_entry["timestamp"]:
+                    continue
+                last_entry_by_ticker[ticker] = latest_entry
 
     rows: List[Dict] = []
     for _, r in latest.iterrows():
@@ -1774,8 +1822,14 @@ def _guardrail_status_from_journal(
         return defaults
 
     if current_mode is not None and "mode" in df.columns:
-        normalised = df["mode"].fillna("").replace("", "LIVE")
-        scoped = df[normalised == current_mode]
+        # Case-insensitive normalisation — see the same comment block in
+        # _guardrail_grid_from_journal for the journal mixed-case
+        # rationale.  Mirror it here so the legacy 8-card path doesn't
+        # silently drop close rows when filtering by mode.
+        normalised = (df["mode"].fillna("").astype(str)
+                      .str.upper().replace("", "LIVE"))
+        target = current_mode.upper()
+        scoped = df[normalised == target]
         if scoped.empty:
             return defaults
         last = scoped.iloc[-1]
