@@ -55,7 +55,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from trading_agent.config import AppConfig, load_config
 from trading_agent.journal_kb import JournalKB
@@ -122,6 +122,29 @@ EXIT_DEBOUNCE_REQUIRED = 3
 # theta has chewed through the original limit.
 STALE_ORDER_MAX_AGE_MIN = 15
 
+# ── Pattern Day Trading (PDT) threshold ─────────────────────────────────
+# Alpaca enforces FINRA's PDT rule on accounts below this equity
+# threshold: 4+ "day trades" (open + close same security same day) in
+# a 5-day window triggers a 90-day flag that blocks further day trades.
+# At $5K, a same-day open + REGIME_SHIFT close is exactly this pattern,
+# producing the "trade denied due to pattern day trading protection"
+# 403 we hit on 2026-05-06.  Below this threshold, suppress same-day
+# REGIME_SHIFT exits and hold overnight; STRIKE_PROXIMITY / HARD_STOP
+# / DTE_SAFETY still fire because those are real risk events that
+# justify the PDT hit.
+PDT_EQUITY_THRESHOLD = 25_000.0
+
+# ── Partial-close cooldown ──────────────────────────────────────────────
+# When ``executor.close_spread`` returns ``fill_status="partial"`` the
+# position is in zombie state — some legs closed, some rejected by
+# Alpaca.  Naive retry on every cycle (5 min) generates spam and never
+# converges (the Alpaca-side block doesn't lift on its own).  After
+# this many consecutive partial fills, suppress further auto-close
+# attempts for ``CLOSE_COOLDOWN_MINUTES`` and require manual
+# intervention.  See 2026-05-06 SPY zombie incident.
+PARTIAL_CLOSE_COOLDOWN_THRESHOLD = 3
+CLOSE_COOLDOWN_MINUTES = 60
+
 # OCC option symbol → underlying root.  Format ROOT(1-6) + YYMMDD(6) +
 # C/P(1) + STRIKE*1000(8).  Used both for stale-order cancel scoping
 # and open-order dedup, so identical to the dashboard helper in
@@ -166,6 +189,16 @@ class TradingAgent:
         # shouldn't), the second call returns the skip result.
         self._cycle_lock = threading.Lock()
 
+        # ── Partial-close cooldown state ───────────────────────────────
+        # Per-ticker counter of consecutive partial-fill close attempts.
+        # When the count reaches PARTIAL_CLOSE_COOLDOWN_THRESHOLD, the
+        # ticker is parked in a CLOSE_COOLDOWN_MINUTES window during
+        # which the cycle skips further close attempts and emits a
+        # WARNING explaining the zombie state.  Cleared on a successful
+        # complete close, OR on agent restart (in-memory only).
+        self._partial_close_count: Dict[str, int] = {}
+        self._close_cooldown_until: Dict[str, datetime] = {}
+
         # MarketDataProvider now satisfies both MarketDataPort and
         # AccountPort (its get_account_info/is_market_open methods no
         # longer accept base_url — the adapter owns its endpoint).
@@ -201,6 +234,27 @@ class TradingAgent:
         max_delta        = self.preset.max_delta
         min_credit_ratio = self.preset.min_credit_ratio
         max_risk_pct     = self.preset.max_risk_pct
+
+        # ── .env-vs-preset mismatch warning ──────────────────────────────
+        # Pre-2026-05-06 the executor read ``config.trading.max_risk_pct``
+        # (.env) while the RiskManager read ``preset.max_risk_pct`` — when
+        # the two disagreed, trades passed the risk gate at one budget
+        # then got sized at another, breaking the C/W floor invariant.
+        # The fix routes BOTH through the preset; this warning surfaces
+        # the silent override that previously caused operator confusion
+        # ("I changed MAX_RISK_PCT in .env, why isn't anything different?").
+        env_risk = config.trading.max_risk_pct
+        if abs(env_risk - max_risk_pct) > 1e-6:
+            logger.warning(
+                "MAX_RISK_PCT mismatch: .env=%.4f vs STRATEGY_PRESET.json=%.4f. "
+                "The PRESET wins (it's the live control surface; .env is a "
+                "fallback for tests predating the preset system). Edit the "
+                "Strategy Profile panel in the dashboard, or set "
+                "STRATEGY_PRESET.json:max_risk_pct directly to change risk "
+                "sizing. Setting .env:MAX_RISK_PCT alone has no effect on "
+                "live trading.",
+                env_risk, max_risk_pct,
+            )
 
         self.regime_classifier = RegimeClassifier(self.data_provider)
         self.strategy_planner = StrategyPlanner(
@@ -240,8 +294,16 @@ class TradingAgent:
             trade_plan_dir=config.logging.trade_plan_dir,
             dry_run=config.trading.dry_run,
             data_provider=self.data_provider,   # for live quote refresh on execution
-            max_risk_pct=config.trading.max_risk_pct,            # shared w/ RiskManager #4
-            min_credit_ratio=config.trading.min_credit_ratio,    # shared w/ RiskManager #2
+            # CRITICAL: must match the values passed to RiskManager above
+            # — the executor's position sizer uses these to compute qty,
+            # and a mismatch with the validator means trades pass the
+            # risk gate at one budget and get sized at another (breaking
+            # the C/W floor invariant).  Pre-2026-05-06 these read from
+            # config.trading (.env), but the RiskManager read from the
+            # preset; the two diverged whenever the operator changed
+            # one without the other.  Now both route through the preset.
+            max_risk_pct=max_risk_pct,                           # shared w/ RiskManager #4
+            min_credit_ratio=min_credit_ratio,                   # shared w/ RiskManager #2
             # Adaptive mode: live-credit recheck + 1-tick haircut both use the
             # same Δ-aware floor RiskManager is enforcing, so a scanner-picked
             # plan can never be vetoed at execution time by a stale static
@@ -778,6 +840,23 @@ class TradingAgent:
             logger.warning(
                 "Position fetch failed — Stage 2 will skip new entries "
                 "this cycle to avoid duplicate-submission bugs.")
+            # Surface to operator via journal so the dashboard's
+            # Recent Journal Entries panel shows the connectivity
+            # blip without requiring a log scrape.  Bypasses dedup
+            # so successive cycles all surface the issue (warnings
+            # are material — see _DEDUP_BYPASS_ACTIONS).
+            try:
+                self.journal_kb.log_warning(
+                    source="position_monitor",
+                    message=(
+                        "Broker position fetch failed (retries "
+                        "exhausted) — Stage 2 entries skipped this "
+                        "cycle to prevent duplicate submission. The "
+                        "dedup gate is failing closed by design."
+                    ),
+                )
+            except Exception as exc:                              # noqa: BLE001
+                logger.warning("Failed to journal position-fetch warning: %s", exc)
             return {"total_spreads": 0, "positions": [], "closed": [],
                     "fetch_failed": True}
 
@@ -812,9 +891,65 @@ class TradingAgent:
         spreads = self.position_monitor.evaluate(
             spreads, current_regimes, underlying_prices)
 
+        # ── PDT same-day-open detection ─────────────────────────────────
+        # Build the set of tickers with action="submitted" today (UTC).
+        # Used below to suppress REGIME_SHIFT exits on small accounts so
+        # we don't trip pattern-day-trading protection.  See the SPY
+        # zombie-close incident on 2026-05-06.
+        same_day_tickers = self._tickers_opened_today()
+        pdt_restricted = account_balance < PDT_EQUITY_THRESHOLD
+        if pdt_restricted and same_day_tickers:
+            logger.info(
+                "PDT-restricted account ($%.2f < $25K). Same-day-open "
+                "tickers: %s. REGIME_SHIFT exits will be suppressed for "
+                "these (real-risk exits like STRIKE_PROXIMITY still fire).",
+                account_balance, sorted(same_day_tickers),
+            )
+
         closed = []
         for spread in spreads:
             if spread.exit_signal != ExitSignal.HOLD and self._should_exit_spread(spread):
+                # ── Cooldown guard ────────────────────────────────────────
+                # If this ticker has hit PARTIAL_CLOSE_COOLDOWN_THRESHOLD
+                # consecutive partial fills, park further auto-closes for
+                # CLOSE_COOLDOWN_MINUTES.  Naive retry is hopeless on
+                # zombie partial-fill states (Alpaca's reason — PDT,
+                # uncovered, buying-power — doesn't lift on its own; the
+                # operator has to manually clean up via the broker UI).
+                cooldown_left = self._close_cooldown_minutes_remaining(
+                    spread.underlying)
+                if cooldown_left > 0:
+                    logger.warning(
+                        "[%s] Close cooldown active — %d min remaining "
+                        "(%d consecutive partial fills). Skipping retry. "
+                        "Manually close the position on Alpaca's UI to "
+                        "clear the zombie state.",
+                        spread.underlying, cooldown_left,
+                        self._partial_close_count.get(spread.underlying, 0),
+                    )
+                    continue
+
+                # ── PDT REGIME_SHIFT suppression ────────────────────────
+                # On a sub-$25K account, opening AND closing the same
+                # ticker on the same day counts as a "day trade" under
+                # FINRA's PDT rule — Alpaca rejects with code 40310100
+                # (`pattern day trading protection`).  Hold overnight
+                # and let tomorrow's cycle close it without the same-day
+                # day-trade flag.  Real-risk exits (STRIKE_PROXIMITY,
+                # HARD_STOP, DTE_SAFETY) still fire because those are
+                # worth the PDT hit.
+                if (pdt_restricted
+                        and spread.underlying in same_day_tickers
+                        and spread.exit_signal == ExitSignal.REGIME_SHIFT):
+                    logger.warning(
+                        "[%s] PDT-suppressed REGIME_SHIFT exit — position "
+                        "opened today, account equity $%.2f < $25K PDT "
+                        "threshold. Holding overnight to avoid day-trade "
+                        "flag. Will reconsider on next session's cycle.",
+                        spread.underlying, account_balance,
+                    )
+                    continue
+
                 # Capture pre-close state for the audit-trail journal entry —
                 # spread.legs may be partially populated after close_spread()
                 # mutates leg statuses, so snapshot what the user is paying
@@ -859,6 +994,23 @@ class TradingAgent:
                         "complete" if (isinstance(result, dict) and result.get("all_closed"))
                         else "partial"
                     )
+                    # ── Cooldown bookkeeping ──────────────────────────────
+                    # IMPORTANT: do this BEFORE journaling so the row can
+                    # capture the resulting cooldown state.  On a complete
+                    # close, clear any prior partial-fill state so the
+                    # next opening of this ticker starts fresh.  On a
+                    # partial fill, increment the per-ticker counter; if
+                    # it reaches PARTIAL_CLOSE_COOLDOWN_THRESHOLD, park
+                    # the ticker in a cooldown window so the cycle stops
+                    # hammering the broker with hopeless retries.  The
+                    # cooldown timestamp is then surfaced in the journal
+                    # row so the dashboard can render a manual-
+                    # intervention warning banner without re-deriving the
+                    # state from log scraping.
+                    if fill_status == "complete":
+                        self._clear_close_cooldown(spread.underlying)
+                    else:
+                        self._record_partial_close(spread.underlying)
                     self._journal_close_event(
                         spread, close_context, leg_results=leg_results,
                         fill_status=fill_status, dry_run=False,
@@ -875,7 +1027,27 @@ class TradingAgent:
                              leg_results: List[Dict], fill_status: str,
                              dry_run: bool) -> None:
         """
-        Emit a structured ``action="closed"`` row to ``signals_live.jsonl``.
+        Emit a structured close-attempt row to ``signals_live.jsonl``.
+
+        Action mapping (added 2026-05-06)
+        ---------------------------------
+        Pre-fix every close attempt — complete OR partial-fill zombie —
+        was tagged ``action="closed"``.  That made the dashboard's
+        "Closed Today" tile lie: a SPY position that hit the partial-
+        fill loop 11 times produced 11 ``closed`` rows even though the
+        position was still open on the broker side.  Operators saw
+        "11 closed today" and panicked.
+
+        Now the action depends on ``fill_status``:
+
+          * ``complete`` / ``dry_run``  → ``action="closed"``
+            (the position is gone from the broker; exit attribution is
+            valid; "Closed Today" can count it.)
+          * ``partial`` / anything else → ``action="close_failed"``
+            (the position is still open; one or more legs were rejected
+            by Alpaca — typically PDT, uncovered, or insufficient
+            buying power; "Close Failures" tile counts these
+            separately so the operator can intervene.)
 
         Why this exists
         ---------------
@@ -890,12 +1062,16 @@ class TradingAgent:
         explained why.  This helper closes the gap so every close has
         an audit-trail entry with the exit signal as justification.
 
-        Schema (action="closed")
-        ------------------------
+        Schema
+        ------
         ::
 
+          action: "closed" | "close_failed"
           notes:
               "closed: <Strategy>, P&L=<±$X>, <exit_reason>"
+                                         (fill_status=complete/dry_run)
+              "close_failed: <Strategy>, <exit_reason>, partial fill"
+                                         (fill_status=partial)
           raw_signal:
               {strategy, exit_signal, exit_reason, exit_immediate,
                net_unrealized_pl, original_credit, max_loss,
@@ -908,10 +1084,36 @@ class TradingAgent:
         try:
             pl = ctx["net_unrealized_pl"]
             sign = "+" if pl >= 0 else ""
-            note = (
-                f"closed: {ctx['strategy']}, P&L={sign}${pl:.2f}, "
-                f"{ctx['exit_signal']}"
-            )
+            # Action + notes branch on fill_status — see method docstring.
+            is_complete_close = fill_status in ("complete", "dry_run")
+            if is_complete_close:
+                action = "closed"
+                note = (
+                    f"closed: {ctx['strategy']}, P&L={sign}${pl:.2f}, "
+                    f"{ctx['exit_signal']}"
+                )
+                exec_status = f"closed_{ctx['exit_signal']}"
+            else:
+                action = "close_failed"
+                # Surface the leg-level failure summary so an operator
+                # can immediately tell which leg(s) Alpaca rejected.
+                failed_legs = [
+                    leg.get("symbol", "?")
+                    for leg in (leg_results or [])
+                    if isinstance(leg, dict)
+                       and leg.get("status") != "closed"
+                ]
+                failed_str = (
+                    f" failed_legs={','.join(failed_legs)}"
+                    if failed_legs else ""
+                )
+                note = (
+                    f"close_failed: {ctx['strategy']}, "
+                    f"{ctx['exit_signal']}, fill_status={fill_status}"
+                    f"{failed_str}"
+                )
+                exec_status = f"close_failed_{ctx['exit_signal']}"
+
             payload: Dict[str, Any] = dict(ctx)
             payload["leg_close_results"] = [
                 {"symbol": leg.get("symbol", ""),
@@ -921,11 +1123,41 @@ class TradingAgent:
             ]
             payload["fill_status"] = fill_status
             payload["mode"] = "dry_run" if dry_run else "live"
+
+            # ── Cooldown surface ──────────────────────────────────────
+            # When a close_failed row is written AND the ticker has hit
+            # the partial-fill threshold, embed the cooldown deadline +
+            # a human-readable reason so the dashboard can render a
+            # "manual intervention required" banner without re-deriving
+            # the state.  Pre-cooldown rows still get the running
+            # streak count so the operator can see "we're at 2/3,
+            # one more partial fills the cooldown."
+            if action == "close_failed":
+                streak = self._partial_close_count.get(
+                    spread.underlying, 0)
+                payload["partial_close_streak"] = streak
+                payload["partial_close_threshold"] = (
+                    PARTIAL_CLOSE_COOLDOWN_THRESHOLD
+                )
+                cooldown_until = self._close_cooldown_until.get(
+                    spread.underlying)
+                if cooldown_until is not None:
+                    payload["close_cooldown_until"] = (
+                        cooldown_until.isoformat()
+                    )
+                    payload["close_cooldown_reason"] = (
+                        f"{streak} consecutive partial fills "
+                        f"≥ threshold {PARTIAL_CLOSE_COOLDOWN_THRESHOLD}; "
+                        f"auto-close suppressed for "
+                        f"{CLOSE_COOLDOWN_MINUTES} min — manual broker "
+                        f"intervention required to clear zombie state."
+                    )
+
             self.journal_kb.log_signal(
                 ticker=spread.underlying,
-                action="closed",
+                action=action,
                 price=self._cached_price(spread.underlying),
-                exec_status=f"closed_{ctx['exit_signal']}",
+                exec_status=exec_status,
                 notes=note,
                 raw_signal=payload,
             )
@@ -935,6 +1167,134 @@ class TradingAgent:
             logger.warning(
                 "[%s] Failed to journal close event: %s",
                 getattr(spread, "underlying", "?"), exc,
+            )
+
+    # ==================================================================
+    # PDT + partial-close cooldown helpers
+    # ==================================================================
+
+    def _tickers_opened_today(self) -> Set[str]:
+        """
+        Return the set of underlyings that submitted a new spread today
+        (UTC).  Used to suppress same-day REGIME_SHIFT exits on PDT-
+        restricted accounts (< $25K equity).
+
+        Reads the journal directly so the answer survives a Streamlit
+        restart or agent-loop restart — the in-memory state is
+        deliberately *not* the source of truth here.  We tolerate ANY
+        parse error by returning an empty set, because the worst-case
+        consequence of a false-empty is "we attempted a close that
+        Alpaca might reject for PDT" — which is exactly the failure
+        mode that already had to be handled before this helper existed.
+        """
+        try:
+            jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+            if not jsonl_path or not os.path.isfile(jsonl_path):
+                return set()
+            today_utc = datetime.now(timezone.utc).date()
+            tickers: Set[str] = set()
+            with open(jsonl_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("action") != "submitted":
+                        continue
+                    ts_str = rec.get("timestamp", "")
+                    if not ts_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
+                    # Normalise to UTC for the date comparison.
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts.astimezone(timezone.utc).date() != today_utc:
+                        continue
+                    tk = rec.get("ticker")
+                    if tk:
+                        tickers.add(tk)
+            return tickers
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(
+                "Failed to read same-day-open tickers from journal: %s",
+                exc,
+            )
+            return set()
+
+    def _close_cooldown_minutes_remaining(self, ticker: str) -> int:
+        """
+        Minutes remaining in the cooldown window for ``ticker``, or 0 if
+        no cooldown is active.  See PARTIAL_CLOSE_COOLDOWN_THRESHOLD.
+        """
+        until = self._close_cooldown_until.get(ticker)
+        if until is None:
+            return 0
+        now = datetime.now(timezone.utc)
+        if now >= until:
+            # Cooldown has expired — purge the entry so the dict doesn't
+            # grow unbounded across an all-day session.
+            self._close_cooldown_until.pop(ticker, None)
+            self._partial_close_count.pop(ticker, None)
+            return 0
+        delta = until - now
+        # Round up so a 30-second remainder still shows as 1 minute
+        # (the operator should know the cooldown isn't fully elapsed).
+        return max(1, int(delta.total_seconds() // 60) + (1 if delta.total_seconds() % 60 else 0))
+
+    def _record_partial_close(self, ticker: str) -> None:
+        """
+        Increment the per-ticker partial-fill counter.  When the count
+        reaches PARTIAL_CLOSE_COOLDOWN_THRESHOLD, set the cooldown
+        timestamp so subsequent cycles skip retry attempts for
+        CLOSE_COOLDOWN_MINUTES.
+
+        Called from the close loop in ``_stage_monitor`` after every
+        ``executor.close_spread`` that returns ``fill_status="partial"``.
+        """
+        new_count = self._partial_close_count.get(ticker, 0) + 1
+        self._partial_close_count[ticker] = new_count
+        if new_count >= PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
+            self._close_cooldown_until[ticker] = (
+                datetime.now(timezone.utc)
+                + timedelta(minutes=CLOSE_COOLDOWN_MINUTES)
+            )
+            logger.warning(
+                "[%s] %d consecutive partial closes — entering "
+                "%d-min cooldown.  Manually clean up the position on "
+                "Alpaca's UI to clear the zombie state; the cooldown "
+                "will expire automatically thereafter.",
+                ticker, new_count, CLOSE_COOLDOWN_MINUTES,
+            )
+        else:
+            logger.info(
+                "[%s] Partial-close streak %d/%d.  Will park in "
+                "cooldown after %d.",
+                ticker, new_count, PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+                PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+            )
+
+    def _clear_close_cooldown(self, ticker: str) -> None:
+        """
+        Reset the per-ticker partial-fill counter and discard any
+        cooldown timestamp.  Called on a successful (complete) close.
+        """
+        had_state = (
+            ticker in self._partial_close_count
+            or ticker in self._close_cooldown_until
+        )
+        self._partial_close_count.pop(ticker, None)
+        self._close_cooldown_until.pop(ticker, None)
+        if had_state:
+            logger.info(
+                "[%s] Cleared close-cooldown state after successful "
+                "complete close.",
+                ticker,
             )
 
     def _load_trade_plans(self) -> List[Dict]:
@@ -1213,6 +1573,42 @@ class TradingAgent:
         # Execute trade
         logger.info("[%s] Phase VI — EXECUTE", ticker)
         exec_result = self.executor.execute(verdict)
+
+        # ── Surface executor errors as journal warnings ─────────────────
+        # status="error" means retries were exhausted on a transport-level
+        # failure (timeout, connection reset).  The order MAY have landed
+        # at Alpaca despite the timeout — the client_order_id makes
+        # duplicate submission impossible, but the operator still needs
+        # to confirm whether ANY attempt succeeded.  Surface this
+        # explicitly in the journal so the dashboard's Recent Journal
+        # Entries panel shows the warning + the client_order_id to
+        # search for in the broker UI.
+        if isinstance(exec_result, dict) and exec_result.get("status") == "error":
+            err_msg = exec_result.get("error", "unknown")
+            client_order_id = exec_result.get("client_order_id", "n/a")
+            attempts = exec_result.get("retry_attempts", 1)
+            try:
+                self.journal_kb.log_warning(
+                    source="executor",
+                    ticker=ticker,
+                    message=(
+                        f"Order submission failed after {attempts} "
+                        f"attempt(s): {err_msg}. Search Alpaca for "
+                        f"client_order_id={client_order_id} to confirm "
+                        f"whether the order ever landed (the broker "
+                        f"dedupes duplicates by this key)."
+                    ),
+                    context={
+                        "client_order_id": client_order_id,
+                        "retry_attempts": attempts,
+                        "strategy": plan.strategy_name,
+                    },
+                )
+            except Exception as exc:                              # noqa: BLE001
+                logger.warning(
+                    "[%s] Failed to journal executor warning: %s",
+                    ticker, exc,
+                )
 
         # Journal the trade (if LLM enabled)
         if (self.llm_analyst and llm_decision

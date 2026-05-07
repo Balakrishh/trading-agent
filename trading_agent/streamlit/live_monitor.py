@@ -404,8 +404,228 @@ def _is_dry_run_mode() -> bool:
     return DRY_RUN_FLAG.exists()
 
 
+# ---------------------------------------------------------------------------
+# Orphan-agent sweep — process singleton enforcement
+# ---------------------------------------------------------------------------
+# Pre-2026-05-06 the dashboard's Start/Stop relied entirely on the
+# AGENT_RUNNING sentinel + a daemon-thread inside Streamlit. Three
+# silent failure modes:
+#   1. Stop only removed the sentinel — the in-flight 18-second cycle
+#      subprocess kept running, so a quick Stop→Start spawned a 2nd
+#      subprocess overlapping the first.
+#   2. Streamlit auto-reload (code change) killed the daemon thread but
+#      reparented the cycle subprocess to init — orphan keeps running,
+#      next Streamlit boot's auto-revive spawns ANOTHER subprocess on
+#      top.
+#   3. Opening a NEW browser session never checked for orphans from a
+#      previous session.
+#
+# Result on 2026-05-06: 3 concurrent agent processes each running their
+# own 5-min cycle loop, each submitting on the same ticker because their
+# threading.Lock instances couldn't see each other.
+#
+# Fix: ``_sweep_orphan_agents`` runs at every Start and at session
+# boot.  It (a) terminates AGENT_PID's subprocess if alive, (b)
+# pkill-sweeps any stragglers matching the agent.py command line, and
+# (c) clears stale sentinels so the new agent starts from a clean slate.
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return True iff ``pid`` is a live process owned by us.
+
+    Uses ``os.kill(pid, 0)`` — sends no signal, just checks deliverability.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we can't signal it — still treat as alive
+        # so we don't accidentally stack a duplicate on top.
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
+def _terminate_pid(pid: int, timeout: float = 5.0) -> bool:
+    """SIGTERM, wait up to ``timeout`` seconds, SIGKILL if still alive.
+
+    Returns True if the process is gone after the call.
+    """
+    import signal
+    if not _pid_is_alive(pid):
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:                                       # noqa: BLE001
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_alive(pid):
+            return True
+        time.sleep(0.1)
+    # Last resort.
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:                                       # noqa: BLE001
+        pass
+    time.sleep(0.2)
+    return not _pid_is_alive(pid)
+
+
+def _sweep_orphan_agents() -> Dict[str, Any]:
+    """
+    Hard-kill any orphan agent subprocesses and clear stale sentinels.
+
+    Called at:
+      * Start Agent button (so a stacked previous session can't survive)
+      * Streamlit session boot (so a fresh browser tab starts clean)
+      * Auto-revive (so we don't pile a new subprocess on an orphan)
+
+    Sweep order
+    -----------
+    1. AGENT_PID file → SIGTERM (5s grace) → SIGKILL.  This is the most
+       recent cycle subprocess if any.
+    2. ``pkill -f agent.py`` for any straggler.  Matches command lines
+       like ``python -m trading_agent.agent`` or ``python agent.py``.
+       Filtered to only the user's own processes (-u $USER).
+    3. Remove AGENT_RUNNING / AGENT_PID / PAUSE_FLAG sentinels so the
+       next Start writes them fresh.
+
+    Returns a dict suitable for surfacing in the dashboard banner:
+      ``{"killed_pids": [int, ...], "swept": int, "errors": [str, ...]}``.
+    """
+    killed: List[int] = []
+    errors: List[str] = []
+
+    # Step 1: terminate the tracked AGENT_PID subprocess if alive.
+    if AGENT_PID.exists():
+        try:
+            tracked_pid = int(AGENT_PID.read_text().strip())
+        except (OSError, ValueError) as exc:
+            errors.append(f"AGENT_PID unreadable: {exc}")
+            tracked_pid = -1
+        if tracked_pid > 0 and _pid_is_alive(tracked_pid):
+            if _terminate_pid(tracked_pid):
+                killed.append(tracked_pid)
+            else:
+                errors.append(f"failed to terminate PID {tracked_pid}")
+
+    # Step 2: pkill-sweep any straggler agent.py processes.
+    # We TWO-PHASE the kill:
+    #   (a) SIGTERM via pkill — gives the cycle a chance to clean up
+    #   (b) Verify via pgrep that no matches remain
+    #   (c) If matches survive → SIGKILL via pkill -9
+    # Without the verify+escalate step, a single pkill TERM that races
+    # the cycle's signal handler can leave straggler processes alive.
+    swept = 0
+
+    # ``-u`` filters to the current user — but only if we can reliably
+    # determine who that is.  USER env var is sometimes unset under
+    # systemd/launchd/Streamlit's process tree; fall back to numeric
+    # uid in that case.  If neither resolves, drop the -u filter
+    # entirely (acceptable on a single-tenant dev box).
+    user_arg: List[str] = []
+    user = os.environ.get("USER", "").strip()
+    if user:
+        user_arg = ["-u", user]
+    else:
+        try:
+            uid = os.getuid()                               # noqa: SLF001
+            user_arg = ["-u", str(uid)]
+        except AttributeError:                              # Windows
+            user_arg = []
+
+    pkill_match = "trading_agent.agent"
+    pgrep_match = pkill_match
+
+    def _pkill(signal_arg: Optional[str] = None) -> Optional[int]:
+        """Returns pkill's exit code or None on FileNotFoundError."""
+        cmd = ["pkill"] + ([signal_arg] if signal_arg else []) + user_arg + [
+            "-f", pkill_match,
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return r.returncode
+        except FileNotFoundError:
+            return None
+
+    def _pgrep_count() -> int:
+        try:
+            r = subprocess.run(
+                ["pgrep"] + user_arg + ["-f", pgrep_match],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode in (0, 1):
+                lines = [ln for ln in r.stdout.split("\n") if ln.strip().isdigit()]
+                # Filter out our own Streamlit process so we don't
+                # commit suicide if the Streamlit command line happens
+                # to contain trading_agent.agent (it shouldn't, but
+                # belt-and-braces).
+                own_pid = os.getpid()
+                return sum(1 for ln in lines if int(ln) != own_pid)
+        except FileNotFoundError:
+            return -1
+        except Exception:                                   # noqa: BLE001
+            return -1
+        return 0
+
+    # Phase (a) — SIGTERM first.
+    rc = _pkill(None)
+    if rc is None:
+        errors.append("pkill not available — relying on AGENT_PID-tracked kill only")
+    elif rc not in (0, 1):
+        errors.append(f"pkill TERM exited {rc}")
+    else:
+        swept = 1 if rc == 0 else 0
+
+    # Phase (b)+(c) — verify and escalate.
+    if rc == 0:
+        # We killed at least one — give them ~2s to exit cleanly,
+        # then verify and SIGKILL if any survived.
+        time.sleep(0.5)
+        survivors = _pgrep_count()
+        deadline = time.monotonic() + 2.0
+        while survivors > 0 and time.monotonic() < deadline:
+            time.sleep(0.2)
+            survivors = _pgrep_count()
+        if survivors > 0:
+            kill_rc = _pkill("-9")
+            if kill_rc is not None and kill_rc not in (0, 1):
+                errors.append(f"pkill -9 exited {kill_rc}, {survivors} stragglers")
+            time.sleep(0.3)
+            final = _pgrep_count()
+            if final > 0:
+                errors.append(f"{final} agent.py processes survived even SIGKILL")
+
+    # Step 3: clear stale sentinels so the new agent boots clean.
+    for sentinel in (AGENT_RUNNING, AGENT_PID, PAUSE_FLAG):
+        sentinel.unlink(missing_ok=True)
+
+    return {"killed_pids": killed, "swept": swept, "errors": errors}
+
+
 def _start_agent(dry_run: bool = False) -> None:
-    """Write sentinels and launch the loop in a daemon thread."""
+    """Write sentinels and launch the loop in a daemon thread.
+
+    Always runs an orphan sweep first to enforce the process singleton
+    invariant (see ``_sweep_orphan_agents``).  Without this, clicking
+    Start while a previous Streamlit session's subprocess was still
+    alive produced concurrent cycles that submitted duplicate orders.
+    """
+    sweep = _sweep_orphan_agents()
+    if sweep["killed_pids"]:
+        _append_log(
+            f"[{_now()}] Killed orphan agent PID(s) "
+            f"{sweep['killed_pids']} before Start"
+        )
+    if sweep["swept"]:
+        _append_log(f"[{_now()}] pkill sweep removed straggler agent.py processes")
+    if sweep["errors"]:
+        _append_log(f"[{_now()}] Sweep errors: {sweep['errors']}")
+
     AGENT_RUNNING.write_text(_now())
     if dry_run:
         DRY_RUN_FLAG.write_text(_now())
@@ -446,6 +666,19 @@ def _ensure_loop_alive_if_intended() -> bool:
         return False  # Already healthy — leave it alone.
 
     # Zombie state: sentinel says run, no live thread → revive.
+    # CRITICAL: kill any orphan cycle subprocess from the prior process
+    # incarnation BEFORE spawning a new daemon thread. Without this
+    # sweep the Streamlit auto-reload path produced duplicate cycles
+    # (orphan subprocess + new revived loop both running concurrently).
+    sweep = _sweep_orphan_agents()
+    if sweep["killed_pids"] or sweep["swept"]:
+        _append_log(
+            f"[{_now()}] Auto-revive: swept orphans before reviving "
+            f"(killed={sweep['killed_pids']}, pkill_match={sweep['swept']})"
+        )
+    # The sweep cleared AGENT_RUNNING — re-write it so the loop knows
+    # to keep looping.  DRY_RUN_FLAG isn't touched by the sweep.
+    AGENT_RUNNING.write_text(_now())
     dry_run = DRY_RUN_FLAG.exists()
     t = threading.Thread(target=_agent_loop, daemon=True, name="agent-loop")
     t.start()
@@ -457,10 +690,167 @@ def _ensure_loop_alive_if_intended() -> bool:
     return True
 
 
+def _render_singleton_pill() -> str:
+    """
+    Return a Markdown suffix indicating how many agent processes are alive.
+
+    Returns
+    -------
+    str
+        ``""`` when pgrep is unavailable (e.g. Windows) — silent.
+        ``" · ✓ 1 process"`` when exactly one cycle subprocess is alive.
+        ``" · ⚠ N processes — orphans detected"`` when >1 (visible warning
+        the operator should ▶ Stop and ▶ Start to trigger the sweep).
+        ``""`` when zero processes (normal STOPPED state — no point
+        showing "0 processes" in the pill since the banner already says
+        STOPPED).
+
+    Why a count, not just a boolean
+    --------------------------------
+    Pre-2026-05-06 the dashboard's "Stop" left orphan subprocesses
+    alive and a casual operator had no signal that anything was wrong.
+    The pill is the always-on visible verification — if the singleton
+    invariant ever breaks again, the warning is right there in the
+    status banner instead of buried in the agent log.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "trading_agent.agent"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (FileNotFoundError, Exception):                  # noqa: BLE001
+        return ""
+    if result.returncode not in (0, 1):
+        return ""
+    own_pid = os.getpid()
+    pids = [int(ln) for ln in result.stdout.split("\n")
+            if ln.strip().isdigit() and int(ln) != own_pid]
+    n = len(pids)
+    if n == 0:
+        return ""
+    if n == 1:
+        return " · ✓ singleton (1 process)"
+    return (
+        f" · ⚠ **{n} processes detected** — click Stop then Start to "
+        "re-enforce the singleton (orphan sweep)"
+    )
+
+
+def _sweep_orphans_at_session_boot() -> Optional[Dict[str, Any]]:
+    """One-time sweep on Streamlit session boot — fresh-browser entrypoint.
+
+    Called at the top of ``render_live_monitor`` exactly once per
+    Streamlit session (gated by ``st.session_state``).  When a user
+    opens a new browser tab to the dashboard, we want them to land on
+    a clean, single-process state regardless of what was running
+    before — even if a previous session left orphan subprocesses
+    running because of a Streamlit auto-reload, an OS-level crash, or
+    a manual ``pkill streamlit``.
+
+    Behaviour
+    ---------
+    * If AGENT_RUNNING is set AND the recorded AGENT_PID is alive →
+      respect operator intent, leave the running agent alone, return
+      ``None``.  This is the common "user just reopened the dashboard"
+      case.
+    * If AGENT_RUNNING is set BUT the recorded AGENT_PID is dead (or
+      missing) → treat as orphan state, sweep, return the sweep result
+      so the caller can flash a banner.
+    * If AGENT_RUNNING is not set → sweep stragglers anyway (defensive)
+      and return the sweep result if anything was killed.
+
+    Returns the sweep dict on action, or ``None`` if no action was taken.
+    """
+    if st.session_state.get("_session_boot_sweep_done"):
+        return None
+    st.session_state["_session_boot_sweep_done"] = True
+
+    # CRITICAL: leave the agent alone if ANY of these signals indicate
+    # it's healthy.  Pre-2026-05-06 this only checked AGENT_RUNNING +
+    # AGENT_PID, which produced a destructive bug: between cycles,
+    # AGENT_PID is *absent* (the cycle subprocess finished, the next
+    # one is 5 minutes away), so the boot sweep saw "RUNNING but no
+    # PID alive" → treated it as orphan → deleted AGENT_RUNNING →
+    # the daemon-thread loop's ``while AGENT_RUNNING.exists():``
+    # silently exited and the agent stopped without any user action.
+    #
+    # Health checks (any one is sufficient to skip the sweep):
+    #   1. AGENT_PID is alive → cycle subprocess in flight, definitely
+    #      healthy.
+    #   2. The daemon-thread reference in session_state is alive →
+    #      we're in a 5-min between-cycle gap, the loop will tick
+    #      again on schedule.
+    #   3. The agent log was modified in the last LOOP_HEALTH_WINDOW
+    #      seconds — across-process signal so even after a Streamlit
+    #      auto-reload (which kills the daemon thread + clears
+    #      session_state), a recently-active log proves the loop was
+    #      ticking.  This catches the auto-reload-during-cycle case.
+    #
+    # If any signal says "healthy", return None and DO NOT sweep.
+    if AGENT_RUNNING.exists():
+        # Signal 1: live cycle subprocess.
+        if AGENT_PID.exists():
+            try:
+                pid = int(AGENT_PID.read_text().strip())
+                if pid > 0 and _pid_is_alive(pid):
+                    return None
+            except (OSError, ValueError):
+                pass
+        # Signal 2: live daemon thread.
+        existing_thread = st.session_state.get("_agent_thread")
+        if existing_thread is not None and existing_thread.is_alive():
+            return None
+        # Signal 3: recently-active log file.  10 minutes covers two
+        # 5-min cycle intervals so a single missed cycle (e.g. a long
+        # data fetch) doesn't trip the sweep.
+        try:
+            log_path = Path("logs") / "trading_agent.log"
+            if log_path.exists():
+                age_sec = time.time() - log_path.stat().st_mtime
+                if age_sec < 10 * 60:
+                    return None
+        except Exception:                                   # noqa: BLE001
+            pass
+
+    # No health signal → genuine orphan state.  Sweep, clear sentinels,
+    # surface a banner so the operator knows what was cleaned up.
+    sweep = _sweep_orphan_agents()
+    if sweep["killed_pids"] or sweep["swept"]:
+        _append_log(
+            f"[{_now()}] Session boot: swept orphans "
+            f"(killed={sweep['killed_pids']}, pkill_match={sweep['swept']})"
+        )
+        return sweep
+    return None
+
+
 def _stop_agent() -> None:
-    """Remove sentinel — the loop will exit after the current cycle completes."""
+    """Remove sentinel AND terminate the in-flight cycle subprocess.
+
+    Pre-2026-05-06 this only removed the sentinel and trusted the
+    daemon-thread loop to exit "soon".  In practice a Stop was followed
+    by an in-flight 18-second cycle continuing to run; if the user
+    clicked Start in the meantime, two cycles overlapped.  Now we also
+    SIGTERM the AGENT_PID-tracked subprocess so Stop is genuinely
+    synchronous from the operator's POV — when the function returns,
+    no more order submissions can happen for the previous run.
+    """
     AGENT_RUNNING.unlink(missing_ok=True)
     _append_log(f"[{_now()}] Stop requested from dashboard")
+
+    # Terminate the in-flight cycle subprocess (if any) so a quick
+    # Stop→Start can't overlap.
+    if AGENT_PID.exists():
+        try:
+            pid = int(AGENT_PID.read_text().strip())
+        except (OSError, ValueError):
+            pid = -1
+        if pid > 0 and _pid_is_alive(pid):
+            if _terminate_pid(pid, timeout=5):
+                _append_log(f"[{_now()}] Terminated in-flight cycle PID {pid}")
+            else:
+                _append_log(f"[{_now()}] FAILED to terminate cycle PID {pid}")
+        AGENT_PID.unlink(missing_ok=True)
 
 
 def _kill_current_cycle() -> None:
@@ -493,7 +883,8 @@ def _empty_journal_df() -> pd.DataFrame:
         columns=["timestamp", "account_balance", "ticker", "action",
                  "regime", "mode", "checks_passed", "checks_failed",
                  "notes", "reason",
-                 "rsi_14", "sma_50", "sma_200", "scan_results"]
+                 "rsi_14", "sma_50", "sma_200", "scan_results",
+                 "raw_signal"]
     )
 
 
@@ -569,6 +960,17 @@ def _parse_journal_df(path: str, version: int, mtime: float, size: int) -> pd.Da
                         # checks without KeyError; populated dict on new
                         # records.
                         "scan_results":    rs.get("scan_results") or {},
+                        # Full raw_signal payload preserved as a column
+                        # (added 2026-05-06) so consumers like the Open
+                        # Positions "Why" lookup and the "Closed Today"
+                        # expander can read fields the parser doesn't
+                        # explicitly project (expiration, thesis,
+                        # credit_to_width_ratio, exit_signal, P&L, etc).
+                        # Pre-2026-05-06 the parser only kept a handful
+                        # of explicit columns so any new consumer was
+                        # silently reading None and producing blank
+                        # cells / all-zero panels.
+                        "raw_signal":      rs,
                     })
                 except (json.JSONDecodeError, KeyError):
                     continue
@@ -697,13 +1099,19 @@ def _render_closed_today(journal_df: pd.DataFrame) -> None:
 
     Source of truth: journal rows where ``action == "closed"`` and the
     timestamp is today (UTC).  These are written by
-    ``agent.py:_journal_close_event`` after every successful (or
-    partial) close — strike_proximity / profit_target / hard_stop /
-    regime_shift / dte_safety / expired.
+    ``agent.py:_journal_close_event`` after every COMPLETE close (all
+    legs cancelled by Alpaca) — strike_proximity / profit_target /
+    hard_stop / regime_shift / dte_safety / expired.
+
+    Pre-2026-05-06 the same row tag was used for partial fills too,
+    which made this tile lie when SPY hit a partial-fill loop and
+    produced 11 rows for ONE position.  Partial fills now go to
+    ``_render_close_failures_today`` under a separate
+    ``action="close_failed"`` tag.
 
     Behavior
     --------
-    * If no close events today → hidden (no empty section).
+    * If no complete-close events today → hidden (no empty section).
     * If ≥1 → collapsible expander with a per-row table:
         Time · Ticker · Strategy · Exit Signal · P&L · Reason · Fill Status
       Plus a footer with the running net P&L summed across closes.
@@ -748,7 +1156,9 @@ def _render_closed_today(journal_df: pd.DataFrame) -> None:
     label = (f"🚪 Closed Today ({len(rows)} exit"
              f"{'s' if len(rows) != 1 else ''}, net P&L "
              f"{'+' if net_pl >= 0 else ''}${net_pl:,.2f})")
-    with st.expander(label, expanded=True):
+    # Collapsed by default — Open Positions is the primary anchor; the
+    # closes panel is a click-to-audit secondary view.
+    with st.expander(label, expanded=False):
         st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
         if net_pl != 0:
             st.caption(
@@ -756,6 +1166,230 @@ def _render_closed_today(journal_df: pd.DataFrame) -> None:
                 f"today · net P&L "
                 f"{'+' if net_pl >= 0 else ''}${net_pl:,.2f}"
             )
+
+
+def _render_close_failures_today(journal_df: pd.DataFrame) -> None:
+    """
+    Render the "Close Failures Today" expander above Open Positions.
+
+    Source of truth: journal rows where ``action == "close_failed"``
+    and the timestamp is today (UTC).  These rows are written by
+    ``agent.py:_journal_close_event`` when ``executor.close_spread``
+    returns ``fill_status="partial"`` — typically because Alpaca
+    rejected one or more legs with codes like:
+
+      * ``40310000`` "account not eligible to trade uncovered option contracts"
+      * ``40310100`` "trade denied due to pattern day trading protection"
+      * Insufficient buying power on a small (sub-$25K) account.
+
+    These rows mean **the position is still open on the broker**.
+    Repeated close_failed entries for the same ticker indicate a
+    "zombie" partial-fill state that the agent will park into a
+    cooldown after PARTIAL_CLOSE_COOLDOWN_THRESHOLD attempts.
+
+    Behavior
+    --------
+    * If no close failures today → hidden (no empty section).
+    * If ≥1 → collapsible expander with the most recent attempt per
+      ticker, plus a "retry count" so the operator knows when the
+      cooldown will engage.  The full retry stream is in the journal
+      tab below.
+    """
+    if journal_df is None or journal_df.empty:
+        return
+    if "action" not in journal_df.columns:
+        return
+
+    failures = journal_df[journal_df["action"] == "close_failed"].copy()
+    if failures.empty:
+        return
+
+    today_utc = pd.Timestamp.utcnow().normalize()
+    failures = failures[pd.to_datetime(failures["timestamp"], utc=True)
+                        >= today_utc]
+    if failures.empty:
+        return
+
+    failures = failures.sort_values("timestamp", ascending=False)
+
+    # Group by ticker for compactness — show count + the most recent
+    # attempt's reason.  The full per-attempt stream is still
+    # available in the Recent Journal Entries panel.
+    #
+    # Cooldown surfacing
+    # ------------------
+    # When the most-recent ``close_failed`` row carries
+    # ``close_cooldown_until``, the agent has parked the ticker into
+    # the manual-intervention cooldown window (3 partial fills +
+    # 60-min lockout).  Surface the deadline in the table column AND
+    # render a warning banner above so the operator can't miss it.
+    # Tickers in cooldown are flagged with 🚨; pre-cooldown rows
+    # show the streak (e.g. "2/3") so the operator can see they're
+    # one partial fill away from the lockout.
+    rows = []
+    cooldown_warnings: List[Tuple[str, str]] = []  # (ticker, until-ISO)
+    now_utc = pd.Timestamp.utcnow()
+    for ticker, group in failures.groupby("ticker", sort=False):
+        latest = group.iloc[0]
+        rs = latest.get("raw_signal") or {}
+        if not isinstance(rs, dict):
+            rs = {}
+        leg_results = rs.get("leg_close_results") or []
+        failed_legs = [
+            lr.get("symbol", "?")
+            for lr in leg_results
+            if isinstance(lr, dict) and lr.get("status") != "closed"
+        ]
+        # Streak / threshold from the agent's bookkeeping.
+        streak = rs.get("partial_close_streak")
+        threshold = rs.get("partial_close_threshold")
+        cooldown_until_str = rs.get("close_cooldown_until")
+        cooldown_until = None
+        if cooldown_until_str:
+            try:
+                cooldown_until = pd.to_datetime(cooldown_until_str, utc=True)
+            except Exception:                                    # noqa: BLE001
+                cooldown_until = None
+        cooldown_active = (
+            cooldown_until is not None and cooldown_until > now_utc
+        )
+        if cooldown_active:
+            cooldown_warnings.append(
+                (ticker, cooldown_until.strftime("%H:%M:%S UTC"))
+            )
+
+        # Build the streak cell — "🚨 cooldown until …" if locked,
+        # "2/3" if pre-lockout, "—" if the producer doesn't carry the
+        # field (legacy row before this surface was added).
+        if cooldown_active:
+            streak_cell = (
+                f"🚨 cooldown until "
+                f"{cooldown_until.strftime('%H:%M:%S UTC')}"
+            )
+        elif isinstance(streak, (int, float)) and isinstance(threshold, (int, float)):
+            streak_cell = f"{int(streak)}/{int(threshold)}"
+        else:
+            streak_cell = "—"
+
+        rows.append({
+            "Last Attempt": pd.Timestamp(latest["timestamp"]).strftime("%H:%M:%S"),
+            "Ticker":       ticker,
+            "Strategy":     rs.get("strategy", ""),
+            "Exit Signal":  rs.get("exit_signal", ""),
+            "Retries":      int(len(group)),
+            "Streak":       streak_cell,
+            "Failed Legs":  ", ".join(failed_legs)[:80] if failed_legs else "—",
+            "Reason":       (rs.get("exit_reason") or "")[:80],
+        })
+
+    label = (f"⚠️ Close Failures Today ({len(rows)} ticker"
+             f"{'s' if len(rows) != 1 else ''}, "
+             f"{int(len(failures))} attempt"
+             f"{'s' if len(failures) != 1 else ''}"
+             f"{', 🚨 ' + str(len(cooldown_warnings)) + ' in cooldown' if cooldown_warnings else ''})")
+    # Auto-expand if any ticker is in active cooldown — that's a
+    # manual-intervention signal that shouldn't be hidden behind a
+    # click.  Otherwise stay collapsed by default (symmetric with
+    # "Closed Today").
+    with st.expander(label, expanded=bool(cooldown_warnings)):
+        # Bright warning banner per cooldown'd ticker — operator should
+        # see this even if they don't read the table.
+        for ticker, until_str in cooldown_warnings:
+            st.error(
+                f"🚨 **{ticker} is in 60-min auto-close cooldown until "
+                f"{until_str}.** The position is still open on the "
+                "broker. The executor will NOT retry until the "
+                "deadline passes. Manually flat the position on the "
+                "Alpaca UI to clear the zombie state — naive retry is "
+                "hopeless because Alpaca's reason (PDT / uncovered / "
+                "insufficient buying power) doesn't lift on its own."
+            )
+        st.caption(
+            "These positions are **still open** on the broker — the "
+            "executor's DELETE was rejected (typically PDT, uncovered, "
+            "or insufficient buying power).  The agent parks each "
+            "ticker into a 60-min cooldown after 3 consecutive partial "
+            "fills; the **Streak** column shows progress toward the "
+            "lockout.  Until then, manually flat the position on "
+            "Alpaca's UI to clear the zombie state."
+        )
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+
+def _render_cycle_staleness_beacon(
+    journal_df: pd.DataFrame, loop_running: bool,
+) -> None:
+    """
+    Render an at-a-glance health check based on the journal's most
+    recent entry age.
+
+    Why this exists
+    ---------------
+    A silently-dead agent process looks identical to a healthy one
+    between 5-min cycles.  The orphan sweep catches a process that
+    crashed AND failed to clean up its sentinel — but a process that
+    simply hung in the middle of an LLM call or a Schwab fetch keeps
+    the sentinel alive while making no progress.  The journal is the
+    single source of truth for "the cycle actually finished" because
+    every cycle writes at LEAST one row (skipped, submitted, rejected,
+    error — they all journal).  Therefore:
+
+      * journal mtime newer than 5 min  → healthy cycle cadence
+      * 5-10 min old                    → late, surface a warning
+      * 10+ min old                     → almost certainly stalled,
+                                           surface an error
+
+    Suppression
+    -----------
+    * ``loop_running=False``: operator stopped the agent on purpose;
+      a stale journal is expected and rendering a warning would
+      generate alarm fatigue.
+    * Empty journal: brand-new install before any cycle has fired.
+
+    UI shape
+    --------
+    A single ``st.warning`` / ``st.error`` line (no expander) sitting
+    below the metric row so the operator can't miss it.  Carries the
+    age in minutes + the wall-clock timestamp of the last entry +
+    a "check logs" hint.
+    """
+    if not loop_running:
+        return
+    if journal_df is None or journal_df.empty:
+        return
+    if "timestamp" not in journal_df.columns:
+        return
+
+    try:
+        latest_ts = pd.to_datetime(journal_df["timestamp"], utc=True).max()
+        if pd.isna(latest_ts):
+            return
+        now = pd.Timestamp.utcnow()
+        age_sec = (now - latest_ts).total_seconds()
+    except Exception:                                            # noqa: BLE001
+        return
+
+    age_min = age_sec / 60.0
+    when = latest_ts.strftime("%H:%M:%S UTC")
+
+    # Thresholds match the comment above.  Tighter than the 270s
+    # cycle hard-guard so a single hung cycle still surfaces — we
+    # don't want to wait until the second hang before warning.
+    if age_min >= 10.0:
+        st.error(
+            f"🛑 **Agent appears stalled — last journal entry was "
+            f"{age_min:.1f} min ago** (at {when}). The 5-min cycle "
+            "should have fired by now. Check `logs/trading_agent.log` "
+            "for the last cycle's output, then **Stop** and **Start** "
+            "the agent to recover. The orphan sweep on Start will "
+            "kill any hung subprocess."
+        )
+    elif age_min >= 5.0:
+        st.warning(
+            f"⏰ Last journal entry was {age_min:.1f} min ago "
+            f"(at {when}). One cycle may have skipped — keep an eye "
+            "on the next 5-min mark. If it doesn't recover, restart."
+        )
 
 
 def _render_scanner_diagnostics_panel(journal_df: pd.DataFrame) -> None:
@@ -1015,6 +1649,14 @@ def _guardrail_grid_from_journal(
                 # P&L + reason as the per-cell tooltip.  See
                 # ``agent.py:_journal_close_event`` for the schema.
                 status = "closed"
+            elif action == "close_failed":
+                # Executor's DELETE was rejected by Alpaca (PDT,
+                # uncovered, insufficient buying power) — the position
+                # is still open on the broker.  Surface this as a
+                # distinct verdict so it doesn't get conflated with a
+                # successful close OR a regular approval.  See the
+                # close-failed action in agent.py:_journal_close_event.
+                status = "close_failed"
             else:
                 # Legacy / unknown action label — fall back to the
                 # checks-based heuristic for backward compatibility.
@@ -1599,8 +2241,22 @@ def render_strategy_profile_panel() -> None:
     current = load_active_preset()
     is_loop_running = AGENT_RUNNING.exists()
 
+    # Defensive: ``to_short_summary()`` was added 2026-05-06.  When
+    # Streamlit hot-reloads after a code edit it can keep old class
+    # bindings alive in @st.cache_resource — a PresetConfig instance
+    # constructed from the OLD class won't have the new method.  Fall
+    # back to to_summary_line() so the dashboard renders cleanly even
+    # in that transient state; a hard refresh (Cmd+Shift+R) clears it.
+    try:
+        _expander_label = f"Strategy Profile — {current.to_short_summary()}"
+    except AttributeError:
+        _expander_label = f"Strategy Profile — {current.to_summary_line()}"
+
     with st.expander(
-        f"Strategy Profile — {current.to_summary_line()}",
+        # Concise label for the collapsed state — the verbose
+        # ``to_summary_line()`` runs ~180 chars and was hard to scan.
+        # Full detail still surfaces inside the expander body.
+        _expander_label,
         # User preference: keep configuration grids collapsed by default.
         # The summary line in the header is enough to know what's active
         # at a glance; expand only when tweaking.
@@ -1754,6 +2410,14 @@ def render_strategy_profile_panel() -> None:
 def render_live_monitor() -> None:
     """Render the Live Monitoring tab — single entry point for the trading agent."""
 
+    # ── Session-boot orphan sweep ─────────────────────────────────────────
+    # Runs exactly once per Streamlit session.  If a previous session's
+    # cycle subprocess survived a crash or auto-reload (orphan reparented
+    # to init), or AGENT_RUNNING is set but AGENT_PID points to a dead
+    # process, this sweep cleans it up so the dashboard always lands on
+    # a single-process state.  See ``_sweep_orphans_at_session_boot``.
+    boot_sweep = _sweep_orphans_at_session_boot()
+
     # ── Self-heal a zombie agent loop ─────────────────────────────────────
     # Streamlit's file watcher restarts the Python process on code edits,
     # killing the daemon thread that runs the agent loop while leaving
@@ -1769,6 +2433,25 @@ def render_live_monitor() -> None:
 
     # ── Header row ────────────────────────────────────────────────────────
     st.subheader("Live Portfolio Monitor")
+
+    if boot_sweep is not None:
+        # A previous session left orphan agent processes alive and we
+        # cleaned them up before this dashboard rendered.  Surface what
+        # happened so the operator knows why the previous "Stop" didn't
+        # fully take and what state we're in now.
+        killed = boot_sweep.get("killed_pids", [])
+        swept_match = boot_sweep.get("swept", 0)
+        bits = []
+        if killed:
+            bits.append(f"terminated PID(s) {killed}")
+        if swept_match:
+            bits.append("pkill cleared straggler agent.py processes")
+        detail = "; ".join(bits) if bits else "cleared stale sentinels"
+        st.warning(
+            f"🧹 Cleaned up orphan agent state on session boot — {detail}. "
+            "You're on a clean single-process baseline. Click **Start Agent** "
+            "to begin a fresh cycle."
+        )
 
     if revived:
         # Surface what just happened so the user understands why their UI
@@ -1889,27 +2572,32 @@ def render_live_monitor() -> None:
 
     # ── Status banner ──────────────────────────────────────────────────────
     mode_badge = " · DRY RUN" if dry_mode else " · LIVE"
+    # Process-singleton verification — counts live agent.py processes
+    # via the same pgrep pattern the orphan sweep uses.  Renders inline
+    # with the status banner so the operator can confirm at a glance
+    # that exactly one agent is running (or see the warning if multiple).
+    singleton_pill = _render_singleton_pill()
     if loop_running and cycle_running:
         pid = AGENT_PID.read_text().strip() if AGENT_PID.exists() else "?"
         if dry_mode:
-            st.warning(f"Agent is **RUNNING [DRY RUN]** — cycle in progress (PID {pid}) — no orders will be placed")
+            st.warning(f"Agent is **RUNNING [DRY RUN]** — cycle in progress (PID {pid}) — no orders will be placed{singleton_pill}")
         else:
-            st.success(f"Agent is **RUNNING [LIVE]** — cycle in progress (PID {pid})")
+            st.success(f"Agent is **RUNNING [LIVE]** — cycle in progress (PID {pid}){singleton_pill}")
     elif loop_running:
         if dry_mode:
-            st.warning(f"Agent is **ACTIVE [DRY RUN]{mode_badge}** — waiting for next cycle — no orders will be placed")
+            st.warning(f"Agent is **ACTIVE [DRY RUN]{mode_badge}** — waiting for next cycle — no orders will be placed{singleton_pill}")
         else:
-            st.success(f"Agent is **ACTIVE [LIVE]** — waiting for next cycle")
+            st.success(f"Agent is **ACTIVE [LIVE]** — waiting for next cycle{singleton_pill}")
     elif PAUSE_FLAG.exists():
         st.warning(
             f"Agent is **PAUSED** since {_safe_read_text(PAUSE_FLAG)[:19]} UTC. "
-            "Click ▶ Resume to continue."
+            f"Click ▶ Resume to continue.{singleton_pill}"
         )
     else:
         if dry_mode:
-            st.info("Agent is **STOPPED** · Dry Run mode is armed — click ▶ Start (Dry Run) to simulate.")
+            st.info(f"Agent is **STOPPED** · Dry Run mode is armed — click ▶ Start (Dry Run) to simulate.{singleton_pill}")
         else:
-            st.error("Agent is **STOPPED** — click ▶ Start Agent to begin live trading.")
+            st.error(f"Agent is **STOPPED** — click ▶ Start Agent to begin live trading.{singleton_pill}")
 
     st.divider()
 
@@ -2018,19 +2706,52 @@ def render_live_monitor() -> None:
     else:
         cycle_secs = None
 
-    # ── Metrics row ────────────────────────────────────────────────────────
-    metric_row(equity, total_pnl, regime, cycle_secs)
-    st.divider()
+    # ── Realized P&L from today's closes ───────────────────────────────────
+    # Sum action="closed" rows with timestamps in today UTC.  This is the
+    # operator's "money I locked in today" number; combined with
+    # total_pnl (currently-open) it produces the headline "Daily P&L"
+    # tile.  Pre-2026-05-06 the tile only showed unrealized — after the
+    # first close of the day, the headline number stopped reflecting
+    # the operator's true daily P&L.
+    realized_today = 0.0
+    if not journal_df.empty and "action" in journal_df.columns:
+        try:
+            today_utc_ts = pd.Timestamp.utcnow().normalize()
+            closed_today = journal_df[
+                (journal_df["action"] == "closed")
+                & (pd.to_datetime(journal_df["timestamp"], utc=True)
+                   >= today_utc_ts)
+            ]
+            for _, row in closed_today.iterrows():
+                rs = row.get("raw_signal") or {}
+                if not isinstance(rs, dict):
+                    continue
+                # ``net_unrealized_pl`` at close time IS the realized
+                # P&L of that position — Alpaca freezes the value once
+                # the legs settle.
+                realized_today += float(rs.get("net_unrealized_pl") or 0)
+        except Exception as exc:                                 # noqa: BLE001
+            # Defensive: if the journal schema drifts, prefer to render
+            # the unrealized-only tile rather than crash the dashboard.
+            logger.warning("Realized-P&L compute failed: %s", exc)
+            realized_today = 0.0
 
-    # ── Closed Today (collapsible) ────────────────────────────────────────
-    # Lists every spread the position-monitor closed today via an exit
-    # signal (strike_proximity / profit_target / hard_stop / regime_shift
-    # / dte_safety / expired) along with the realised P&L and the exit
-    # justification.  Sourced from journal rows where action="closed" —
-    # written by ``agent.py:_journal_close_event`` (added 2026-05-06).
-    # If no closes happened today the expander is hidden so the operator
-    # doesn't see an empty section.
-    _render_closed_today(journal_df)
+    # ── Metrics row ────────────────────────────────────────────────────────
+    metric_row(equity, total_pnl, regime, cycle_secs,
+               realized_pnl=realized_today)
+
+    # ── Cycle staleness beacon ────────────────────────────────────────────
+    # If the latest journal entry is older than 5 minutes, the agent
+    # may be in trouble — a cycle takes ~30-60s and fires every 5 min,
+    # so a fresh journal row should appear at most ~6 min after the
+    # previous one.  Render a clear orange/red banner when stale.  The
+    # beacon is suppressed when the loop is stopped (the operator
+    # already knows nothing's running) and on a brand-new install
+    # (empty journal).  See _sweep_orphan_agents for the complementary
+    # process-side health check.
+    _render_cycle_staleness_beacon(journal_df, loop_running)
+
+    st.divider()
 
     # ── Open positions ─────────────────────────────────────────────────────
     op_hdr_col, op_btn_col = st.columns([4, 1])
@@ -2064,7 +2785,10 @@ def render_live_monitor() -> None:
             "Click **↻ Refresh broker state** above for a one-off "
             "snapshot, or **Start Agent** to resume polling."
         )
-    positions_table(spreads)
+    # Pass journal_df so the table can add the "Why" column + entry-
+    # justification expander pulling thesis + risk-manager checks from
+    # the matching submitted entry trade for each open spread.
+    positions_table(spreads, journal_df=journal_df)
 
     # Origin breakdown — concise inline summary so the operator can tell
     # at a glance how many spreads have full trade-plan context vs were
@@ -2091,6 +2815,26 @@ def render_live_monitor() -> None:
             "combination doesn't fit a known spread shape."
         )
         ungrouped_legs_table(ungrouped_legs)
+
+    # ── Closed Today (collapsed by default) ───────────────────────────────
+    # Lists every spread the position-monitor closed today via an exit
+    # signal (strike_proximity / profit_target / hard_stop / regime_shift
+    # / dte_safety / expired) along with the realised P&L and the exit
+    # justification.  Sourced from journal rows where action="closed" —
+    # written by ``agent.py:_journal_close_event`` (added 2026-05-06).
+    # Sits below Open Positions so the live broker state stays the
+    # operator's primary anchor; closes are a secondary audit-trail
+    # view.  If no closes happened today the expander is hidden
+    # entirely so the operator doesn't see an empty section.
+    _render_closed_today(journal_df)
+
+    # ── Close Failures Today (collapsed by default) ───────────────────────
+    # Same source — but filters to action="close_failed" rows that are
+    # written when the executor's DELETE was rejected by Alpaca (PDT,
+    # uncovered, insufficient buying power).  These positions are still
+    # open on the broker.  Hidden when there are zero failures, so the
+    # absence of the panel is itself a positive signal.
+    _render_close_failures_today(journal_df)
     st.divider()
 
     # ── Equity curve (collapsed by default per user preference) ───────────
@@ -2122,12 +2866,22 @@ def render_live_monitor() -> None:
         f"🛡️ Risk Guardrail Status — Latest Cycle [{active_mode}]",
         expanded=True,
     ):
+        # Read the active preset's max_risk_pct so the Max-Loss column
+        # header reflects the actual budget (e.g. "≤ 5% Equity" instead
+        # of the hardcoded legacy "≤ 2% Equity").  Defensive try/except —
+        # a missing or malformed STRATEGY_PRESET.json must not crash the
+        # dashboard render; the helper falls back to the legacy label.
+        try:
+            _grid_max_risk_pct = float(load_active_preset().max_risk_pct)
+        except Exception:                                    # noqa: BLE001
+            _grid_max_risk_pct = None
         guardrail_grid(
             _guardrail_grid_from_journal(
                 journal_df,
                 current_mode=active_mode,
                 held_tickers=held_tickers,
-            )
+            ),
+            max_risk_pct=_grid_max_risk_pct,
         )
 
     # ── SMA drift caption (Market OPEN/CLOSED moved to page header) ───────

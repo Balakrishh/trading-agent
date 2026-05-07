@@ -25,7 +25,7 @@ JSONL record schema
                          "error" | "skipped_by_llm" | "skipped_existing")
   "price":       float  (current underlying price at signal time)
   "exec_status": str   (mirrors action or final order status)
-  "notes":       str   (brief human-readable summary ≤ 120 chars)
+  "notes":       str   (brief human-readable summary ≤ 200 chars)
   "raw_signal": {
       "mode":                  str   ("LIVE" | "DRY-RUN") — appended by
                                       agent.py:_log_signal so the dashboard
@@ -90,11 +90,17 @@ logger = logging.getLogger(__name__)
 _DEFAULT_HEARTBEAT_EVERY = 12
 
 # Actions that ALWAYS write a journal row regardless of dedup state.
-# Submissions, closes, and dry-run sentinels are material events; an
-# operator must see each one at the exact moment it happened.
+# Submissions, closes, close-failures, and dry-run sentinels are
+# material events; an operator must see each one at the exact moment
+# it happened.  In particular, ``close_failed`` (added 2026-05-06)
+# bypasses dedup so successive partial-fill attempts on a zombie
+# position remain individually visible — that's the data the operator
+# needs to recognise the zombie state and intervene.
 _DEDUP_BYPASS_ACTIONS = frozenset({
-    "submitted", "dry_run", "closed", "dry_run_close",
+    "submitted", "dry_run", "closed", "close_failed", "dry_run_close",
     "error",  # errors are rare AND material — dedupe is wrong here
+    "warning",  # connectivity / retry-exhausted / OAuth failures —
+                # operators must see each occurrence as it happens.
 })
 
 _MD_HEADER = (
@@ -172,7 +178,12 @@ class JournalKB:
         price       : underlying price at decision time
         raw_signal  : full market + plan + risk context dict
         exec_status : final order status if different from action
-        notes       : optional ≤120-char human summary
+        notes       : optional ≤200-char human summary
+                      (raised 2026-05-06 from 120 — the rejection-reason
+                      strings produced by the chain scanner regularly run
+                      150-180 chars and were getting truncated mid-paren
+                      in the dashboard's Recent Journal Entries panel,
+                      losing the most diagnostic part)
         """
         ts = datetime.now(timezone.utc).isoformat()
         status = exec_status or action
@@ -196,7 +207,7 @@ class JournalKB:
             "action": action,
             "price": round(float(price), 4),
             "exec_status": status,
-            "notes": notes[:120],
+            "notes": notes[:200],
             "raw_signal": raw_signal,
         }
         if dedup_meta:
@@ -328,7 +339,7 @@ class JournalKB:
             price=price,
             raw_signal={"error": error, **(context or {})},
             exec_status="error",
-            notes=error[:120],
+            notes=error[:200],
         )
 
     def log_cycle_error(self, error: str, context: Optional[Dict] = None) -> None:
@@ -342,6 +353,71 @@ class JournalKB:
         }
         self._write_jsonl(record)
         logger.error("JournalKB cycle_error: %s", error)
+
+    def log_warning(
+        self,
+        source: str,
+        message: str,
+        ticker: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Emit an ``action="warning"`` row to the journal.
+
+        Why this exists
+        ---------------
+        Pre-2026-05-06 connectivity issues (rate-limits, retry exhaustion,
+        Schwab refresh failure surfaced to the operator only via
+        ``logs/trading_agent.log`` — invisible to the dashboard
+        Recent Journal Entries panel.  An operator who only watches
+        the UI could miss real broker issues for hours.
+
+        This helper writes a structured row that:
+          * Renders in the Recent Journal Entries panel like any
+            other action.
+          * Bypasses the rejection-spam dedup gate (warnings are
+            material — see ``_DEDUP_BYPASS_ACTIONS``).
+          * Carries a ``source`` tag so an operator can grep by
+            subsystem (e.g. ``executor``, ``schwab_oauth``,
+            ``position_monitor``).
+
+        Parameters
+        ----------
+        source : a short subsystem tag (e.g. ``"executor"``,
+                 ``"schwab_oauth"``, ``"market_data"``).  Surfaced as
+                 the ``raw_signal.source`` field.
+        message: the human-readable warning copy.  Capped at 500 chars
+                 in the journal record (the ``notes`` cell is capped at
+                 200 by ``log_signal``; this is the longer ``raw_signal``
+                 form for full triage context).
+        ticker : optional underlying — when present, the row groups
+                 with that ticker in dashboard panels that filter by
+                 ticker (Recent Journal Entries does not, so this
+                 only matters for future ticker-scoped tools).
+        context: arbitrary structured context (HTTP status, attempt
+                 count, last error string, etc.).  Surfaced inside
+                 ``raw_signal``.
+        """
+        raw: Dict[str, Any] = {
+            "source": source,
+            "message": message[:500],
+            "context": context or {},
+        }
+        # Use the same log_signal path so the row carries the full
+        # canonical schema (timestamp, ticker, action, exec_status,
+        # notes, raw_signal) and the Markdown ledger gets a row too.
+        self.log_signal(
+            ticker=ticker or "",
+            action="warning",
+            price=0.0,
+            raw_signal=raw,
+            exec_status=f"warning_{source}",
+            notes=f"[{source}] {message[:180]}",
+        )
+        logger.warning("JournalKB warning [%s]%s %s",
+                       source,
+                       f" {ticker}" if ticker else "",
+                       message)
 
     def log_shutdown(self, reason: str, context: Optional[Dict] = None) -> None:
         """

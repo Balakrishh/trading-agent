@@ -331,12 +331,40 @@ class SchwabOAuth:
     # ------------------------------------------------------------------
     # Refresh
     # ------------------------------------------------------------------
+    # Up to N attempts on transient errors (5xx, network).  The 30-min
+    # access-token window means we have plenty of time to retry without
+    # racing the cycle's 270s hard guard.  4xx is not retried — those
+    # are permanent and re-auth is required.
+    REFRESH_MAX_ATTEMPTS = 3
+    # Exponential backoff base: attempt n waits 2^n seconds (2s, 4s, 8s).
+    # Capped so the total never exceeds the cycle's runway.
+    REFRESH_BACKOFF_BASE = 2.0
+    REFRESH_BACKOFF_CAP_S = 8.0
+
     def _refresh(self, ts: TokenSet) -> TokenSet:
         """
-        Call POST /token with grant_type=refresh_token.  Schwab returns
-        a brand-new refresh_token alongside the new access_token; we
-        persist the new one immediately so a crash mid-cycle doesn't
-        invalidate the cache.
+        Call POST /token with grant_type=refresh_token, with retry.
+
+        Schwab returns a brand-new refresh_token alongside the new
+        access_token; we persist the new one immediately so a crash
+        mid-cycle doesn't invalidate the cache.
+
+        Retry policy
+        ------------
+        * Up to ``REFRESH_MAX_ATTEMPTS`` attempts (default 3).
+        * Exponential backoff between attempts (2s, 4s, capped at 8s).
+        * Retries cover transient transport errors (network, 5xx) and
+          429 rate-limits.
+        * 4xx (except 429) is treated as PERMANENT: refresh-token
+          revoked / expired / app credentials wrong.  Surface a
+          re-auth instruction immediately rather than wasting attempts.
+
+        Pre-2026-05-06 this method did exactly ONE attempt and raised
+        on the first non-200.  A single transient 5xx or network blip
+        during the 30-min refresh window halted the agent until manual
+        intervention.  For live trading that's an unacceptable single
+        point of failure — a 30s retry budget is cheap relative to
+        watching the operator's screen forever.
         """
         if not ts.refresh_token:
             raise RuntimeError(
@@ -353,18 +381,80 @@ class SchwabOAuth:
             "grant_type": "refresh_token",
             "refresh_token": ts.refresh_token,
         }
-        resp = requests.post(
-            TOKEN_URL,
-            headers=self._basic_auth_header(),
-            data=body,
-            timeout=TOKEN_TIMEOUT,
+
+        last_status: Optional[int] = None
+        last_text: str = ""
+        for attempt in range(1, self.REFRESH_MAX_ATTEMPTS + 1):
+            try:
+                resp = requests.post(
+                    TOKEN_URL,
+                    headers=self._basic_auth_header(),
+                    data=body,
+                    timeout=TOKEN_TIMEOUT,
+                )
+                last_status = resp.status_code
+                last_text = (resp.text or "")[:300]
+
+                if resp.status_code == 200:
+                    if attempt > 1:
+                        logger.info(
+                            "Schwab token refresh succeeded on attempt %d/%d.",
+                            attempt, self.REFRESH_MAX_ATTEMPTS,
+                        )
+                    return self._ingest_token_response(resp.json())
+
+                # 4xx (except 429): permanent — refresh token revoked,
+                # client credentials wrong, scope issue.  Stop now.
+                if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                    logger.error(
+                        "Schwab token refresh PERMANENTLY FAILED "
+                        "(HTTP %d, attempt %d/%d): %s. The refresh token "
+                        "is likely revoked. Run "
+                        "`python -m trading_agent.schwab_oauth login` "
+                        "to re-authenticate.",
+                        resp.status_code, attempt,
+                        self.REFRESH_MAX_ATTEMPTS, last_text,
+                    )
+                    raise RuntimeError(
+                        f"Schwab token refresh permanently failed: "
+                        f"HTTP {resp.status_code} — {last_text}. "
+                        "Refresh-token likely revoked; re-auth required."
+                    )
+
+                # Otherwise (5xx, 429, weird gateway codes): transient.
+                logger.warning(
+                    "Schwab token refresh transient error "
+                    "(HTTP %d, attempt %d/%d): %s",
+                    resp.status_code, attempt,
+                    self.REFRESH_MAX_ATTEMPTS, last_text,
+                )
+            except requests.RequestException as exc:
+                last_text = str(exc)
+                logger.warning(
+                    "Schwab token refresh network error "
+                    "(attempt %d/%d): %s",
+                    attempt, self.REFRESH_MAX_ATTEMPTS, exc,
+                )
+
+            # Backoff (skip after the final attempt).
+            if attempt < self.REFRESH_MAX_ATTEMPTS:
+                wait = min(
+                    self.REFRESH_BACKOFF_BASE ** attempt,
+                    self.REFRESH_BACKOFF_CAP_S,
+                )
+                logger.info(
+                    "Retrying Schwab token refresh in %.1fs...", wait,
+                )
+                time.sleep(wait)
+
+        # All attempts exhausted on transient errors.
+        raise RuntimeError(
+            f"Schwab token refresh failed after "
+            f"{self.REFRESH_MAX_ATTEMPTS} attempts. "
+            f"Last response: HTTP {last_status} — {last_text}. "
+            "If this persists, run "
+            "`python -m trading_agent.schwab_oauth login` to re-auth."
         )
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Schwab token refresh failed: HTTP {resp.status_code} — "
-                f"{resp.text[:300]}"
-            )
-        return self._ingest_token_response(resp.json())
 
     # ------------------------------------------------------------------
     # Public API

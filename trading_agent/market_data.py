@@ -84,6 +84,14 @@ ALPACA_READ_TIMEOUT_LONG = 15
 ALPACA_TIMEOUT = (ALPACA_CONNECT_TIMEOUT, ALPACA_READ_TIMEOUT)
 ALPACA_TIMEOUT_LONG = (ALPACA_CONNECT_TIMEOUT, ALPACA_READ_TIMEOUT_LONG)
 
+# ── Snapshot batch retry policy ─────────────────────────────────────────────
+# 09:30 ET market-open surge regularly produced 10s read-timeouts on the
+# snapshot endpoint, blanking regime classification for the entire 5-min
+# cycle.  Two attempts with brief backoff recover from those without
+# breaking the cycle's 270s hard guard.
+SNAPSHOT_RETRY_ATTEMPTS = 2
+SNAPSHOT_RETRY_BACKOFF_S = 0.5
+
 
 def _truncate_json(obj: object, limit: int = 400) -> str:
     """Compact, length-capped JSON repr for log lines — diagnostic only."""
@@ -436,13 +444,39 @@ class MarketDataProvider:
         params = {"symbols": ",".join(tickers), "feed": feed}
         now = time.monotonic()
 
-        try:
-            resp = requests.get(url, headers=self._alpaca_headers(),
-                                params=params, timeout=ALPACA_TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
-        except requests.RequestException as exc:
-            logger.warning("Batch snapshot request failed: %s", exc)
+        # Retry transient transport errors — typical at 09:30 ET when the
+        # endpoint queues under load.  See SNAPSHOT_RETRY_ATTEMPTS comment.
+        data = None
+        last_exc = None
+        for attempt in range(1, SNAPSHOT_RETRY_ATTEMPTS + 1):
+            try:
+                resp = requests.get(url, headers=self._alpaca_headers(),
+                                    params=params, timeout=ALPACA_TIMEOUT)
+                resp.raise_for_status()
+                data = resp.json()
+                if attempt > 1:
+                    logger.info(
+                        "Batch snapshot succeeded on attempt %d/%d",
+                        attempt, SNAPSHOT_RETRY_ATTEMPTS,
+                    )
+                break
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < SNAPSHOT_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "Batch snapshot transient failure (attempt %d/%d): "
+                        "%s — retrying in %.1fs",
+                        attempt, SNAPSHOT_RETRY_ATTEMPTS, exc,
+                        SNAPSHOT_RETRY_BACKOFF_S,
+                    )
+                    time.sleep(SNAPSHOT_RETRY_BACKOFF_S)
+                    continue
+
+        if data is None:
+            logger.warning(
+                "Batch snapshot request failed after %d attempt(s): %s",
+                SNAPSHOT_RETRY_ATTEMPTS, last_exc,
+            )
             return {}
 
         prices: Dict[str, float] = {}

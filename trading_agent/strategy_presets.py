@@ -112,7 +112,7 @@ class PresetConfig:
                 self.dte_mean_reversion + self.dte_window_days)
 
     def to_summary_line(self) -> str:
-        """One-liner for the dashboard status line."""
+        """Detailed one-liner for the agent log + dashboard expander body."""
         wstr = (f"{self.width_value*100:.1f}%spot"
                 if self.width_mode == "pct_of_spot"
                 else f"${self.width_value:.0f}")
@@ -129,6 +129,30 @@ class PresetConfig:
             f"Vert@{self.dte_vertical}d Δ-{self.max_delta:.2f} w={wstr} • "
             f"IC@{self.dte_iron_condor}d • MR@{self.dte_mean_reversion}d • "
             f"C/W ≥ {self.min_credit_ratio} • Max risk {self.max_risk_pct*100:.0f}%"
+        )
+
+    def to_short_summary(self) -> str:
+        """Concise one-liner for the COLLAPSED Strategy Profile expander.
+
+        The full ``to_summary_line()`` runs ~180 chars and is hard to
+        scan at a glance.  This version trims to the four numbers an
+        operator actually looks at in the expander label:
+
+            <Profile> · IC <D>d · Δ <max_delta> · <risk%>
+
+        Examples::
+
+            Custom · IC 21d · Δ 0.25 · 5% risk
+            Balanced · IC 35d · Δ 0.25 · 2% risk · ADAPT
+
+        ADAPT suffix makes the scan-mode visible without expanding the
+        details panel — useful since adaptive vs static is a meaningful
+        operator choice.
+        """
+        scan = " · ADAPT" if self.scan_mode == "adaptive" else ""
+        return (
+            f"{self.name.title()} · IC {self.dte_iron_condor}d · "
+            f"Δ {self.max_delta:.2f} · {self.max_risk_pct*100:g}% risk{scan}"
         )
 
 

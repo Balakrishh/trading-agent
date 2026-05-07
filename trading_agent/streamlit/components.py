@@ -5,7 +5,7 @@ All chart-building logic lives here so live_monitor, backtest_ui, and
 llm_extension never import plotly directly.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,12 +24,39 @@ GUARDRAIL_NAMES: List[str] = [
     "Plan Validity",
     "Credit/Width Ratio",
     "Delta ≤ Max Delta",
-    "Max Loss ≤ 2% Equity",
+    "Max Loss ≤ 2% Equity",            # legacy default — overridden per-render
     "Paper Account",
     "Market Open",
     "Bid/Ask Spread",
     "Buying Power ≤ 80%",
 ]
+
+# Index of the Max-Loss column whose label changes with the active
+# preset's ``max_risk_pct``.  Kept as a module-level constant so the
+# helper below stays a pure substitution and other paths that just
+# need the keyword list (matching/cell-detail rendering) don't need
+# to thread the percent through.
+_MAX_LOSS_COLUMN_IDX = 3
+
+
+def guardrail_names_with_risk_pct(max_risk_pct: Optional[float]) -> List[str]:
+    """
+    Return ``GUARDRAIL_NAMES`` with the Max-Loss column relabelled to
+    reflect the active preset's ``max_risk_pct``.  E.g. at 5%::
+
+        Max Loss ≤ 5% Equity
+
+    ``max_risk_pct`` should be the preset's value (the same one the
+    RiskManager and OrderExecutor are using on this cycle).  ``None``
+    falls back to the static "2%" label — matches the pre-2026-05-06
+    hardcoded behaviour for callers that haven't been updated yet.
+    """
+    if max_risk_pct is None or max_risk_pct <= 0:
+        return list(GUARDRAIL_NAMES)
+    pct_label = f"{max_risk_pct * 100:g}"     # 0.05 → "5", 0.025 → "2.5"
+    out = list(GUARDRAIL_NAMES)
+    out[_MAX_LOSS_COLUMN_IDX] = f"Max Loss ≤ {pct_label}% Equity"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +171,18 @@ def metric_row(
     pnl: float,
     regime: str,
     cycle_secs: Optional[int],
+    realized_pnl: Optional[float] = None,
 ) -> None:
     """Four-column metrics bar: equity · P&L · regime badge · cycle countdown.
+
+    ``pnl`` is the unrealized P&L from currently-open positions.
+    ``realized_pnl`` (optional) is the sum of realized P&L from
+    today's closed positions; when provided, the headline metric
+    becomes "Daily P&L" and shows ``unrealized + realized``, with
+    the unrealized + realized split surfaced as the delta caption.
+    Pre-2026-05-06 the tile only showed unrealized — after the first
+    close of the day, the headline number stopped reflecting the
+    operator's true daily P&L.
 
     ``cycle_secs`` is ``None`` when the agent loop is stopped — we render an
     em-dash and a ``Stopped`` caption rather than a wall-clock countdown,
@@ -156,8 +193,31 @@ def metric_row(
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Portfolio Equity", f"${equity:,.2f}")
 
-    delta_color = "normal" if pnl >= 0 else "inverse"
-    c2.metric("Unrealized P&L", f"${pnl:+,.2f}", delta_color=delta_color)
+    if realized_pnl is None:
+        # Legacy path — only unrealized provided.  Preserve old label
+        # so backtest_ui (which calls this without realized) keeps
+        # rendering "Unrealized P&L".
+        delta_color = "normal" if pnl >= 0 else "inverse"
+        c2.metric("Unrealized P&L", f"${pnl:+,.2f}",
+                  delta_color=delta_color)
+    else:
+        # Live path — render combined daily P&L with the split as the
+        # delta caption.  An operator who closed +$80 today and is
+        # currently down -$20 unrealized sees "Daily P&L $+60.00 ·
+        # realized $+80 / unrealized $-20.00" instead of just the
+        # misleading "$-20.00".
+        total = pnl + realized_pnl
+        delta_color = "normal" if total >= 0 else "inverse"
+        delta_caption = (
+            f"realized ${realized_pnl:+,.2f} / "
+            f"unrealized ${pnl:+,.2f}"
+        )
+        c2.metric(
+            "Daily P&L",
+            f"${total:+,.2f}",
+            delta=delta_caption,
+            delta_color=delta_color,
+        )
 
     with c3:
         color = REGIME_COLORS.get(regime.lower(), "#9e9e9e")
@@ -213,12 +273,19 @@ def guardrail_cards(guardrail_status: List[Dict]) -> None:
             )
 
 
-def guardrail_grid(grid_rows: List[Dict]) -> None:
+def guardrail_grid(grid_rows: List[Dict],
+                   max_risk_pct: Optional[float] = None) -> None:
     """Per-ticker × per-guardrail status grid for the latest cycle.
 
     ``grid_rows`` comes from
     :func:`live_monitor._guardrail_grid_from_journal` — see its
     docstring for the row-shape contract.
+
+    ``max_risk_pct`` (e.g. ``0.05`` for 5%) sets the Max-Loss column
+    header dynamically so it reflects the active preset.  Defaults to
+    ``None`` which renders the legacy "Max Loss ≤ 2% Equity" label —
+    pre-2026-05-06 callers that don't pass this kwarg get the old
+    behaviour unchanged.
 
     We render a hand-rolled HTML table because Streamlit's native
     ``st.dataframe`` cannot colour cells AND show hover tooltips for
@@ -255,7 +322,7 @@ def guardrail_grid(grid_rows: List[Dict]) -> None:
     state_text_fg = {"ok": "#1b5e20", "warn": "#8d6e00",
                      "fail": "#b71c1c", "skipped": "#888888"}
 
-    cols = GUARDRAIL_NAMES
+    cols = guardrail_names_with_risk_pct(max_risk_pct)
     th_style = (
         "text-align:center;padding:6px 6px;font-size:0.78em;"
         "color:#555;font-weight:600;background:#fafafa;"
@@ -342,6 +409,18 @@ def guardrail_grid(grid_rows: List[Dict]) -> None:
             approved_bg    = "#ede7f6"     # very light purple
             approved_label = "EXITED"
             approved_fg    = "#4527a0"     # deep purple text
+        elif status == "close_failed":
+            # Executor's DELETE was rejected by Alpaca (PDT, uncovered,
+            # insufficient buying power) — the position is still open
+            # on the broker.  Amber palette flags it as "needs operator
+            # attention" without screaming REJECTED (which means the
+            # OPEN was rejected — a different beast).  The cooldown
+            # mechanism in agent.py:_record_partial_close prevents
+            # the cycle from spamming retries.
+            approved_emoji = "⚠️"
+            approved_bg    = "#fff8e1"     # very light amber
+            approved_label = "CLOSE FAILED"
+            approved_fg    = "#bf360c"     # deep orange text
         elif status == "approved":
             approved_emoji = state_emoji["ok"]
             approved_bg    = state_bg["ok"]
@@ -394,7 +473,8 @@ def guardrail_grid(grid_rows: List[Dict]) -> None:
     st.markdown(table_html, unsafe_allow_html=True)
 
 
-def positions_table(spreads: List[Dict]) -> None:
+def positions_table(spreads: List[Dict],
+                    journal_df: Optional[pd.DataFrame] = None) -> None:
     """Styled positions table. Each dict is a serialised SpreadPosition.
 
     The ``Source`` column distinguishes plan-matched rows ("📋 plan") from
@@ -402,30 +482,174 @@ def positions_table(spreads: List[Dict]) -> None:
     from broker leg structure when no ``trade_plan_*.json`` matched.
     Both kinds carry live P&L and exit-signal info; only the recorded
     entry credit differs in fidelity.
+
+    ``journal_df`` (optional, added 2026-05-06) — when provided, a
+    "Why" column is added pulling the entry-trade thesis and a brief
+    risk-manager note from the latest ``action="submitted"`` row for
+    that ticker.  An expander below the table shows the FULL thesis
+    + risk-check detail per position so the operator can understand
+    at a glance why each open spread was approved.  Backward-compat
+    default: ``None`` keeps the legacy 8-column layout unchanged.
     """
     if not spreads:
         st.info("No open positions.")
         return
+
+    # Build per-ticker lookup of the most-recent SUBMITTED entry trade.
+    # Matched on (ticker, expiration) because a ticker can have
+    # multiple sequential spreads at different expiries — we want the
+    # entry for THIS open position, not a stale one.
+    entry_lookup: Dict[Tuple[str, str], Dict] = {}
+    if journal_df is not None and not journal_df.empty:
+        if "action" in journal_df.columns:
+            entries = journal_df[journal_df["action"] == "submitted"].copy()
+            for _, r in entries.iterrows():
+                rs = r.get("raw_signal") or {}
+                if not isinstance(rs, dict):
+                    continue
+                ticker = r.get("ticker", "")
+                exp = (rs.get("expiration") or "")[:10]
+                key = (ticker, exp)
+                # Keep the LATEST match per (ticker, expiration).
+                prev = entry_lookup.get(key)
+                if prev is None or r["timestamp"] > prev.get("_ts", ""):
+                    entry_lookup[key] = {**rs, "_ts": r["timestamp"]}
+
+    def _why_for(spread: Dict) -> Tuple[str, Optional[Dict]]:
+        """Return (concise label, full raw_signal-or-None) for the Why column."""
+        ticker = spread.get("underlying", "")
+        exp = (spread.get("expiration") or "")[:10]
+        rs = entry_lookup.get((ticker, exp))
+        if rs is None:
+            return ("—", None)
+        regime = rs.get("regime", "?")
+        rsi = rs.get("rsi_14")
+        cw = rs.get("credit_to_width_ratio")
+        bits = [regime]
+        if rsi is not None:
+            bits.append(f"RSI {float(rsi):.0f}")
+        if cw is not None:
+            bits.append(f"C/W {float(cw):.2f}")
+        return (" · ".join(bits), rs)
+
     rows = []
+    detail_panels: List[Tuple[str, Dict]] = []   # (header, raw_signal) for expander
     for s in spreads:
         credit = round(s.get("original_credit", 0) * 100, 2)
         pnl = round(s.get("net_unrealized_pl", 0), 2)
         pct = f"{pnl / credit * 100:.1f}%" if credit else "—"
         origin = s.get("origin", "trade_plan")
         source_label = "📋 plan" if origin == "trade_plan" else "🔮 inferred"
-        rows.append(
-            {
-                "Symbol": s.get("underlying", ""),
-                "Strategy": s.get("strategy_name", ""),
-                "Credit ($)": credit,
-                "Unreal. P&L ($)": pnl,
-                "% Profit": pct,
-                "Expiry": s.get("expiration", ""),
-                "Exit Signal": s.get("exit_signal", "hold"),
-                "Source": source_label,
-            }
-        )
+        why_label, why_payload = _why_for(s)
+        row = {
+            "Symbol":         s.get("underlying", ""),
+            "Strategy":       s.get("strategy_name", ""),
+            "Credit ($)":     credit,
+            "Unreal. P&L ($)": pnl,
+            "% Profit":       pct,
+            "Expiry":         s.get("expiration", ""),
+            "Exit Signal":    s.get("exit_signal", "hold"),
+            "Source":         source_label,
+        }
+        if journal_df is not None:
+            row["Why"] = why_label
+            if why_payload:
+                detail_panels.append(
+                    (f"{s.get('underlying','?')} {s.get('strategy_name','')} "
+                     f"exp {s.get('expiration','?')}", why_payload)
+                )
+        rows.append(row)
+
     st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+    # ── Day-1 bid-ask drag explanation ───────────────────────────────
+    # New positions almost always show a small negative P&L on day 1
+    # because Alpaca marks short legs at the ASK and long legs at the
+    # BID — i.e. what it would cost to close the spread immediately.
+    # That's the round-trip bid-ask cost, NOT a real loss; theta and
+    # mean-reversion typically erase it within the first day or two.
+    # Surface this as a quiet caption so an operator looking at a fresh
+    # entry doesn't panic at "−$48 P&L on a spread I just opened".
+    if any(s.get("net_unrealized_pl", 0) < 0 for s in spreads):
+        st.caption(
+            "ℹ️ Day-1 negative P&L is normally the **bid-ask spread cost**, "
+            "not a real loss — Alpaca marks shorts at the ask and longs at "
+            "the bid. Theta typically erases it within the first day or two. "
+            "If P&L drops below −50% of credit, that's a real warning."
+        )
+
+    # ── Per-spread justification expander ────────────────────────────
+    # Below the compact table, show the full thesis + risk-manager
+    # checks for every open position.  Lives in an expander so it
+    # doesn't dominate the page, but is collapsed-OPEN by default
+    # because this is exactly what the operator wants to see when
+    # auditing why the agent took a trade.
+    if detail_panels:
+        with st.expander(
+            f"📋 Entry justification + risk checks "
+            f"({len(detail_panels)} position{'s' if len(detail_panels) != 1 else ''})",
+            expanded=False,
+        ):
+            for header, rs in detail_panels:
+                _render_position_justification(header, rs)
+
+
+def _render_position_justification(header: str, rs: Dict) -> None:
+    """Render one spread's entry thesis + risk-manager checks."""
+    st.markdown(f"**{header}**")
+
+    thesis = rs.get("thesis") or {}
+    if isinstance(thesis, dict):
+        col_t1, col_t2 = st.columns([2, 3])
+        with col_t1:
+            why = thesis.get("why", "—")
+            st.caption("**Why** (regime context)")
+            st.write(why)
+        with col_t2:
+            why_now = thesis.get("why_now", "—")
+            st.caption("**Why now** (the trigger)")
+            st.write(why_now)
+        exit_plan = thesis.get("exit_plan", "")
+        if exit_plan:
+            st.caption("**Exit plan**")
+            st.write(exit_plan)
+
+    # Risk-manager checks side-by-side: passed (green) on left,
+    # failed (red) on right.  Failed will usually be empty for an
+    # open position (it passed the gate) but kept for symmetry +
+    # in case a later post-approval check produced soft warnings.
+    passed = rs.get("checks_passed") or []
+    failed = rs.get("checks_failed") or []
+    if passed or failed:
+        col_p, col_f = st.columns(2)
+        with col_p:
+            st.caption(f"**✅ Passed ({len(passed)})**")
+            for chk in passed:
+                st.markdown(f"- {chk}")
+        with col_f:
+            st.caption(f"**❌ Failed ({len(failed)})**")
+            if failed:
+                for chk in failed:
+                    st.markdown(f"- {chk}")
+            else:
+                st.markdown("_(none — clean approval)_")
+
+    # Quick numerical strip — entry credit, max loss, expiration, account
+    # snapshot — surfaced as a one-line caption for quick scanning.
+    bits = []
+    if rs.get("net_credit") is not None:
+        bits.append(f"credit ${rs['net_credit']:.2f}")
+    if rs.get("max_loss") is not None:
+        bits.append(f"max-loss ${rs['max_loss']:.2f}")
+    if rs.get("spread_width") is not None:
+        bits.append(f"width ${rs['spread_width']:.2f}")
+    if rs.get("account_balance") is not None:
+        bits.append(f"equity ${rs['account_balance']:,.2f}")
+    if rs.get("regime") is not None:
+        bits.append(f"regime {rs['regime']}")
+    if bits:
+        st.caption(" · ".join(bits))
+    st.divider()
 
 
 def ungrouped_legs_table(legs: List[Dict]) -> None:

@@ -35,6 +35,8 @@ File structure::
 import json
 import logging
 import os
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
@@ -43,6 +45,20 @@ import requests
 from trading_agent.market_data import ALPACA_TIMEOUT_LONG
 from trading_agent.strategy import SpreadPlan
 from trading_agent.risk_manager import RiskVerdict
+
+
+# ── Order-submission retry policy ───────────────────────────────────────────
+# How many POST /v2/orders attempts before giving up.  At 2 attempts with
+# the default 15s timeout, worst-case latency is ~31s plus ORDER_RETRY_BACKOFF_S
+# of sleep — well inside the cycle's 270s hard guard.  Each attempt re-uses
+# the SAME client_order_id (see ``_submit_order_with_idempotency``) so a
+# retry of an order Alpaca already accepted collapses server-side instead
+# of producing a duplicate.
+ORDER_RETRY_ATTEMPTS = 2
+# Brief sleep between order POST retries.  Kept short because the next
+# 5-min cycle is only 300s away — we'd rather skip and let the operator
+# inspect the broker than block the cycle for 30+ seconds.
+ORDER_RETRY_BACKOFF_S = 1.0
 
 if TYPE_CHECKING:
     from trading_agent.market_data import MarketDataProvider
@@ -450,73 +466,195 @@ class OrderExecutor:
             "(max_risk_pct=%.0f%%, equity=$%.2f)",
             plan.ticker, qty, self.max_risk_pct * 100, account_balance)
 
+        # ── Idempotency key ───────────────────────────────────────────────
+        # Generate ONCE per plan.  Re-used across every retry of THIS POST
+        # so that if Alpaca accepted the first request but the response
+        # was lost on the wire, the second POST collapses server-side
+        # instead of producing a duplicate spread.  The key is also
+        # written into the trade_plan_*.json so an operator can search
+        # `client_order_id=<uuid>` in the broker UI to confirm whether a
+        # specific submission ever landed.
+        client_order_id = f"ta-{run_id[:8]}-{uuid.uuid4().hex[:12]}"
+
         order_payload = {
             "type": "limit",
             "time_in_force": "day",
             "order_class": "mleg",
             "qty": str(qty),
             "limit_price": str(limit_price_value),
+            "client_order_id": client_order_id,
             "legs": legs_payload,
         }
 
-        logger.info("[%s] Submitting %s order to Alpaca: %s",
-                     plan.ticker, plan.strategy_name,
+        logger.info("[%s] Submitting %s order to Alpaca (client_order_id=%s): %s",
+                     plan.ticker, plan.strategy_name, client_order_id,
                      json.dumps(order_payload, indent=2))
 
-        resp_body = None
-        try:
-            resp = requests.post(
-                f"{self.base_url}/orders",
-                headers=self._headers(),
-                json=order_payload,
-                timeout=ALPACA_TIMEOUT_LONG,
-            )
+        return self._submit_order_with_idempotency(
+            plan=plan,
+            plan_path=plan_path,
+            run_id=run_id,
+            order_payload=order_payload,
+            client_order_id=client_order_id,
+        )
 
+    def _submit_order_with_idempotency(
+        self, plan: SpreadPlan, plan_path: str, run_id: str,
+        order_payload: Dict, client_order_id: str,
+    ) -> Dict:
+        """
+        POST the order with up to ORDER_RETRY_ATTEMPTS attempts, re-using
+        the same client_order_id so the broker collapses duplicates.
+
+        Why this matters
+        ----------------
+        Without an idempotency key, a network blip after Alpaca accepts
+        the order — but before we read the 200 response — produces a
+        ConnectTimeout / ReadTimeout on our side.  A naive retry then
+        submits a SECOND identical spread, doubling exposure.  Alpaca
+        treats ``client_order_id`` as a server-side dedup key: a second
+        request with the same ID returns the original order instead of
+        creating a new one.
+
+        Retry conditions
+        ----------------
+        We retry only on transient transport errors that DIDN'T produce
+        a successful HTTP response — connection timeouts, read timeouts,
+        connection reset.  4xx responses (validation, insufficient
+        buying power, PDT) are NOT retried — they're permanent at the
+        broker level.
+
+        Failure surface
+        ---------------
+        After all attempts exhaust we return ``status="error"`` with the
+        client_order_id and ``retry_attempts`` count so the operator can
+        confirm with the broker whether ANY attempt landed (the broker
+        UI accepts ``client_order_id`` as a search filter).
+        """
+        last_error: Optional[str] = None
+        last_resp_body = None
+
+        for attempt in range(1, ORDER_RETRY_ATTEMPTS + 1):
+            resp_body = None
             try:
-                resp_body = resp.json()
-            except Exception:
-                resp_body = resp.text
+                resp = requests.post(
+                    f"{self.base_url}/orders",
+                    headers=self._headers(),
+                    json=order_payload,
+                    timeout=ALPACA_TIMEOUT_LONG,
+                )
 
-            resp.raise_for_status()
-
-            order_id = (resp_body.get("id", "unknown")
-                        if isinstance(resp_body, dict) else "unknown")
-            logger.info("[%s] Order SUBMITTED — ID: %s", plan.ticker, order_id)
-
-            result = {
-                "status": "submitted",
-                "order_id": order_id,
-                "plan_file": plan_path,
-                "run_id": run_id,
-                "alpaca_response": resp_body,
-            }
-            self._append_to_plan(plan_path, run_id, {"order_result": result})
-            return result
-
-        except requests.RequestException as exc:
-            error_msg = str(exc)
-            if resp_body is not None:
-                logger.error("[%s] Alpaca response body: %s", plan.ticker, resp_body)
-                error_msg += f" | Alpaca detail: {resp_body}"
-            elif hasattr(exc, "response") and exc.response is not None:
                 try:
-                    detail = exc.response.json()
-                    logger.error("[%s] Alpaca response body: %s", plan.ticker, detail)
-                    error_msg += f" | Alpaca detail: {detail}"
+                    resp_body = resp.json()
                 except Exception:
-                    raw = exc.response.text
-                    logger.error("[%s] Alpaca raw response: %s", plan.ticker, raw)
-                    error_msg += f" | Alpaca raw: {raw}"
+                    resp_body = resp.text
 
-            logger.error("[%s] Order FAILED: %s", plan.ticker, error_msg)
-            result = {
-                "status": "error",
-                "error": error_msg,
-                "plan_file": plan_path,
-                "run_id": run_id,
-            }
-            self._append_to_plan(plan_path, run_id, {"order_error": result})
-            return result
+                # 4xx is permanent at the broker — don't retry.  The
+                # broker has already evaluated and rejected the order
+                # (validation, buying power, PDT) and a retry will be
+                # rejected the same way.  raise_for_status produces a
+                # RequestException that we catch in the 4xx branch
+                # below (and bail out).
+                resp.raise_for_status()
+
+                order_id = (resp_body.get("id", "unknown")
+                            if isinstance(resp_body, dict) else "unknown")
+                logger.info(
+                    "[%s] Order SUBMITTED (attempt %d/%d) — ID: %s "
+                    "(client_order_id=%s)",
+                    plan.ticker, attempt, ORDER_RETRY_ATTEMPTS,
+                    order_id, client_order_id,
+                )
+
+                result = {
+                    "status": "submitted",
+                    "order_id": order_id,
+                    "client_order_id": client_order_id,
+                    "retry_attempts": attempt,
+                    "plan_file": plan_path,
+                    "run_id": run_id,
+                    "alpaca_response": resp_body,
+                }
+                self._append_to_plan(plan_path, run_id, {"order_result": result})
+                return result
+
+            except requests.RequestException as exc:
+                last_error = str(exc)
+                last_resp_body = resp_body
+
+                # Pull the broker error detail into the log so the operator
+                # can tell apart "Alpaca rejected for buying power" from
+                # "the connection timed out".
+                if resp_body is not None:
+                    logger.error(
+                        "[%s] Alpaca response body (attempt %d/%d): %s",
+                        plan.ticker, attempt, ORDER_RETRY_ATTEMPTS, resp_body,
+                    )
+                    last_error += f" | Alpaca detail: {resp_body}"
+                elif hasattr(exc, "response") and exc.response is not None:
+                    try:
+                        detail = exc.response.json()
+                        logger.error(
+                            "[%s] Alpaca response body (attempt %d/%d): %s",
+                            plan.ticker, attempt, ORDER_RETRY_ATTEMPTS, detail,
+                        )
+                        last_error += f" | Alpaca detail: {detail}"
+                    except Exception:
+                        raw = exc.response.text
+                        logger.error(
+                            "[%s] Alpaca raw response (attempt %d/%d): %s",
+                            plan.ticker, attempt, ORDER_RETRY_ATTEMPTS, raw,
+                        )
+                        last_error += f" | Alpaca raw: {raw}"
+
+                # Permanent-error short-circuit: a 4xx HTTP response means
+                # Alpaca evaluated the order and refused it.  Retrying with
+                # the same payload (same client_order_id) will not change
+                # the answer.  Skip directly to the failure return below.
+                resp_obj = getattr(exc, "response", None)
+                if resp_obj is not None and 400 <= resp_obj.status_code < 500:
+                    logger.error(
+                        "[%s] Order rejected by Alpaca (HTTP %d, attempt %d/%d) "
+                        "— permanent at broker level, NOT retrying. "
+                        "client_order_id=%s",
+                        plan.ticker, resp_obj.status_code, attempt,
+                        ORDER_RETRY_ATTEMPTS, client_order_id,
+                    )
+                    break
+
+                # Transient transport error — retry with the SAME
+                # client_order_id so any duplicate submission collapses
+                # server-side at Alpaca.
+                if attempt < ORDER_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "[%s] Transient order POST failure (attempt %d/%d): "
+                        "%s. Retrying in %.1fs with same client_order_id=%s "
+                        "(broker will dedupe if it already accepted).",
+                        plan.ticker, attempt, ORDER_RETRY_ATTEMPTS,
+                        exc, ORDER_RETRY_BACKOFF_S, client_order_id,
+                    )
+                    time.sleep(ORDER_RETRY_BACKOFF_S)
+                    continue
+
+        # All attempts exhausted (or 4xx short-circuit).  Surface a
+        # detailed error result so the operator can search Alpaca by
+        # client_order_id to confirm whether the order ever landed.
+        logger.error(
+            "[%s] Order FAILED after %d attempt(s): %s "
+            "(client_order_id=%s — search Alpaca to confirm whether ANY "
+            "attempt landed)",
+            plan.ticker, ORDER_RETRY_ATTEMPTS, last_error, client_order_id,
+        )
+        result = {
+            "status": "error",
+            "error": last_error or "unknown error",
+            "client_order_id": client_order_id,
+            "retry_attempts": ORDER_RETRY_ATTEMPTS,
+            "plan_file": plan_path,
+            "run_id": run_id,
+        }
+        self._append_to_plan(plan_path, run_id, {"order_error": result})
+        return result
 
     def _refresh_limit_price(self, plan: SpreadPlan) -> Optional[float]:
         """

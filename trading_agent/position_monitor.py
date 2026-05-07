@@ -15,6 +15,7 @@ trigger a market-order close without waiting for confirmation.
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -25,6 +26,17 @@ import requests
 from trading_agent.calendar_utils import is_last_trading_day_before
 from trading_agent.market_data import ALPACA_TIMEOUT
 from trading_agent.regime import Regime
+
+
+# ── Position-fetch retry policy ─────────────────────────────────────────────
+# Two attempts on transient transport errors.  The dedup gate fails closed
+# on a final None, so a one-off TCP blip used to skip an entire cycle of
+# exit-signal evaluation; with retry we recover from the typical 100ms
+# reset that triggered the 2026-05-05 duplicate-submission incident.
+POSITION_FETCH_RETRY_ATTEMPTS = 2
+# Brief sleep between attempts.  Total worst-case latency stays well
+# inside the 270s cycle hard guard.
+POSITION_FETCH_RETRY_BACKOFF_S = 0.5
 
 logger = logging.getLogger(__name__)
 
@@ -178,42 +190,65 @@ class PositionMonitor:
         either way.
         """
         url = f"{self.base_url}/positions"
-        try:
-            resp = requests.get(url, headers=self._headers(), timeout=ALPACA_TIMEOUT)
-            resp.raise_for_status()
-            positions_data = resp.json()
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, POSITION_FETCH_RETRY_ATTEMPTS + 1):
+            try:
+                resp = requests.get(url, headers=self._headers(), timeout=ALPACA_TIMEOUT)
+                resp.raise_for_status()
+                positions_data = resp.json()
 
-            positions = []
-            for p in positions_data:
-                snap = PositionSnapshot(
-                    symbol=p.get("symbol", ""),
-                    qty=int(p.get("qty", 0)),
-                    side=p.get("side", ""),
-                    avg_entry_price=float(p.get("avg_entry_price", 0)),
-                    current_price=float(p.get("current_price", 0)),
-                    market_value=float(p.get("market_value", 0)),
-                    cost_basis=float(p.get("cost_basis", 0)),
-                    unrealized_pl=float(p.get("unrealized_pl", 0)),
-                    unrealized_plpc=float(p.get("unrealized_plpc", 0)),
-                    asset_class=p.get("asset_class", ""),
-                )
-                positions.append(snap)
+                positions = []
+                for p in positions_data:
+                    snap = PositionSnapshot(
+                        symbol=p.get("symbol", ""),
+                        qty=int(p.get("qty", 0)),
+                        side=p.get("side", ""),
+                        avg_entry_price=float(p.get("avg_entry_price", 0)),
+                        current_price=float(p.get("current_price", 0)),
+                        market_value=float(p.get("market_value", 0)),
+                        cost_basis=float(p.get("cost_basis", 0)),
+                        unrealized_pl=float(p.get("unrealized_pl", 0)),
+                        unrealized_plpc=float(p.get("unrealized_plpc", 0)),
+                        asset_class=p.get("asset_class", ""),
+                    )
+                    positions.append(snap)
 
-            option_positions = [p for p in positions if p.asset_class == "us_option"]
-            # Hot-path: fires every Stage-1 tick AND every Streamlit
-            # broker-state refresh (BROKER_STATE_TTL_SECS=30s default).
-            # DEBUG so the default INFO log focuses on actionable events.
-            logger.debug("Fetched %d total positions, %d are options",
-                         len(positions), len(option_positions))
-            return option_positions
+                option_positions = [p for p in positions if p.asset_class == "us_option"]
+                # Hot-path: fires every Stage-1 tick AND every Streamlit
+                # broker-state refresh (BROKER_STATE_TTL_SECS=30s default).
+                # DEBUG so the default INFO log focuses on actionable events.
+                if attempt > 1:
+                    logger.info(
+                        "Fetched positions on retry attempt %d/%d "
+                        "(%d total, %d options)",
+                        attempt, POSITION_FETCH_RETRY_ATTEMPTS,
+                        len(positions), len(option_positions),
+                    )
+                else:
+                    logger.debug("Fetched %d total positions, %d are options",
+                                 len(positions), len(option_positions))
+                return option_positions
 
-        except requests.RequestException as exc:
-            logger.error(
-                "Failed to fetch positions: %s — returning None so the "
-                "cycle's dedup gate can fail closed (see method docstring).",
-                exc,
-            )
-            return None
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < POSITION_FETCH_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "fetch_open_positions transient failure "
+                        "(attempt %d/%d): %s — retrying in %.1fs",
+                        attempt, POSITION_FETCH_RETRY_ATTEMPTS, exc,
+                        POSITION_FETCH_RETRY_BACKOFF_S,
+                    )
+                    time.sleep(POSITION_FETCH_RETRY_BACKOFF_S)
+                    continue
+
+        # All attempts exhausted.  Returning None so the cycle's dedup
+        # gate can fail closed (see method docstring).
+        logger.error(
+            "Failed to fetch positions after %d attempt(s): %s — "
+            "returning None so the cycle's dedup gate can fail closed.",
+            POSITION_FETCH_RETRY_ATTEMPTS, last_exc,
+        )
+        return None
 
     # ------------------------------------------------------------------
     # Group legs into spread positions
