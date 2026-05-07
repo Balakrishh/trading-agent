@@ -80,6 +80,38 @@ The LLM analyst corpus and the live-monitor diagnostics deliberately
 read **only** the live file so synthetic backtest counterfactuals can't
 bias guardrail recommendations.
 
+### 2.5 Broker-interaction safety (added 2026-05-06)
+
+These three rules are not AST-enforced but are equally critical for
+live trading. Test coverage in `tests/test_production_readiness.py`
+and `tests/test_close_cooldown.py`.
+
+- **Idempotent order submission.** Every `POST /v2/orders` carries a
+  `client_order_id` UUID generated client-side **once per plan** and
+  **reused across retries**. Alpaca treats this as a server-side dedup
+  key: a duplicate POST collapses back to one order. Never generate a
+  fresh UUID inside the retry branch — that defeats the dedup.
+  Source: `executor.py:_submit_order_with_idempotency`. See skill 18.
+
+- **Position-fetch fails closed.** `position_monitor.fetch_open_positions()`
+  returns `Optional[List[PositionSnapshot]]`. `[]` = clean broker (no
+  positions). `None` = RPC failed (we don't know what's open).
+  Stage 2 short-circuits on `None` to prevent duplicate submissions
+  during a transient outage. 2-attempt retry with 0.5s backoff added
+  2026-05-06; failure surfaces a `journal_kb.log_warning(source="position_monitor")`
+  row that the dashboard renders.
+
+- **Partial-close zombie detection.** `executor.close_spread` returning
+  `fill_status="partial"` means one or more legs were rejected by
+  Alpaca (PDT, uncovered, insufficient buying power); the position is
+  **still open on the broker**. The agent (a) tags the journal row
+  `action="close_failed"` (NOT `"closed"`), (b) increments a per-ticker
+  partial-fill counter, (c) parks the ticker in a 60-min cooldown after
+  3 strikes, suppressing further close attempts. Bookkeeping must
+  happen BEFORE journaling so the row can carry the resulting cooldown
+  state. Source: `agent.py:_record_partial_close`,
+  `agent.py:_journal_close_event`. See skill 17.
+
 ---
 
 ## 3. Architecture overview
@@ -488,6 +520,63 @@ use `np.nan`** when replacing into a float Series. Two fixed sites:
 Inline comments left at both call-sites so this trap doesn't get
 re-introduced.
 
+### 7.8 Order-submission idempotency — UUID generated ONCE per plan
+
+The `client_order_id` is generated **once per plan** in
+`executor._submit_order` and threaded into
+`_submit_order_with_idempotency` as a parameter. Inside the retry
+loop, every attempt re-uses the SAME UUID. A retry branch that
+generates a fresh UUID would defeat Alpaca's server-side dedup and
+allow a doubled position on a network-blip retry. The retry helper
+takes the UUID as a parameter explicitly to make this invariant
+visible at the API surface — don't move generation into the loop.
+Skill 18.
+
+### 7.9 Partial-fill close → `action="close_failed"`, never `"closed"`
+
+`executor.close_spread` returning `fill_status="partial"` means the
+position is **still open on the broker** (one or more legs rejected).
+Tagging this row with `action="closed"` lies to the dashboard's
+"Closed Today" tile. On 2026-05-06 a single SPY position produced 11
+false "closed" rows because the cycle kept retrying and each retry
+journaled `action="closed"` despite never actually closing. Fix:
+`fill_status in ("complete", "dry_run")` → `action="closed"`,
+otherwise → `action="close_failed"`. Skill 17.
+
+### 7.10 Cooldown bookkeeping order
+
+In `agent._stage_monitor` the close loop must call
+`_record_partial_close` / `_clear_close_cooldown` BEFORE
+`_journal_close_event`. The journal row reads the in-memory state
+(`_partial_close_count`, `_close_cooldown_until`) to embed
+`partial_close_streak`, `close_cooldown_until`, and
+`close_cooldown_reason` into `raw_signal`. If the journal call goes
+first, the row misses the resulting cooldown fields and the dashboard
+banner won't fire on the cycle that crossed the threshold. Test:
+`test_close_cooldown.py::test_close_failed_row_carries_cooldown_when_locked`.
+
+### 7.11 Adding a journal `action` value without UI surface
+
+Verdict-cell rendering in `live_monitor.py:1500+` has explicit
+branches for known actions; an unknown action falls back to a
+checks-based heuristic and renders as a vague "rejected" label. New
+actions need (a) addition to `_DEDUP_BYPASS_ACTIONS` if material,
+(b) a verdict-cell branch, (c) at least one panel/tile rendering
+them, (d) skill 19 documentation. The dashboard's silent-drop
+failure mode is the worst kind: rows ARE in the journal, the agent
+DID journal them, but the operator never sees them.
+
+### 7.12 Vendor retry exhaustion that doesn't surface
+
+When `executor` retries POST exhaust, when Schwab `_refresh` retries
+exhaust, when `position_monitor` retries exhaust — every one of those
+must emit `journal_kb.log_warning(source=...)` so the
+`action="warning"` row reaches the Recent Journal Entries panel.
+Logging a WARNING to `logs/trading_agent.log` is not enough — that's
+log-only, invisible to dashboard-only operators. The log_warning
+helper bypasses dedup so successive cycles surface the issue
+individually. Skill 19.
+
 ---
 
 ## 8. Commands
@@ -744,6 +833,71 @@ verify the invariants in §2 still hold afterwards.
       CI steps; legacy test files (`tests/test_streamlit/test_backtest_ui.py`,
       `tests/test_backtest/test_black_scholes.py`) replaced /
       corrected to match the new public surface.
+
+17. **Pre-live production-readiness bundle (2026-05-06).** Eight
+    issues addressed in one audit before paper → live cutover. New
+    skills 17 (close-failure + cooldown + PDT), 18 (order-submission
+    idempotency), 19 (journal schema). Skill 16 extended with the
+    Schwab OAuth + snapshot retry. Tests: `tests/test_close_cooldown.py`
+    (12 cases), `tests/test_production_readiness.py` (15 cases).
+
+    a. **`client_order_id` UUID + 2-attempt retry on order submission.**
+       `executor._submit_order_with_idempotency`. Generated once per
+       plan, reused across retries; Alpaca dedupes server-side so a
+       network-blip retry can't double a position. 4xx short-circuits
+       to permanent failure (no wasted retries on insufficient buying
+       power / PDT / validation errors). Skill 18.
+
+    b. **Schwab OAuth refresh hardening.** `_refresh` now does up to 3
+       attempts with exponential backoff (2s/4s, capped 8s) on 5xx /
+       429 / network errors. 4xx (≠ 429) short-circuits to permanent
+       failure with a re-auth instruction — refresh-token revoked
+       can't be retried away. Skill 16 §3 "Refresh retry policy".
+
+    c. **Position fetch + batch snapshot retry.** Both got 2-attempt
+       retry with 0.5s backoff. `position_monitor.fetch_open_positions`
+       preserves the fail-closed `None` semantics on retry exhaustion;
+       `market_data.fetch_batch_snapshots` returns `{}` on exhaustion
+       and the agent's per-cycle skip behaviour kicks in. Both emit
+       `journal_kb.log_warning` rows on exhaustion so the dashboard
+       surfaces the connectivity issue.
+
+    d. **`action="close_failed"` distinct from `"closed"`.** Partial-
+       fill zombies no longer count toward "Closed Today". A new
+       "Close Failures Today" panel surfaces them. Pre-fix one SPY
+       zombie produced 11 false closed-today rows. Skill 17.
+
+    e. **Partial-close cooldown.** 3-strike → 60-min lockout per
+       ticker. `agent.PARTIAL_CLOSE_COOLDOWN_THRESHOLD=3`,
+       `CLOSE_COOLDOWN_MINUTES=60`. Cooldown timestamp +
+       `close_cooldown_reason` embedded in the `close_failed` row
+       so the dashboard renders a 🚨 manual-intervention banner that
+       auto-expands the panel. Bookkeeping happens BEFORE journaling
+       so the row captures the resulting cooldown state.
+
+    f. **PDT same-day `REGIME_SHIFT` suppression.** Sub-$25K accounts
+       hold same-day-opened positions overnight rather than tripping
+       Alpaca's pattern-day-trading lockout (HTTP 403 / code
+       40310100). Real-risk exits (`STRIKE_PROXIMITY`, `HARD_STOP`,
+       `DTE_SAFETY`, `PROFIT_TARGET`) still fire — those are worth
+       the PDT hit. `_tickers_opened_today()` reads the journal so
+       the answer survives an agent restart.
+
+    g. **`action="warning"` journal row.** New `JournalKB.log_warning`
+       helper. Subsystem tag (`source="executor"`, `"schwab_oauth"`,
+       `"position_monitor"`) groups warnings; bypasses dedup so each
+       occurrence surfaces individually. Called from executor on
+       retry exhaustion (carries `client_order_id` for broker search)
+       and from agent on position-fetch exhaustion. Skill 19.
+
+    h. **Daily P&L tile + cycle-staleness beacon.** `metric_row`
+       gained an optional `realized_pnl` arg; the live tile now
+       shows `unrealized + realized` with the split as the delta
+       caption. New `_render_cycle_staleness_beacon` sits below
+       the metric row: orange at 5min, red at 10min stale-journal
+       age (suppressed when loop is stopped, since a stopped loop
+       legitimately has no recent rows). Both go below Open
+       Positions; both panels collapsed by default per UX request.
 
 ---
 
