@@ -4,6 +4,8 @@ Atomic, reusable concepts extracted from the trading agent. Each file is self-co
 
 **Philosophy.** This library is **derived** from `trading_agent/` — every skill cites a `file:line` source of truth. If the source moves, the skill moves with it. Skills don't introduce new logic, they document what already exists in a form that's easier to reason about.
 
+> **Looking for operational runbooks instead?** See [`docs/runbooks/`](../runbooks/README.md). Skills are "why does the code do this"; runbooks are "what do I do when I see X."  The two are complementary — runbooks cross-link to skills for the explanatory background.
+
 ---
 
 ## Phase 1 (19 skills + meta, dependency-ordered)

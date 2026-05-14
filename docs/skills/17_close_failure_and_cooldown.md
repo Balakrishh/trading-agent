@@ -1,9 +1,9 @@
 # Close-Failure Action + Partial-Fill Cooldown + PDT Suppression
 
-> **One-line summary:** When `executor.close_spread` reports a partial-fill zombie, the agent (a) tags the journal row `action="close_failed"` instead of `"closed"`, (b) tracks a per-ticker counter of consecutive partial fills and parks the ticker in a 60-min cooldown after 3 strikes, and (c) suppresses same-day `REGIME_SHIFT` exits on PDT-restricted accounts (<$25K equity).
-> **Source of truth:** [`trading_agent/agent.py:124-200`](../../trading_agent/agent.py), [`trading_agent/agent.py:867-998`](../../trading_agent/agent.py), [`trading_agent/agent.py:1003-1265`](../../trading_agent/agent.py), [`trading_agent/streamlit/live_monitor.py:1095-1316`](../../trading_agent/streamlit/live_monitor.py)
+> **One-line summary:** When `executor.close_spread` reports a partial-fill zombie, the agent (a) tags the journal row `action="close_failed"` instead of `"closed"`, (b) **derives** the per-ticker partial-fill streak from journal rows and parks the ticker in a 60-min cooldown after 3 strikes (cross-process safe), and (c) suppresses same-day `REGIME_SHIFT` exits on PDT-restricted accounts (<$25K equity).
+> **Source of truth:** [`trading_agent/agent.py:124-220`](../../trading_agent/agent.py), [`trading_agent/agent.py:867-1015`](../../trading_agent/agent.py), [`trading_agent/agent.py:_close_failed_streak_within_window`](../../trading_agent/agent.py), [`trading_agent/streamlit/live_monitor.py:1095-1316`](../../trading_agent/streamlit/live_monitor.py)
 > **Phase:** 2  •  **Group:** risk
-> **Depends on:** `00_sdlc_and_conventions.md` (journal schema + dedup), `13_preset_system_hot_reload.md` (max_risk_pct + budget mismatch warning)
+> **Depends on:** `00_sdlc_and_conventions.md` (journal schema + dedup), `13_preset_system_hot_reload.md` (max_risk_pct + budget mismatch warning), `19_journal_schema.md` (close_failed action enum)
 > **Consumed by:** `streamlit/live_monitor.py:_render_close_failures_today` (UI banner), Recent Journal Entries panel (downstream of `journal_kb.log_signal`).
 
 ---
@@ -56,11 +56,12 @@ CLOSE_COOLDOWN_MINUTES = 60
 class TradingAgent:
     def __init__(self, config: AppConfig):
         ...
-        # Per-ticker counter of consecutive partial-fill close attempts.
-        # Cleared on a successful complete close; otherwise survives
-        # only as long as the in-process state (in-memory only).
-        self._partial_close_count: Dict[str, int] = {}
-        self._close_cooldown_until: Dict[str, datetime] = {}
+        # Cooldown state is derived from the journal on every read
+        # (see _close_failed_streak_within_window).  No instance dicts
+        # needed.  The pre-2026-05-13 in-memory dicts were reset on
+        # every cycle process-restart in production, so the cooldown
+        # never engaged — see the 2026-05-13 XLF/GLD post-mortem and
+        # § "Edge Cases" below.
 ```
 
 ### `trading_agent/agent.py:867-994` — close loop with PDT + cooldown gates
@@ -71,14 +72,15 @@ pdt_restricted = account_balance < PDT_EQUITY_THRESHOLD
 ...
 for spread in spreads:
     if spread.exit_signal != ExitSignal.HOLD and self._should_exit_spread(spread):
-        # Cooldown guard
+        # Cooldown guard — derived from journal close_failed rows
         cooldown_left = self._close_cooldown_minutes_remaining(spread.underlying)
         if cooldown_left > 0:
+            streak, _ = self._close_failed_streak_within_window(
+                spread.underlying)
             logger.warning(
                 "[%s] Close cooldown active — %d min remaining "
                 "(%d consecutive partial fills). Skipping retry...",
-                spread.underlying, cooldown_left,
-                self._partial_close_count.get(spread.underlying, 0))
+                spread.underlying, cooldown_left, streak)
             continue
 
         # PDT REGIME_SHIFT suppression
@@ -127,13 +129,18 @@ def _journal_close_event(self, spread, ctx, leg_results, fill_status, dry_run):
 
     # Surface streak/cooldown on close_failed rows so the dashboard
     # can render a manual-intervention banner without log scraping.
+    # Streak is journal-derived: existing close_failed rows in the
+    # last 60 min + 1 for the row we're about to write.
     if action == "close_failed":
-        streak = self._partial_close_count.get(spread.underlying, 0)
+        existing_streak, _ = self._close_failed_streak_within_window(
+            spread.underlying)
+        streak = existing_streak + 1
         payload["partial_close_streak"] = streak
         payload["partial_close_threshold"] = PARTIAL_CLOSE_COOLDOWN_THRESHOLD
-        cooldown_until = self._close_cooldown_until.get(spread.underlying)
-        if cooldown_until is not None:
-            payload["close_cooldown_until"] = cooldown_until.isoformat()
+        if streak >= PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
+            deadline = (datetime.now(timezone.utc)
+                        + timedelta(minutes=CLOSE_COOLDOWN_MINUTES))
+            payload["close_cooldown_until"] = deadline.isoformat()
             payload["close_cooldown_reason"] = (
                 f"{streak} consecutive partial fills ≥ threshold "
                 f"{PARTIAL_CLOSE_COOLDOWN_THRESHOLD}; auto-close suppressed "
@@ -155,16 +162,34 @@ def _tickers_opened_today(self) -> Set[str]:
     action="submitted" timestamps in today UTC."""
     # ... reads self.journal_kb.jsonl_path, parses each line ...
 
+def _close_failed_streak_within_window(
+    self, ticker: str, window_min: int = CLOSE_COOLDOWN_MINUTES,
+) -> Tuple[int, Optional[datetime]]:
+    """Count consecutive close_failed rows for `ticker` in the last
+    `window_min` minutes, since the most recent `closed` row (which
+    resets the streak).  Returns (streak, last_failure_ts).
+
+    Journal-derived rather than in-memory — survives process restart
+    (which is the failure mode the pre-2026-05-13 design hit in
+    production)."""
+
 def _close_cooldown_minutes_remaining(self, ticker: str) -> int:
-    """Minutes remaining or 0. Auto-purges expired entries from
-    the dict so it doesn't grow unbounded."""
+    """Minutes remaining or 0. Derived from
+    _close_failed_streak_within_window:
+        if streak ≥ PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
+            deadline = last_failure_ts + CLOSE_COOLDOWN_MINUTES
+            return max(1, (deadline - now).minutes)
+    """
 
 def _record_partial_close(self, ticker: str) -> None:
-    """Increment counter; if it reaches THRESHOLD, set
-    close_cooldown_until = now + CLOSE_COOLDOWN_MINUTES."""
+    """No-op as of 2026-05-13.  Kept for caller-shape stability.
+    The actual streak is journal-derived; this method only emits an
+    info-level log line for situational awareness."""
 
 def _clear_close_cooldown(self, ticker: str) -> None:
-    """Purge counter + cooldown_until on successful complete close."""
+    """No-op as of 2026-05-13.  The `closed` row that triggered the
+    call IS the supersede signal — subsequent reads of
+    _close_failed_streak_within_window will see it and reset to 0."""
 ```
 
 ### `trading_agent/streamlit/live_monitor.py:1170-1316` — `_render_close_failures_today` panel
@@ -194,7 +219,9 @@ def _render_close_failures_today(journal_df):
 
 ## 4. Edge Cases / Guardrails
 
-- **Counter survives only in-memory.** A process restart resets `_partial_close_count` and `_close_cooldown_until`. Acceptable trade-off: the journal still holds the historical record of `close_failed` rows; the cooldown rule is a "stop hammering" heuristic, not a permanent state machine. After a restart the agent will retry once, and if the failure recurs the counter rebuilds within ~15 minutes.
+- **Streak is journal-derived, not in-memory.** Pre-2026-05-13 the streak lived in an instance dict (`self._partial_close_count`) — but each cycle subprocess creates a fresh `TradingAgent`, so the dict reset every 5 minutes. The cooldown *never engaged* in production: every partial fill logged "streak 1/3" forever. The 2026-05-12 GLD incident hit 15+ retries; the 2026-05-13 XLF hit 4 before the user noticed and stopped manually. Today's streak is read from the journal on demand — count `close_failed` rows in the last 60 min, reset if a `closed` row appears in between. This works correctly across process restarts because the journal is on disk.
+
+- **Window choice is 60 min = `CLOSE_COOLDOWN_MINUTES`.** Coincides with the cooldown duration: a streak that engages the cooldown will keep engaging it for the full hour because the last `close_failed` is always inside its own 60-min window. If the operator manually closes the position in Alpaca's UI (the prescribed remediation), the cooldown auto-expires on the next read after the deadline because no new `close_failed` rows extend the streak.
 
 - **`_tickers_opened_today` reads the journal, not memory.** Deliberately so — it must work after a restart. Tolerates malformed JSON lines and timestamp parse errors by skipping the offending row (returning empty set on hard read failure). False-empty falls back to "we attempted a close that Alpaca might reject" — which is exactly the failure we already have to handle.
 
@@ -220,4 +247,4 @@ def _render_close_failures_today(journal_df):
 
 ---
 
-*Last verified against repo HEAD on 2026-05-06.*
+*Last verified against repo HEAD on 2026-05-13.*

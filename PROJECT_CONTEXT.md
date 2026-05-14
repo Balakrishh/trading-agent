@@ -899,6 +899,59 @@ verify the invariants in §2 still hold afterwards.
        legitimately has no recent rows). Both go below Open
        Positions; both panels collapsed by default per UX request.
 
+18. **Production-failure-mode bundle (2026-05-13).** Three diagnosed
+    issues from May 12-13 logs, fixed structurally rather than via
+    operational hygiene. Tests in `tests/test_journal_derived_cooldown.py`
+    (17 cases) + updates to `tests/test_close_cooldown.py` and
+    `tests/test_production_readiness.py`. Skill 17 updated.
+
+    a. **Journal-derived cooldown counter.** The 2026-05-13 cycle
+       log showed "Partial-close streak 1/3" repeating endlessly —
+       the counter never advanced past 1. Root cause: the streak
+       lived in `self._partial_close_count` (in-memory dict on
+       TradingAgent). Each cycle subprocess creates a fresh
+       TradingAgent instance with an empty dict, so the counter
+       reset every 5 minutes. The cooldown never engaged in
+       production. Fix: replaced with
+       `_close_failed_streak_within_window()` which derives the
+       streak from `action="close_failed"` journal rows in the
+       last 60 min, resetting on intermediate `action="closed"`
+       rows. Cross-process safe by construction. The
+       `_record_partial_close` and `_clear_close_cooldown` methods
+       remain as no-op stubs for call-site compatibility.
+
+    b. **Per-ticker position-count dedup gate.** The 2026-05-12
+       GLD incident: the agent emitted `skipped_rsi_gate` for new
+       GLD entries, but reached Phase IV-RISK CHECK and got
+       rejected — meaning the dedup gate (Stage 1's
+       `tickers_with_positions` set) DIDN'T fire. Root cause: the
+       gate only added tickers whose positions reported
+       `signal == ExitSignal.HOLD.value`. Positions with exit
+       signals queued in debounce (`profit_target`, `regime_shift`,
+       etc.) were excluded. Fix: count EVERY reported position
+       regardless of signal, then cap at
+       `MAX_POSITIONS_PER_TICKER = 1` (new constant). Same set
+       interface for the rest of the cycle; structurally
+       prevents both the GLD-bug case AND any future "dedup
+       missed it" failure mode.
+
+    c. **Streamlit-aware orphan sweep.** The 2026-05-13 logs
+       showed two cycle subprocesses firing on offset 5-min
+       schedules all day (cycle starts paired with ~31s gap).
+       Root cause: a second Streamlit process was alive from
+       a previous session, each with its own daemon thread
+       firing cycles. The orphan sweep matched
+       `python.*trading_agent.agent` (the cycle subprocess
+       pattern) but NOT `streamlit run` (the dashboard pattern).
+       Fix: `_sweep_other_streamlit_processes()` finds all
+       Streamlit processes serving the dashboard, walks the
+       process tree to exclude the current Streamlit and its
+       ancestors (via `/proc/<pid>/stat`), and SIGTERM-then-SIGKILL
+       any others. Wired into `_sweep_orphan_agents()` so it runs
+       on every Start click + session boot + auto-revive. Return
+       dict includes `streamlit_killed_pids` for dashboard
+       visibility.
+
 ---
 
 ## 11. Open / not-yet-done

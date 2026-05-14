@@ -31,7 +31,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import signal
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -477,9 +478,103 @@ def _terminate_pid(pid: int, timeout: float = 5.0) -> bool:
     return not _pid_is_alive(pid)
 
 
+def _ancestor_pids() -> Set[int]:
+    """
+    Return the set of ancestor PIDs of the current process, walking
+    up the process tree via ``/proc/<pid>/stat``.
+
+    Used by :func:`_sweep_other_streamlit_processes` to exclude the
+    process tree we live in from the kill list (we don't want to
+    commit suicide by SIGTERM'ing our own Streamlit parent).
+    """
+    ancestors: Set[int] = set()
+    pid = os.getpid()
+    while True:
+        try:
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
+                # Format: "<pid> (<cmd>) <state> <ppid> ..."
+                # The cmd field can contain spaces, so split from the right.
+                line = fh.read()
+                rparen = line.rfind(")")
+                tail = line[rparen + 2:].split()
+                ppid = int(tail[1])
+        except (FileNotFoundError, IndexError, ValueError, OSError):
+            break
+        if ppid <= 1 or ppid in ancestors:
+            break
+        ancestors.add(ppid)
+        pid = ppid
+    return ancestors
+
+
+def _sweep_other_streamlit_processes() -> List[int]:
+    """
+    Kill OTHER ``streamlit run`` processes serving this dashboard —
+    not our own Streamlit parent.
+
+    Added 2026-05-13 after the post-mortem on the previous day's
+    two-Streamlit ghost-process incident.  The agent-only sweep
+    matched ``trading_agent.agent`` command lines, which caught
+    orphan cycle subprocesses but NOT stale Streamlit processes
+    whose daemon threads kept spawning new cycles.  Two Streamlit
+    processes meant two independent 5-minute schedulers — every
+    cycle racing with itself.
+
+    Matching strategy:
+      * pgrep ``streamlit run trading_agent/streamlit/app.py`` —
+        the canonical entry-point invocation.
+      * Exclude ``os.getpid()`` (the Python script running this
+        function — wouldn't match anyway, but defensive).
+      * Exclude every PID in our ancestor chain via /proc/<pid>/stat
+        (the parent Streamlit process and its grandparents).  We
+        absolutely never want to SIGTERM ourselves.
+
+    Returns the list of PIDs we successfully signaled.  Errors are
+    swallowed; the orphan-sweep callers don't treat Streamlit kill
+    failures as fatal.
+    """
+    own = os.getpid()
+    ancestors = _ancestor_pids() | {own}
+
+    killed: List[int] = []
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", "streamlit run.*trading_agent.streamlit.app"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return killed
+    if r.returncode not in (0, 1):
+        return killed
+
+    pids = [
+        int(ln) for ln in r.stdout.split()
+        if ln.strip().isdigit()
+    ]
+    targets = [pid for pid in pids if pid not in ancestors]
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    # Brief settle + SIGKILL escalation for anything that didn't terminate.
+    if killed:
+        time.sleep(0.5)
+        for pid in killed[:]:
+            if _pid_is_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+    return killed
+
+
 def _sweep_orphan_agents() -> Dict[str, Any]:
     """
-    Hard-kill any orphan agent subprocesses and clear stale sentinels.
+    Hard-kill any orphan agent subprocesses, orphan Streamlit
+    processes, and clear stale sentinels.
 
     Called at:
       * Start Agent button (so a stacked previous session can't survive)
@@ -493,11 +588,16 @@ def _sweep_orphan_agents() -> Dict[str, Any]:
     2. ``pkill -f agent.py`` for any straggler.  Matches command lines
        like ``python -m trading_agent.agent`` or ``python agent.py``.
        Filtered to only the user's own processes (-u $USER).
-    3. Remove AGENT_RUNNING / AGENT_PID / PAUSE_FLAG sentinels so the
+    3. ``_sweep_other_streamlit_processes()`` — kill ANOTHER Streamlit
+       running the same dashboard if one exists (not us).  Added
+       2026-05-13 — without this, a second Streamlit's daemon thread
+       keeps spawning cycles in parallel forever.
+    4. Remove AGENT_RUNNING / AGENT_PID / PAUSE_FLAG sentinels so the
        next Start writes them fresh.
 
     Returns a dict suitable for surfacing in the dashboard banner:
-      ``{"killed_pids": [int, ...], "swept": int, "errors": [str, ...]}``.
+      ``{"killed_pids": [int, ...], "swept": int,
+         "streamlit_killed_pids": [int, ...], "errors": [str, ...]}``.
     """
     killed: List[int] = []
     errors: List[str] = []
@@ -602,11 +702,25 @@ def _sweep_orphan_agents() -> Dict[str, Any]:
             if final > 0:
                 errors.append(f"{final} agent.py processes survived even SIGKILL")
 
-    # Step 3: clear stale sentinels so the new agent boots clean.
+    # Step 3: kill any OTHER Streamlit processes running this app.
+    # See _sweep_other_streamlit_processes for the why — two-Streamlit
+    # ghost incident on 2026-05-13.
+    streamlit_killed: List[int] = []
+    try:
+        streamlit_killed = _sweep_other_streamlit_processes()
+    except Exception as exc:                                # noqa: BLE001
+        errors.append(f"Streamlit sweep failed: {exc}")
+
+    # Step 4: clear stale sentinels so the new agent boots clean.
     for sentinel in (AGENT_RUNNING, AGENT_PID, PAUSE_FLAG):
         sentinel.unlink(missing_ok=True)
 
-    return {"killed_pids": killed, "swept": swept, "errors": errors}
+    return {
+        "killed_pids": killed,
+        "swept": swept,
+        "streamlit_killed_pids": streamlit_killed,
+        "errors": errors,
+    }
 
 
 def _start_agent(dry_run: bool = False) -> None:
@@ -625,6 +739,12 @@ def _start_agent(dry_run: bool = False) -> None:
         )
     if sweep["swept"]:
         _append_log(f"[{_now()}] pkill sweep removed straggler agent.py processes")
+    if sweep.get("streamlit_killed_pids"):
+        _append_log(
+            f"[{_now()}] Killed stale Streamlit PID(s) "
+            f"{sweep['streamlit_killed_pids']} before Start "
+            "(prevents two-launcher ghost cycles — see 2026-05-13 post-mortem)"
+        )
     if sweep["errors"]:
         _append_log(f"[{_now()}] Sweep errors: {sweep['errors']}")
 

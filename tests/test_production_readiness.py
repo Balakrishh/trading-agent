@@ -357,18 +357,32 @@ def test_position_fetch_returns_none_when_all_retries_fail():
 #  Cooldown surface in close_failed journal row
 # ───────────────────────────────────────────────────────────────────
 
-def test_close_failed_row_carries_streak_pre_cooldown():
+def test_close_failed_row_carries_streak_pre_cooldown(tmp_path):
     """A close_failed row before the threshold should carry
-    partial_close_streak / threshold but NOT close_cooldown_until."""
+    partial_close_streak / threshold but NOT close_cooldown_until.
+
+    Updated 2026-05-13: streak is now derived from journal rows
+    rather than an in-memory counter (the in-memory dict was reset
+    every cycle by process restart in production).  We seed the
+    journal with zero prior close_failed rows; the streak for this
+    new row should be 1.
+    """
     from trading_agent.agent import TradingAgent
+    import json
+
+    # Empty journal — streak for this row should be 1
+    jsonl_path = tmp_path / "signals_live.jsonl"
+    jsonl_path.write_text("")
 
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
+    agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
-    agent._partial_close_count = {"SPY": 1}  # 1/3 — pre-lockout
-    agent._close_cooldown_until = {}
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
+    )
+    agent._close_failed_streak_within_window = types.MethodType(
+        TradingAgent._close_failed_streak_within_window, agent
     )
 
     spread = MagicMock(underlying="SPY")
@@ -398,19 +412,40 @@ def test_close_failed_row_carries_streak_pre_cooldown():
     assert "close_cooldown_until" not in rs
 
 
-def test_close_failed_row_carries_cooldown_when_locked():
-    """When the cooldown_until dict is populated, the row must
-    embed the ISO timestamp + reason for dashboard rendering."""
+def test_close_failed_row_carries_cooldown_when_locked(tmp_path):
+    """When 2 prior close_failed rows exist in the journal, the
+    third (about to be written) crosses the threshold and the new
+    row carries close_cooldown_until + reason.
+
+    Updated 2026-05-13: cooldown is derived from prior journal
+    rows (post-2026-05-13 rewrite).  We seed 2 close_failed rows
+    in the journal so the 3rd row this test triggers crosses the
+    PARTIAL_CLOSE_COOLDOWN_THRESHOLD.
+    """
     from trading_agent.agent import TradingAgent
+    import json
+
+    now = datetime.now(timezone.utc)
+    jsonl_path = tmp_path / "signals_live.jsonl"
+    with open(jsonl_path, "w") as fh:
+        fh.write(json.dumps({
+            "timestamp": (now - timedelta(minutes=10)).isoformat(),
+            "ticker": "SPY", "action": "close_failed", "raw_signal": {},
+        }) + "\n")
+        fh.write(json.dumps({
+            "timestamp": (now - timedelta(minutes=5)).isoformat(),
+            "ticker": "SPY", "action": "close_failed", "raw_signal": {},
+        }) + "\n")
 
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
+    agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
-    cooldown_deadline = datetime.now(timezone.utc) + timedelta(minutes=60)
-    agent._partial_close_count = {"SPY": 3}
-    agent._close_cooldown_until = {"SPY": cooldown_deadline}
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
+    )
+    agent._close_failed_streak_within_window = types.MethodType(
+        TradingAgent._close_failed_streak_within_window, agent
     )
 
     spread = MagicMock(underlying="SPY")
@@ -434,27 +469,30 @@ def test_close_failed_row_carries_cooldown_when_locked():
 
     call_kwargs = agent.journal_kb.log_signal.call_args.kwargs
     rs = call_kwargs["raw_signal"]
-    assert rs["partial_close_streak"] == 3
-    assert "close_cooldown_until" in rs
-    # ISO format: starts with the year.
-    assert rs["close_cooldown_until"].startswith(
-        str(cooldown_deadline.year)
+    assert rs["partial_close_streak"] == 3, (
+        "2 prior + this one = 3, should engage cooldown"
     )
+    assert "close_cooldown_until" in rs
     assert "manual broker intervention" in rs["close_cooldown_reason"]
 
 
-def test_closed_row_does_not_carry_cooldown_fields():
+def test_closed_row_does_not_carry_cooldown_fields(tmp_path):
     """A successful close (action='closed') must NOT include the
     cooldown surface — it's exclusive to close_failed rows."""
     from trading_agent.agent import TradingAgent
 
+    jsonl_path = tmp_path / "signals_live.jsonl"
+    jsonl_path.write_text("")  # empty journal
+
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
+    agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
-    agent._partial_close_count = {}
-    agent._close_cooldown_until = {}
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
+    )
+    agent._close_failed_streak_within_window = types.MethodType(
+        TradingAgent._close_failed_streak_within_window, agent
     )
 
     spread = MagicMock(underlying="QQQ")

@@ -57,7 +57,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from trading_agent.config import AppConfig, load_config
 from trading_agent.journal_kb import JournalKB
@@ -147,6 +147,20 @@ PDT_EQUITY_THRESHOLD = 25_000.0
 PARTIAL_CLOSE_COOLDOWN_THRESHOLD = 3
 CLOSE_COOLDOWN_MINUTES = 60
 
+# ── Hard cap on positions per underlying ────────────────────────────────────
+# Belt-and-suspenders against the dedup gate failing — if anything lets the
+# cycle slip a duplicate plan past ``_tickers_with_open_orders`` /
+# ``fetch_open_positions``, this cap is the final stop.  Pre-2026-05-13 the
+# dedup gate only filtered tickers whose positions reported ``signal=HOLD``,
+# which silently allowed Stage 2 to fire for tickers whose positions had
+# triggered exit signals (profit_target, regime_shift, etc.) but hadn't yet
+# closed — see the 2026-05-12 GLD dedup-gate-bypass incident.
+#
+# Counting actual broker positions (any signal) and capping at 1 closes both
+# failure modes structurally.  Set ``MAX_POSITIONS_PER_TICKER>1`` only if you
+# explicitly want stacked spreads on a single underlying.
+MAX_POSITIONS_PER_TICKER = 1
+
 # OCC option symbol → underlying root.  Format ROOT(1-6) + YYMMDD(6) +
 # C/P(1) + STRIKE*1000(8).  Used both for stale-order cancel scoping
 # and open-order dedup, so identical to the dashboard helper in
@@ -191,15 +205,19 @@ class TradingAgent:
         # shouldn't), the second call returns the skip result.
         self._cycle_lock = threading.Lock()
 
-        # ── Partial-close cooldown state ───────────────────────────────
-        # Per-ticker counter of consecutive partial-fill close attempts.
-        # When the count reaches PARTIAL_CLOSE_COOLDOWN_THRESHOLD, the
-        # ticker is parked in a CLOSE_COOLDOWN_MINUTES window during
-        # which the cycle skips further close attempts and emits a
-        # WARNING explaining the zombie state.  Cleared on a successful
-        # complete close, OR on agent restart (in-memory only).
-        self._partial_close_count: Dict[str, int] = {}
-        self._close_cooldown_until: Dict[str, datetime] = {}
+        # ── Partial-close cooldown — journal-derived ───────────────────
+        # Pre-2026-05-13 the cooldown state lived in two in-memory
+        # dicts on this instance.  That broke in production because
+        # the cycle subprocess exits after each cycle and the dicts
+        # reset to empty — the streak never accumulated across cycles
+        # and the cooldown never engaged.  See the 2026-05-13 XLF/GLD
+        # post-mortem.
+        #
+        # State is now derived on every read from the journal's
+        # ``close_failed`` and ``closed`` rows.  See
+        # ``_close_failed_streak_within_window`` for the derivation
+        # and ``_close_cooldown_minutes_remaining`` / ``_journal_close_event``
+        # for the readers.  No instance dicts needed.
 
         # MarketDataProvider now satisfies both MarketDataPort and
         # AccountPort (its get_account_info/is_market_open methods no
@@ -646,10 +664,32 @@ class TradingAgent:
 
         monitor_results = self._stage_monitor(account_balance)
 
-        tickers_with_positions = set()
+        # ── Per-ticker position count + dedup set ──────────────────────
+        # Pre-2026-05-13 this only added tickers whose positions reported
+        # ``signal=HOLD``.  That silently bypassed the dedup for any
+        # ticker whose positions had triggered an exit signal but
+        # hadn't yet closed (in particular: GLD on 2026-05-12 was
+        # ``regime_shift`` exit-pending but not yet in HOLD, so Stage 2
+        # tried to open a new GLD spread).  Now we count every reported
+        # position regardless of signal and cap at MAX_POSITIONS_PER_TICKER.
+        positions_per_ticker: Dict[str, int] = {}
         for sr in monitor_results.get("positions", []):
-            if sr.get("signal") == ExitSignal.HOLD.value:
-                tickers_with_positions.add(sr.get("underlying", ""))
+            underlying = sr.get("underlying", "")
+            if underlying:
+                positions_per_ticker[underlying] = (
+                    positions_per_ticker.get(underlying, 0) + 1
+                )
+
+        tickers_with_positions: Set[str] = {
+            t for t, n in positions_per_ticker.items()
+            if n >= MAX_POSITIONS_PER_TICKER
+        }
+        if positions_per_ticker:
+            logger.info(
+                "Open positions snapshot — %s (cap: %d/ticker)",
+                {t: n for t, n in sorted(positions_per_ticker.items())},
+                MAX_POSITIONS_PER_TICKER,
+            )
 
         # ------------------------------------------------------------------
         # Stage 1.5: Stale-order maintenance
@@ -921,13 +961,15 @@ class TradingAgent:
                 cooldown_left = self._close_cooldown_minutes_remaining(
                     spread.underlying)
                 if cooldown_left > 0:
+                    streak, _ = self._close_failed_streak_within_window(
+                        spread.underlying)
                     logger.warning(
                         "[%s] Close cooldown active — %d min remaining "
                         "(%d consecutive partial fills). Skipping retry. "
                         "Manually close the position on Alpaca's UI to "
                         "clear the zombie state.",
                         spread.underlying, cooldown_left,
-                        self._partial_close_count.get(spread.underlying, 0),
+                        streak,
                     )
                     continue
 
@@ -1143,18 +1185,26 @@ class TradingAgent:
             # streak count so the operator can see "we're at 2/3,
             # one more partial fills the cooldown."
             if action == "close_failed":
-                streak = self._partial_close_count.get(
-                    spread.underlying, 0)
+                # Streak counts EXISTING close_failed rows in the
+                # cooldown window (since the most recent ``closed``).
+                # +1 represents the row we're about to write — so a
+                # fresh first failure produces "1/3", three in a row
+                # produces "3/3" and engages the cooldown.  This is
+                # the journal-derived replacement for the pre-2026-05-13
+                # in-memory counter that didn't survive process restarts.
+                existing_streak, _ = self._close_failed_streak_within_window(
+                    spread.underlying)
+                streak = existing_streak + 1
                 payload["partial_close_streak"] = streak
                 payload["partial_close_threshold"] = (
                     PARTIAL_CLOSE_COOLDOWN_THRESHOLD
                 )
-                cooldown_until = self._close_cooldown_until.get(
-                    spread.underlying)
-                if cooldown_until is not None:
-                    payload["close_cooldown_until"] = (
-                        cooldown_until.isoformat()
+                if streak >= PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
+                    deadline = (
+                        datetime.now(timezone.utc)
+                        + timedelta(minutes=CLOSE_COOLDOWN_MINUTES)
                     )
+                    payload["close_cooldown_until"] = deadline.isoformat()
                     payload["close_cooldown_reason"] = (
                         f"{streak} consecutive partial fills "
                         f"≥ threshold {PARTIAL_CLOSE_COOLDOWN_THRESHOLD}; "
@@ -1237,74 +1287,176 @@ class TradingAgent:
             )
             return set()
 
+    def _close_failed_streak_within_window(
+        self, ticker: str, window_min: int = CLOSE_COOLDOWN_MINUTES,
+    ) -> Tuple[int, Optional[datetime]]:
+        """
+        Count consecutive ``action="close_failed"`` rows for ``ticker``
+        within the last ``window_min`` minutes, since the most recent
+        ``action="closed"`` row (which resets the streak).
+
+        Journal-derived rather than in-memory because the trading-agent
+        process exits at the end of each cycle in subprocess-per-cycle
+        deployments.  Pre-2026-05-13 this state lived in an in-memory
+        dict on ``TradingAgent``, and every cycle restart blew it away
+        — the cooldown protection never engaged in production (see the
+        2026-05-13 XLF/GLD post-mortem).  Now we count rows in the
+        signals journal, which persists across cycles by construction.
+
+        Returns
+        -------
+        (streak, last_failure_timestamp)
+            ``streak`` — number of unsuperseded close_failed rows in
+                         the window.
+            ``last_failure_timestamp`` — UTC datetime of the most
+                         recent counted row, or None if streak == 0.
+        """
+        jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+        if not jsonl_path or not os.path.isfile(jsonl_path):
+            return 0, None
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=window_min)
+        # (timestamp, action) tuples for this ticker, in window
+        events: List[Tuple[datetime, str]] = []
+        try:
+            with open(jsonl_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("ticker") != ticker:
+                        continue
+                    if rec.get("action") not in ("close_failed", "closed"):
+                        continue
+                    ts_str = rec.get("timestamp", "")
+                    if not ts_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        continue
+                    events.append((ts, rec.get("action", "")))
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(
+                "Could not read journal for cooldown derivation: %s", exc,
+            )
+            return 0, None
+
+        events.sort()  # chronological
+
+        # Find the most recent 'closed' row in window — anything before
+        # it doesn't count toward the current streak (the position was
+        # closed and the streak resets).
+        last_closed_ts: Optional[datetime] = None
+        for ts, action in events:
+            if action == "closed":
+                last_closed_ts = ts
+
+        streak = 0
+        last_fail_ts: Optional[datetime] = None
+        for ts, action in events:
+            if action != "close_failed":
+                continue
+            if last_closed_ts is not None and ts <= last_closed_ts:
+                continue
+            streak += 1
+            if last_fail_ts is None or ts > last_fail_ts:
+                last_fail_ts = ts
+        return streak, last_fail_ts
+
     def _close_cooldown_minutes_remaining(self, ticker: str) -> int:
         """
-        Minutes remaining in the cooldown window for ``ticker``, or 0 if
-        no cooldown is active.  See PARTIAL_CLOSE_COOLDOWN_THRESHOLD.
+        Minutes remaining in the cooldown window for ``ticker``, or 0
+        if no cooldown is active.
+
+        Derived from the journal: cooldown is engaged once the streak
+        reaches ``PARTIAL_CLOSE_COOLDOWN_THRESHOLD``, and lasts
+        ``CLOSE_COOLDOWN_MINUTES`` from the most recent partial-close
+        timestamp.  Rounds remaining time up to the nearest minute so
+        a 30-second remainder still surfaces as 1 (operator should
+        know the cooldown hasn't fully elapsed).
         """
-        until = self._close_cooldown_until.get(ticker)
-        if until is None:
+        streak, last_fail_ts = self._close_failed_streak_within_window(ticker)
+        if streak < PARTIAL_CLOSE_COOLDOWN_THRESHOLD or last_fail_ts is None:
             return 0
+        deadline = last_fail_ts + timedelta(minutes=CLOSE_COOLDOWN_MINUTES)
         now = datetime.now(timezone.utc)
-        if now >= until:
-            # Cooldown has expired — purge the entry so the dict doesn't
-            # grow unbounded across an all-day session.
-            self._close_cooldown_until.pop(ticker, None)
-            self._partial_close_count.pop(ticker, None)
+        if now >= deadline:
             return 0
-        delta = until - now
-        # Round up so a 30-second remainder still shows as 1 minute
-        # (the operator should know the cooldown isn't fully elapsed).
-        return max(1, int(delta.total_seconds() // 60) + (1 if delta.total_seconds() % 60 else 0))
+        delta = deadline - now
+        return max(
+            1,
+            int(delta.total_seconds() // 60)
+            + (1 if delta.total_seconds() % 60 else 0),
+        )
 
     def _record_partial_close(self, ticker: str) -> None:
         """
-        Increment the per-ticker partial-fill counter.  When the count
-        reaches PARTIAL_CLOSE_COOLDOWN_THRESHOLD, set the cooldown
-        timestamp so subsequent cycles skip retry attempts for
-        CLOSE_COOLDOWN_MINUTES.
+        No-op since 2026-05-13 — kept for caller compatibility.
 
-        Called from the close loop in ``_stage_monitor`` after every
-        ``executor.close_spread`` that returns ``fill_status="partial"``.
+        Pre-2026-05-13 this incremented an in-memory counter.  That
+        counter was reset every cycle in production (each cycle =
+        new process = empty dict), so the cooldown never engaged.
+        State is now derived from journal rows on every read; there
+        is nothing to "record" in-memory.  The actual partial-fill
+        information is journaled by ``_journal_close_event`` via
+        ``action="close_failed"``.
+
+        Method retained so existing call sites in ``_stage_monitor``
+        don't have to change shape.  Emits an info-level streak log
+        line for operator situational awareness.
         """
-        new_count = self._partial_close_count.get(ticker, 0) + 1
-        self._partial_close_count[ticker] = new_count
-        if new_count >= PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
-            self._close_cooldown_until[ticker] = (
-                datetime.now(timezone.utc)
-                + timedelta(minutes=CLOSE_COOLDOWN_MINUTES)
-            )
+        streak, _ = self._close_failed_streak_within_window(ticker)
+        # +1 for the row about to be journaled by the caller's path.
+        upcoming = streak + 1
+        if upcoming >= PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
             logger.warning(
                 "[%s] %d consecutive partial closes — entering "
                 "%d-min cooldown.  Manually clean up the position on "
                 "Alpaca's UI to clear the zombie state; the cooldown "
                 "will expire automatically thereafter.",
-                ticker, new_count, CLOSE_COOLDOWN_MINUTES,
+                ticker, upcoming, CLOSE_COOLDOWN_MINUTES,
             )
         else:
             logger.info(
                 "[%s] Partial-close streak %d/%d.  Will park in "
                 "cooldown after %d.",
-                ticker, new_count, PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+                ticker, upcoming, PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
                 PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
             )
 
     def _clear_close_cooldown(self, ticker: str) -> None:
         """
-        Reset the per-ticker partial-fill counter and discard any
-        cooldown timestamp.  Called on a successful (complete) close.
+        No-op since 2026-05-13 — kept for caller compatibility.
+
+        Pre-2026-05-13 this purged in-memory cooldown state on a
+        successful close.  Now the state is derived from journal
+        rows, and the ``action="closed"`` row written by the
+        caller's path is itself the supersede signal — the next call
+        to ``_close_failed_streak_within_window`` will see it and
+        reset the streak to 0.  Nothing to purge here.
+
+        Method retained so existing call sites don't have to change.
+        Emits an info log for traceability.
         """
-        had_state = (
-            ticker in self._partial_close_count
-            or ticker in self._close_cooldown_until
-        )
-        self._partial_close_count.pop(ticker, None)
-        self._close_cooldown_until.pop(ticker, None)
-        if had_state:
+        # Read current state to decide whether to log.  If there's no
+        # active streak, the close is just a normal close (no cooldown
+        # to clear); stay quiet.
+        streak, _ = self._close_failed_streak_within_window(ticker)
+        if streak > 0:
             logger.info(
-                "[%s] Cleared close-cooldown state after successful "
-                "complete close.",
-                ticker,
+                "[%s] Successful close clears journal-derived "
+                "cooldown streak (was %d/%d).",
+                ticker, streak, PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
             )
 
     def _load_trade_plans(self) -> List[Dict]:
