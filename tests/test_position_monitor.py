@@ -323,6 +323,147 @@ def test_matched_and_inferred_coexist():
     )
 
 
+# --- Reject-plan leg-claim regression (2026-05-15 XLF incident) ---------
+#
+# State history can retain plans the chain scanner emitted but never
+# submitted (``valid=False``) or the risk manager vetoed
+# (``risk_verdict.approved=False``).  Before the fix, those rejected
+# plans iterated through ``group_into_spreads`` like any other and could
+# greedily claim broker leg symbols they happened to share with the
+# actually-submitted plan — splitting one Iron Condor into two display
+# rows and double-counting against the per-ticker position cap.
+#
+# Concretely on 2026-05-15: four rejected XLF plans all carried the
+# call wing C52.5/C54.0 and an invalid put wing P49.0/P50.5; the actual
+# submission carried the same calls plus P48.5/P50.0.  The rejected
+# plan won the iteration race, claimed the two call legs, and the
+# put legs got attributed to a second SpreadPosition row.
+
+_XLF_REJECTED_INNER = {
+    "ticker":       "XLF",
+    "strategy":     "Iron Condor",
+    "expiration":   "2026-06-05",
+    "spread_width": 1.5,
+    "net_credit":   0.44,
+    "max_loss":     106.0,
+    "valid":        False,
+    "rejection_reason": "Credit/Width ratio 0.2933 < 0.3",
+    "legs": [
+        {"symbol": "XLF260605C00052500", "strike": 52.5, "action": "sell"},
+        {"symbol": "XLF260605C00054000", "strike": 54.0, "action": "buy"},
+        {"symbol": "XLF260605P00049000", "strike": 49.0, "action": "sell"},
+        {"symbol": "XLF260605P00050500", "strike": 50.5, "action": "buy"},
+    ],
+}
+
+_XLF_SUBMITTED_INNER = {
+    "ticker":       "XLF",
+    "strategy":     "Iron Condor",
+    "expiration":   "2026-06-05",
+    "spread_width": 1.5,
+    "net_credit":   0.47,
+    "max_loss":     103.0,
+    "valid":        True,
+    "legs": [
+        {"symbol": "XLF260605C00052500", "strike": 52.5, "action": "sell"},
+        {"symbol": "XLF260605C00054000", "strike": 54.0, "action": "buy"},
+        {"symbol": "XLF260605P00048500", "strike": 48.5, "action": "sell"},
+        {"symbol": "XLF260605P00050000", "strike": 50.0, "action": "buy"},
+    ],
+}
+
+# Broker reports the four legs of the SUBMITTED plan only — the rejected
+# plan never resulted in any fills.
+_XLF_BROKER_LEGS = [
+    _snap("XLF260605C00052500", qty=-1, unreal_pl=-4.0),
+    _snap("XLF260605C00054000", qty=+1, unreal_pl=2.0),
+    _snap("XLF260605P00048500", qty=+1, unreal_pl=-3.0),
+    _snap("XLF260605P00050000", qty=-1, unreal_pl=-5.0),
+]
+
+
+def test_rejected_plan_does_not_claim_legs_from_submitted_plan():
+    """State history has rejected plans sharing the call wing with the
+    actually-submitted plan.  Result must be exactly ONE spread row
+    using the SUBMITTED plan's economics — not two halves.
+
+    Pre-fix behaviour: greedy iteration let the rejected plan claim
+    C52.5/C54.0 first, then the put wing was attributed to a second
+    inferred-style row using the rejected plan's net_credit/max_loss.
+    The cap-counting layer in agent.py would then count this as
+    ``positions_per_ticker['XLF'] = 2`` and block any further entry
+    (which happened by accident, not by design — see runbook 04).
+    """
+    # Order matters: rejected plans listed FIRST so they'd win greedy
+    # iteration without the filter. This mirrors how state_history is
+    # written — chronologically, with rejections always preceding the
+    # final submission of the cycle.
+    plans = [
+        _XLF_REJECTED_INNER,
+        _XLF_REJECTED_INNER,
+        _XLF_REJECTED_INNER,
+        _XLF_REJECTED_INNER,
+        _XLF_SUBMITTED_INNER,
+    ]
+    spreads = _monitor().group_into_spreads(_XLF_BROKER_LEGS, plans)
+
+    assert len(spreads) == 1, (
+        f"Expected ONE spread (the submitted Iron Condor) — got "
+        f"{len(spreads)}: {[(s.underlying, s.strategy_name, s.original_credit) for s in spreads]}. "
+        "This is the 2026-05-15 XLF regression — a rejected plan with "
+        "shared legs split the IC into two rows."
+    )
+    s = spreads[0]
+    assert s.strategy_name == "Iron Condor"
+    assert len(s.legs) == 4
+    assert s.original_credit == pytest.approx(0.47), (
+        "Economics must come from the SUBMITTED plan (cr=0.47), not "
+        "the rejected plan (cr=0.44). Pre-fix the row showed cr=0.44 "
+        "for the call-wing half because the rejected plan won iteration."
+    )
+    assert s.max_loss == pytest.approx(103.0)
+
+
+def test_envelope_with_risk_verdict_rejected_is_filtered():
+    """Envelope shape carrying ``risk_verdict.approved=False`` must
+    also be filtered, even if the inner plan happens to have
+    ``valid=True``.  Defensive: belt + braces against any drift where
+    the chain scanner says "valid" but the risk manager vetoes."""
+    inner = {**_XLF_SUBMITTED_INNER, "net_credit": 0.99, "max_loss": 51.0}
+    envelope_rejected = {
+        "trade_plan":   inner,
+        "risk_verdict": {"approved": False,
+                         "checks_failed": ["Max loss exceeds cap"]},
+        "run_id":       "rejected",
+    }
+    envelope_approved = {
+        "trade_plan":   _XLF_SUBMITTED_INNER,
+        "risk_verdict": {"approved": True},
+        "run_id":       "approved",
+    }
+    spreads = _monitor().group_into_spreads(
+        _XLF_BROKER_LEGS, [envelope_rejected, envelope_approved],
+    )
+    assert len(spreads) == 1
+    assert spreads[0].original_credit == pytest.approx(0.47), (
+        "Risk-vetoed envelope must not claim legs; the approved "
+        "envelope's economics (cr=0.47) must surface."
+    )
+
+
+def test_plan_missing_valid_field_is_treated_as_valid():
+    """Backwards-compat: older trade_plan history files predate the
+    ``valid`` field.  A plan with no ``valid`` key must still match
+    broker legs — otherwise upgrading the agent against an existing
+    state_history archive would blank out the Open-Positions panel.
+    """
+    plan_no_valid = {k: v for k, v in _XLF_SUBMITTED_INNER.items()
+                     if k != "valid"}
+    spreads = _monitor().group_into_spreads(_XLF_BROKER_LEGS, [plan_no_valid])
+    assert len(spreads) == 1
+    assert spreads[0].strategy_name == "Iron Condor"
+
+
 # --- fetch_open_positions: distinguish None from [] ---------------------
 #
 # 2026-05-05 regression: a TCP connection-reset during Stage 1 returned

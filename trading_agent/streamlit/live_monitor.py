@@ -2326,8 +2326,10 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         )
         max_risk_pct = st.slider(
             "Max account risk per trade (%)",
-            0.5, 5.0, float(seed.max_risk_pct) * 100, 0.5,
-            help="Hard cap on max-loss as a fraction of account equity.",
+            0.5, 10.0, float(seed.max_risk_pct) * 100, 0.5,
+            help="Hard cap on max-loss as a fraction of account equity. "
+                 "Values >5% are aggressive — a 3-loser streak can draw "
+                 "the account down >25%.",
             key="cust_max_risk",
         ) / 100.0
         dte_window_days = st.slider(

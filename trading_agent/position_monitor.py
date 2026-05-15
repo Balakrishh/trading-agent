@@ -310,6 +310,30 @@ class PositionMonitor:
 
         for plan in trade_plans:
             tp = self._extract_inner_plan(plan)
+
+            # ── Skip plans the agent never actually executed ──────────
+            # ``state_history`` retains every plan the chain scanner
+            # emitted that cycle, including rejections (``valid=False``)
+            # and risk-vetoed plans (``risk_verdict.approved=False``).
+            # A rejected plan whose leg symbols partially overlap the
+            # actually-submitted plan would otherwise greedily claim
+            # the shared legs first — splitting a single Iron Condor
+            # into two display rows and double-counting against the
+            # per-ticker position cap. See the 2026-05-15 XLF incident:
+            # 4 rejected plans shared the call wing with the submitted
+            # plan and stole those legs into a phantom spread row.
+            #
+            # Defaults are permissive — missing ``valid`` or missing
+            # ``risk_verdict`` are treated as valid/approved so that
+            # inner-shaped plans (which don't carry risk_verdict) and
+            # older history files (pre-``valid`` field) aren't dropped.
+            if tp.get("valid") is False:
+                continue
+            if isinstance(plan, dict):
+                rv = plan.get("risk_verdict")
+                if isinstance(rv, dict) and rv.get("approved") is False:
+                    continue
+
             plan_legs = tp.get("legs", [])
             plan_symbols = {leg["symbol"] for leg in plan_legs}
             if not plan_symbols:

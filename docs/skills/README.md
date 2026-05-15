@@ -8,7 +8,7 @@ Atomic, reusable concepts extracted from the trading agent. Each file is self-co
 
 ---
 
-## Phase 1 (19 skills + meta, dependency-ordered)
+## Phase 1 (19 skills + meta + skill 28, dependency-ordered)
 
 Read top-to-bottom on a first pass. Each row's "Depends on" column lists the prerequisite skills. **Skill 00 is mandatory first reading** — it's the meta-skill covering glossary, SDLC, and conventions that every other skill assumes you've internalised.
 
@@ -34,6 +34,7 @@ Read top-to-bottom on a first pass. Each row's "Depends on" column lists the pre
 | 17 | [Close-failure action + cooldown + PDT](17_close_failure_and_cooldown.md) | risk | `agent.py:124-200, 867-1265`, `streamlit/live_monitor.py:1095-1316` |
 | 18 | [Order-submission idempotency (`client_order_id` + retry)](18_order_submission_idempotency.md) | risk | `executor.py:60-76, 299-541` |
 | 19 | [Signal-journal schema (action enum + dedup bypass)](19_journal_schema.md) | architecture | `journal_kb.py:95-101, 155-432` |
+| 28 | [Position-monitor spread grouping (plan-match-then-infer)](28_position_monitor_spread_grouping.md) | architecture | `position_monitor.py:294-373` |
 
 ## Phase 2 (planned, not yet written)
 
@@ -77,8 +78,8 @@ If you only have 30 minutes:
 - **Minute 18–25:** Skills 11, 12 — the regime classifier and how it composes across timeframes.
 - **Minute 25–30:** Skill 13 — the preset system, which is the central control surface.
 
-If you have a full afternoon, read 00 first, then all 19 in order.
+If you have a full afternoon, read 00 first, then all 19 in order. Skill 28 (position-monitor spread grouping) is a late-Phase-1 addition documenting the rejected-plan leg-claim fix from 2026-05-15 — read it after 19.
 
 ---
 
-*Last updated: 2026-05-06 against repo HEAD.*
+*Last updated: 2026-05-15 against repo HEAD.*
