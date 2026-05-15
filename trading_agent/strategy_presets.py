@@ -182,6 +182,25 @@ class PresetConfig:
 # Conservative aims for ~85% POP on the short leg and accepts thinner credits;
 # Aggressive targets ~65% POP and demands a fat credit floor to compensate.
 
+# ── Adaptive grid defaults (2026-05-15 tuning) ─────────────────────────
+# Updated per the "include SPY without raising budget" discussion. The
+# narrower 0.5% width and the 0.40 delta entry expand the candidate
+# space for high-spot tickers (SPY/QQQ/DIA) without lowering the C/W
+# floor — those tickers only fill on IV-rich days, which is the
+# correct self-regulating behavior.
+_CONS_DELTA_GRID  = (0.15, 0.20, 0.25, 0.30)
+_BAL_DELTA_GRID   = (0.20, 0.25, 0.30, 0.35, 0.40)
+_AGG_DELTA_GRID   = (0.25, 0.30, 0.35, 0.40, 0.45)
+
+_CONS_DTE_GRID    = (14, 21, 30, 45)
+_BAL_DTE_GRID     = (7, 14, 21, 30, 45)
+_AGG_DTE_GRID     = (7, 14, 21, 30)
+
+_CONS_WIDTH_GRID  = (0.010, 0.015, 0.020, 0.025)
+_BAL_WIDTH_GRID   = (0.005, 0.010, 0.015, 0.020, 0.025)
+_AGG_WIDTH_GRID   = (0.005, 0.010, 0.015, 0.020, 0.025, 0.030)
+
+
 CONSERVATIVE = PresetConfig(
     name="conservative",
     max_delta=0.15,
@@ -193,6 +212,14 @@ CONSERVATIVE = PresetConfig(
     width_value=0.025,           # 2.5% × spot
     min_credit_ratio=0.20,
     max_risk_pct=0.01,           # 1% account
+    # Conservative keeps tighter delta (no 0.35+ exposure) and skips
+    # the very-narrow 0.5% width — it shouldn't be trading SPY-style
+    # spreads in the first place.
+    delta_grid=_CONS_DELTA_GRID,
+    dte_grid=_CONS_DTE_GRID,
+    width_grid_pct=_CONS_WIDTH_GRID,
+    edge_buffer=0.15,                    # demand more margin
+    min_pop=0.65,                        # require higher POP
     description=(
         "Low-risk: ~85% POP, far-OTM shorts, longer DTE. Trades fire less "
         "often; credits are smaller; win rate is high."
@@ -210,6 +237,15 @@ BALANCED = PresetConfig(
     width_value=0.015,           # 1.5% × spot
     min_credit_ratio=0.30,
     max_risk_pct=0.02,           # 2% account
+    # Recommended 2026-05-15 grid: delta-0.40 added so the scanner can
+    # find premium-paying candidates on high-spot tickers during IV-rich
+    # days; 45-DTE added for more total theta; 0.5% width opens SPY/QQQ
+    # budget-eligibility (still C/W-gated). edge_buffer slightly relaxed.
+    delta_grid=_BAL_DELTA_GRID,
+    dte_grid=_BAL_DTE_GRID,
+    width_grid_pct=_BAL_WIDTH_GRID,
+    edge_buffer=0.08,
+    min_pop=0.55,
     description=(
         "Recommended baseline: ~75% POP, 21-DTE verticals, 1.5% width. "
         "Trades fire most days; healthy credits; reasonable win rate."
@@ -227,6 +263,14 @@ AGGRESSIVE = PresetConfig(
     width_value=5.0,             # $5 fixed
     min_credit_ratio=0.40,
     max_risk_pct=0.03,           # 3% account
+    # Aggressive extends the delta grid up to 0.45 (admits near-ATM
+    # shorts when min_pop allows), keeps short DTE for theta velocity,
+    # widens to 3.0% for tickers with explosive premium.
+    delta_grid=_AGG_DELTA_GRID,
+    dte_grid=_AGG_DTE_GRID,
+    width_grid_pct=_AGG_WIDTH_GRID,
+    edge_buffer=0.05,
+    min_pop=0.50,                        # admits up to delta-0.50
     description=(
         "High-credit / high-variance: ~65% POP, near-ATM shorts, short DTE. "
         "Fires almost every cycle; large credits; gamma-sensitive."

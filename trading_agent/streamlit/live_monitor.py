@@ -1079,6 +1079,14 @@ def _parse_journal_df(path: str, version: int, mtime: float, size: int) -> pd.Da
                         "rsi_14":          rs.get("rsi_14", 0) or 0,
                         "sma_50":          rs.get("sma_50", 0) or 0,
                         "sma_200":         rs.get("sma_200", 0) or 0,
+                        # IVRank — 1-year percentile of current IV. Promoted
+                        # to a top-level column (2026-05-15) so the guardrail
+                        # grid can annotate each ticker with its IV regime
+                        # (skill 04). ``None`` when the regime classifier
+                        # couldn't compute IVRank (e.g. chain fetch failed
+                        # or insufficient history). The grid renders ``—``
+                        # in that case rather than a misleading "0.0".
+                        "iv_rank":         rs.get("iv_rank"),
                         # Adaptive-scanner block. Empty dict on legacy
                         # records so downstream rendering can do truthiness
                         # checks without KeyError; populated dict on new
@@ -1936,10 +1944,24 @@ def _guardrail_grid_from_journal(
                 # full string, surfaced via the cell hover.
                 "summary": _compact_for(name, state, detail),
             })
+        # Pull IVRank from the row's raw_signal (or the promoted
+        # ``iv_rank`` top-level column if the parser projected it).
+        # Used by the grid renderer to annotate each ticker with its
+        # current IV regime — high IVRank means premium is paying,
+        # low IVRank means the chain isn't worth a C/W shot today.
+        display_iv_rank = None
+        if hasattr(r, "get"):
+            display_iv_rank = r.get("iv_rank")
+        if display_iv_rank is None:
+            _rs_payload = r.get("raw_signal") if hasattr(r, "get") else {}
+            if isinstance(_rs_payload, dict):
+                display_iv_rank = _rs_payload.get("iv_rank")
+
         rows.append({
             "ticker":    ticker,
             "timestamp": display_timestamp,
             "regime":    display_regime,
+            "iv_rank":   display_iv_rank,
             # Backward-compat: legacy callers expect a boolean
             # ``approved`` field. APPROVED, HOLDING, and PENDING all
             # represent positions where the risk manager signed off —

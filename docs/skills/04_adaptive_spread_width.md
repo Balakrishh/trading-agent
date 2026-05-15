@@ -106,6 +106,20 @@ def _pick_spread_width(self, contracts: List[Dict],
 - [13 Preset system & hot-reload](13_preset_system_hot_reload.md) — where `width_mode` and `width_value` are set.
 - [14 Adaptive vs static scan modes](14_adaptive_vs_static_scan_modes.md) — adaptive scan sweeps `width_grid_pct` instead of using this single-point picker.
 
+## 6. 2026-05-15 Grid retune
+
+The three named presets carry distinct grid shapes optimized for their risk posture. All three (except Conservative) include the narrow `0.005` (0.5% of spot) entry so high-spot tickers (SPY, QQQ, DIA, IWM) become budget-eligible without raising `max_risk_pct`. Whether they actually clear C/W on any given day depends on the underlying's IV regime — surfaced in the guardrail grid as a colour-coded `IV NN` annotation under each ticker.
+
+| Preset | `delta_grid` | `dte_grid` | `width_grid_pct` | `edge_buffer` | `min_pop` |
+|---|---|---|---|---|---|
+| Conservative | 0.15–0.30 | 14–45 | 1.0%–2.5% | 0.15 | 0.65 |
+| Balanced | 0.20–0.40 | 7–45 | 0.5%–2.5% | 0.08 | 0.55 |
+| Aggressive | 0.25–0.45 | 7–30 | 0.5%–3.0% | 0.05 | 0.50 |
+
+Conservative deliberately omits the 0.5% width because it shouldn't be trading SPY-style spreads. Aggressive extends to 0.45 delta + 3.0% width for premium-rich tickers but keeps DTE short to maximise theta velocity.
+
+The 0.5% width does NOT lower the C/W floor — it only adds candidate shapes to the scanner's sweep. The agent will still reject narrow-width SPY candidates on low-IV days because C/W stays below `|Δ| × (1 + edge_buffer)`. This is correct self-regulating behavior; trades fire when IVRank rises enough to support the C/W math (cross-reference skill 09 + the IVRank colour-coded annotation in the guardrail grid: green ≥50, amber 25–50, grey <25).
+
 ---
 
-*Last verified against repo HEAD on 2026-05-02.*
+*Last verified against repo HEAD on 2026-05-15 (grid retune + IVRank UI).*

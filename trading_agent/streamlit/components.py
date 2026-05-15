@@ -594,20 +594,53 @@ def guardrail_grid(grid_rows: List[Dict],
             approved_label = "REJECTED"
             approved_fg    = state_text_fg["fail"]
 
-        # Annotate the ticker cell with its sector (skill 17 / sector_map).
-        # Small grey subtext so the per-row sector is visible at a glance
-        # — useful for spotting "two financials open" or "no exposure to
-        # utilities" patterns when scanning the grid. Sector lookup is
-        # silent on "Other" (unknown ticker) to avoid noisy annotations.
+        # Annotate the ticker cell with sector + IVRank.
+        # - Sector (skill 17 / sector_map) helps spot "two financials open"
+        #   patterns at a glance.
+        # - IVRank (skill 04) tells the operator whether today's premium
+        #   is even worth a C/W shot. Color-coded: green ≥50 means
+        #   premium-rich, amber 25–50 borderline, grey <25 means the
+        #   chain is too thin for credit-spread economics regardless of
+        #   width — agent will reject these via the C/W floor.
         _sec = sector_for(row['ticker'])
         _sec_html = (
-            f"<br><span style='font-size:0.7em;color:#999;"
+            f"<span style='font-size:0.7em;color:#999;"
             f"font-weight:400;white-space:nowrap'>{_sec}</span>"
             if _sec and _sec != "Other" else ""
         )
+        _iv = row.get('iv_rank')
+        if _iv is None:
+            _iv_html = ""
+        else:
+            try:
+                _iv_val = float(_iv)
+            except (TypeError, ValueError):
+                _iv_val = None
+            if _iv_val is None:
+                _iv_html = ""
+            else:
+                if _iv_val >= 50:
+                    _iv_color = "#1b8a3a"   # green — premium-rich
+                elif _iv_val >= 25:
+                    _iv_color = "#f57c00"   # amber — borderline
+                else:
+                    _iv_color = "#999"      # grey — thin chain
+                _iv_html = (
+                    f"<span style='font-size:0.68em;color:{_iv_color};"
+                    f"font-weight:600;margin-left:6px;white-space:nowrap'"
+                    f" title='IVRank — 1-year percentile of current IV. "
+                    f"≥50 means premium is paying enough to clear C/W.'>"
+                    f"IV {_iv_val:.0f}</span>"
+                )
+        _annotation = ""
+        if _sec_html or _iv_html:
+            _annotation = (
+                f"<br>{_sec_html}{(' · ' if _sec_html and _iv_html else '')}"
+                f"{_iv_html}"
+            )
         cells_html = [
             f"<td style='padding:6px 8px;font-weight:600;white-space:nowrap'>"
-            f"{row['ticker']}{_sec_html}</td>",
+            f"{row['ticker']}{_annotation}</td>",
             f"<td style='padding:6px 8px;color:#777;font-size:0.85em;white-space:nowrap'>{ts}</td>",
             (
                 f"<td style='padding:6px 8px;text-align:center;background:{approved_bg};"
