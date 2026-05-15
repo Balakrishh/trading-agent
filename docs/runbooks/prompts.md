@@ -30,6 +30,7 @@ For the meta-context on how to brief a new LLM, see [`00_using_this_with_an_llm.
 - [§8 Deployment validation](#8-deployment-validation-prompt)
 - [§9 New-failure investigation](#9-new-failure-mode-investigation-prompt)
 - [§10 Quick-paste mini-prompts](#10-quick-paste-mini-prompts) — for recurring small questions
+- [§11 Per-ticker dashboard data diagnostic](#11-per-ticker-dashboard-data-diagnostic) — paired investigate/fix prompts for "one ticker on the dashboard looks wrong"
 
 ---
 
@@ -742,6 +743,133 @@ Match the tone of existing commit messages in `git log --oneline -20`.
 
 ---
 
+## 11. Per-ticker dashboard data diagnostic
+
+Use this pair when the Open Positions panel shows suspect numbers for ONE ticker (wrong credit / max-loss / %P&L, two rows for one Iron Condor, "Entered (ET)" off, etc.). This is a more specific version of §3 — `runbook 06` codifies the diagnostic steps; these prompts wrap them for an LLM with code-execution tools (Claude Code, Cursor, Aider, etc.).
+
+**When to reach for §11 vs §3:** if you have an observation but no idea WHICH runbook applies, §3 routes you. If you already know the issue is "the dashboard says wrong things about ticker X," §11 takes you straight into runbook 06.
+
+### 11.A — Investigate (read-only, paste first)
+
+```
+I'm seeing wrong/suspicious data on the Trading Agent dashboard for one
+ticker. Walk me through diagnosing it using docs/runbooks/06_ticker_dashboard_diagnostic.md.
+
+Symptom (replace with your observation):
+- Ticker: <TICKER>
+- Dashboard shows: credit=$<X>, max_loss=$<Y>, %Profit=<Z>%,
+  Entered <YYYY-MM-DD HH:MM ET>
+- What looks off: <one sentence — e.g. "credit is $20 less than the
+  journal recorded" or "−60% P&L on day 1 looks worse than typical
+  bid-ask drag" or "two rows for the same ticker when I opened one
+  Iron Condor">
+- When the position opened (best guess): <date>
+- Anything that changed recently: <git pull today? .env edit? preset
+  change? Streamlit restart?>
+
+Work the §3 diagnostic steps IN ORDER against the pi-diagnostics
+tarball I've attached. For each step:
+
+1. Show me the exact bash/python you'd run (don't summarise — paste
+   it inline)
+2. Run it via the Bash tool and show me the raw output
+3. State what the output tells you BEFORE moving to the next step
+
+After all seven §3 steps, classify using the §4 decision tree. State
+your confidence (high / medium / low) and which evidence drove it.
+
+Hard stops:
+- DO NOT proceed to §5 (remediation) until I explicitly confirm the
+  classification
+- DO NOT modify any code, .env, or trade_plan files
+- DO NOT SSH to the Pi or send any broker API calls
+- If you think the issue requires editing the codebase, draft the
+  change but do not apply it — I'll review first
+
+Attached:
+- pi-diagnostics/trade_journal/signals_live.jsonl
+- pi-diagnostics/trade_plans/trade_plan_<TICKER>.json
+- pi-diagnostics/logs/trading_agent.log
+- (Optional) Screenshot of the dashboard row
+```
+
+### 11.B — Fix (after 11.A classified it as a code bug)
+
+Use this only after Prompt 11.A has classified the issue as a code defect AND you've confirmed the classification.
+
+```
+I've diagnosed a bug using runbook 06. Need a fix shipped following
+CLAUDE.md's SDLC.
+
+Symptom: <one sentence>
+
+Root cause: <one paragraph; cite file:line of the bug + the journal
+or log evidence that proves it>
+
+Specifically I confirmed it's NOT the 2026-05-15 leg-claim bug
+(cr/ml attribution mismatch from a rejected plan with shared legs) —
+that one is already fixed via skill 28's filter + the envelope-passing
+fix in live_monitor.py. This is a different bug.
+
+Proposed fix (high-level): <or "you propose" if open-ended>
+
+Required deliverables:
+1. The code change (under 50 LOC if surgical; cite file:line)
+2. A regression test in tests/test_position_monitor.py (or appropriate
+   test file) that pins the bug. The test MUST fail without the fix
+   and pass with it — prove this by running it against the un-patched
+   version first.
+3. Skill update (likely docs/skills/28_position_monitor_spread_grouping.md
+   §4 if this is a new position-monitor edge case) with footer
+   re-stamp to today's date
+4. Run python scripts/checks/scan_invariant_check.py and paste the
+   "All … invariants hold" line
+5. A 2-line commit message: "<title>" + 1-2 sentence "why"
+
+Hard rules from CLAUDE.md:
+- Don't refactor unrelated code in the same PR
+- Don't paraphrase the codebase — quote it verbatim
+- If the fix touches >3 source files (excluding tests + docs), STOP
+  and explain why before proceeding
+- If the fix would change the single-source-of-truth C/W formula in
+  chain_scanner.py, risk_manager.py, AND executor.py, all three must
+  be changed in the same edit (CI invariant)
+
+The relevant skills to read FIRST:
+- docs/skills/00_sdlc_and_conventions.md
+- docs/skills/28_position_monitor_spread_grouping.md (if
+  position_monitor is touched)
+- docs/skills/13_preset_system_hot_reload.md (if PresetConfig is
+  touched)
+
+Attached: pi-diagnostics/ (full latest pull)
+```
+
+### 11.C — Second-opinion mini-prompt
+
+If you've already run 11.A and want an independent re-classification before remediation:
+
+```
+I ran runbook 06 §3 on <TICKER> and classified it as Case <A/B/C/D>
+from §4. Independently re-walk §3.<the steps most relevant to my
+classification> against the same attached pi-diagnostics and tell me
+whether you agree with my classification. Give me your confidence +
+the specific output line that drove your conclusion. Stop before §5.
+```
+
+### Why these prompts work
+
+- **They split investigate from fix.** A common LLM failure mode on diagnostic prompts is leaping straight to "here's the fix" before the symptom is even reproduced. The 11.A hard-stops at the §4 decision tree.
+- **They reference runbook 06 by section number.** The LLM has a structured doc to anchor to rather than improvising a diagnostic flow. Reduces hallucinated steps.
+- **They mention specific bugs by date (2026-05-15 leg-claim)** so the LLM doesn't re-discover what's already fixed. The §11.B prompt explicitly tells the LLM "this is NOT that bug — find the next one."
+- **They forbid the Pi/broker side-effects.** Investigation should be entirely Mac-side off the pi-diagnostics tarball. Mutations happen only after the user reviews the diff.
+
+### Worked example reference
+
+The GLD 2026-05-15 incident is the worked example in `docs/runbooks/06_ticker_dashboard_diagnostic.md` "Worked example" section. If you're new to this scenario, read that first — it shows step-by-step output from the diagnostic and the classification reasoning.
+
+---
+
 ## How prompts are versioned
 
 This file is a living document. When you discover a pattern that produces noticeably better LLM output, add it here. When a prompt becomes stale (e.g., references a deleted file), remove or update it.
@@ -759,4 +887,4 @@ To deprecate a prompt:
 
 ---
 
-*Last updated: 2026-05-13.*
+*Last updated: 2026-05-15 (added §11 — per-ticker dashboard diagnostic prompts).*

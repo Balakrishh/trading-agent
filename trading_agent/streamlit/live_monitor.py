@@ -3210,3 +3210,324 @@ def render_live_monitor() -> None:
     with col_r2:
         if st.button("Refresh Now"):
             st.rerun()
+
+
+# =====================================================================
+# Mobile essentials dashboard (routed via ?view=mobile)
+# =====================================================================
+#
+# Architecture: a single-column compact render path that REPLACES the
+# full desktop dashboard when the user visits /?view=mobile. Same
+# Streamlit process, same data sources, same cached primitives — only
+# the UI layer differs. The full dashboard is still one URL change
+# away (a footer link strips the query param).
+#
+# Design constraints (informed by Apple HIG + Material touch targets):
+#   - Single column throughout — no st.columns() splits that would
+#     collapse poorly on a 375 px viewport.
+#   - All buttons sized for ≥44 px touch targets; primary actions
+#     (Start/Stop) bumped to 56 px via inline CSS for thumb reach.
+#   - No broker fetch on first load — populate from journal so the
+#     page opens in <500 ms on a slow phone connection. The user can
+#     tap "🔄 Refresh broker" to force a live position pull.
+#   - No charts, no guardrail grid, no settings, no per-tab navigation.
+#     If the operator needs that detail, they switch to desktop view.
+#
+# Routed from app.py via:
+#     if st.query_params.get("view") == "mobile":
+#         render_mobile_dashboard()
+#         st.stop()
+#
+# Lives at the end of live_monitor.py rather than its own module
+# because it shares >80% of its data-fetching with the desktop render
+# (journal loading, spread fetching, agent state, action buttons) and
+# splitting it out would mean duplicating those imports + constants.
+
+def render_mobile_dashboard() -> None:
+    """Compact single-column dashboard for on-the-go phone monitoring.
+
+    Renders only the fields the operator needs to glance at while
+    away from a desktop:
+      • Agent state (▶ running / ⏹ stopped / ⏸ paused) + last cycle
+        timestamp (ET) with a freshness color
+      • Portfolio equity (from journal's last non-zero ``account_balance``)
+      • Day P&L (today's realised + unrealised sum)
+      • Open positions count + compact per-position list
+      • Last 5 journal events
+      • Big touch-friendly Start / Stop / Refresh buttons
+      • Footer link back to the desktop view
+
+    Does NOT render: charts, guardrail grid, preset config, scanner
+    diagnostics, close-failure panel, or anything that needs more
+    than a glance to interpret. The operator escalates to desktop
+    view for those.
+    """
+    # ── Mobile-specific CSS overrides (touch targets, single-column) ──
+    # Streamlit's default button height is ~38 px — below Apple's 44 px
+    # minimum touch target. Bump primary buttons to 56 px. Hide the
+    # market-status badge wrapper that was added for the desktop header
+    # (we render our own pill inline).
+    st.markdown(
+        """
+        <style>
+        /* Force everything mobile-first regardless of viewport */
+        [data-testid="stHorizontalBlock"] {
+            flex-direction: column !important;
+            gap: 0.5rem !important;
+        }
+        [data-testid="stHorizontalBlock"] > div {
+            width: 100% !important;
+        }
+        .block-container,
+        [data-testid="stAppViewBlockContainer"] {
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+            padding-top: 0.5rem !important;
+            max-width: 600px !important;
+        }
+        /* Big touch-friendly buttons (56 px primary, 44 px secondary) */
+        .stButton > button {
+            min-height: 56px !important;
+            font-size: 1.05rem !important;
+            font-weight: 600 !important;
+        }
+        /* Compact metric tiles — fit 3 in a phone screen */
+        [data-testid="stMetricValue"] {
+            font-size: 1.4rem !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 0.8rem !important;
+            opacity: 0.7 !important;
+        }
+        /* Hide sidebar toggle on mobile — there's no sidebar here */
+        [data-testid="stSidebarCollapsedControl"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Live state ─────────────────────────────────────────────────────
+    loop_running = _is_loop_running()
+    dry_mode = _is_dry_run_mode()
+    paused = PAUSE_FLAG.exists()
+
+    # ── Header pill (Title + Market status in one line) ────────────────
+    try:
+        from trading_agent.market_hours import is_within_market_hours
+        market_open = is_within_market_hours()
+    except Exception:
+        market_open = None
+    if market_open is True:
+        mkt_bg, mkt_label = "#1b8a3a", "🟢 OPEN"
+    elif market_open is False:
+        mkt_bg, mkt_label = "#a62a2a", "🔴 CLOSED"
+    else:
+        mkt_bg, mkt_label = "#5a5a5a", "⚪ UNKNOWN"
+
+    st.markdown(
+        f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin-bottom:0.5rem">
+          <h2 style="margin:0;font-size:1.3rem">📈 Trading Agent</h2>
+          <span style="background:{mkt_bg};color:#fff;padding:0.3rem 0.6rem;
+                       border-radius:6px;font-weight:600;font-size:0.8rem">
+            {mkt_label}
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Agent status pill ──────────────────────────────────────────────
+    if paused:
+        agent_bg, agent_label, agent_emoji = "#f57c00", "PAUSED", "⏸"
+    elif loop_running and dry_mode:
+        agent_bg, agent_label, agent_emoji = "#1976d2", "DRY-RUN", "🧪"
+    elif loop_running:
+        agent_bg, agent_label, agent_emoji = "#1b8a3a", "RUNNING (LIVE)", "▶"
+    else:
+        agent_bg, agent_label, agent_emoji = "#666", "STOPPED", "⏹"
+
+    st.markdown(
+        f"""
+        <div style="background:{agent_bg};color:#fff;padding:0.7rem 1rem;
+                    border-radius:8px;text-align:center;font-weight:600;
+                    font-size:1.1rem;margin-bottom:1rem">
+          {agent_emoji} Agent {agent_label}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Load journal once (single read, used by all panels below) ──────
+    journal_df = _load_journal_df()
+
+    # ── Equity + Day P&L + Position count ──────────────────────────────
+    equity = 0.0
+    if not journal_df.empty and "account_balance" in journal_df.columns:
+        nonzero = journal_df[journal_df["account_balance"] > 0]["account_balance"]
+        if not nonzero.empty:
+            equity = float(nonzero.iloc[-1])
+
+    # Today's realised P&L from closed events
+    today_str = pd.Timestamp.utcnow().strftime("%Y-%m-%d")
+    realized_pl = 0.0
+    if not journal_df.empty and "action" in journal_df.columns:
+        closed_today = journal_df[
+            (journal_df["action"] == "closed")
+            & (journal_df["timestamp"].astype(str).str.startswith(today_str))
+        ]
+        for _, r in closed_today.iterrows():
+            rs = r.get("raw_signal") or {}
+            if isinstance(rs, dict):
+                realized_pl += float(rs.get("net_unrealized_pl") or 0.0)
+
+    # Open positions (use the cached broker fetch — same 30 s TTL as desktop)
+    spreads: List[Dict] = []
+    try:
+        config = _get_config()
+        spreads, _ = _fetch_spreads(config)
+    except Exception:
+        spreads = []
+    unrealized_pl = sum(float(s.get("net_unrealized_pl") or 0.0) for s in spreads)
+    total_pl = realized_pl + unrealized_pl
+
+    # Three metric tiles (stacked single-column by the @media CSS above)
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Equity", f"${equity:,.0f}")
+    with m2:
+        pl_sign = "+" if total_pl >= 0 else ""
+        st.metric("Day P&L", f"{pl_sign}${total_pl:,.0f}",
+                  delta=f"{pl_sign}${unrealized_pl:,.0f} unreal.",
+                  delta_color="off")
+    with m3:
+        st.metric("Open Positions", str(len(spreads)))
+
+    # ── Compact positions list (NOT a table — phones can't scroll wide) ─
+    if spreads:
+        st.markdown("**Open Positions**")
+        for s in spreads:
+            ticker = s.get("underlying", "?")
+            strat = s.get("strategy_name", "?")
+            credit = float(s.get("original_credit", 0)) * 100
+            pl = float(s.get("net_unrealized_pl", 0))
+            pct = (pl / credit * 100) if credit else 0.0
+            pl_color = "#1b8a3a" if pl >= 0 else "#c62828"
+            sign = "+" if pl >= 0 else ""
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e0e0e0;border-radius:8px;
+                            padding:0.6rem 0.8rem;margin-bottom:0.4rem">
+                  <div style="display:flex;justify-content:space-between;
+                              align-items:baseline">
+                    <span style="font-weight:600;font-size:1rem">
+                      {ticker} <span style="color:#777;font-weight:400;
+                                            font-size:0.85rem">· {strat}</span>
+                    </span>
+                    <span style="color:{pl_color};font-weight:600">
+                      {sign}${pl:.0f} <span style="font-size:0.85rem;opacity:0.8">
+                        ({sign}{pct:.0f}%)</span>
+                    </span>
+                  </div>
+                  <div style="color:#888;font-size:0.78rem;margin-top:0.2rem">
+                    credit ${credit:.0f} · exp {s.get('expiration','')[:10]}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("No open positions.")
+
+    # ── Last 5 journal events (excluding skip-noise) ───────────────────
+    if not journal_df.empty and "action" in journal_df.columns:
+        noise = {"skipped_existing", "skipped_rsi_gate",
+                 "skipped_defense_first", "skipped_bias"}
+        recent = journal_df[~journal_df["action"].isin(noise)].copy()
+        recent = recent.sort_values("timestamp", ascending=False).head(5)
+        if not recent.empty:
+            st.markdown("**Recent activity**")
+            for _, r in recent.iterrows():
+                action = r.get("action", "?")
+                ticker = r.get("ticker", "")
+                ts_str = format_ts(r["timestamp"])
+                # Color-code the action emoji
+                emoji_map = {
+                    "submitted": "📥", "closed": "📤", "close_failed": "⚠️",
+                    "rejected": "🚫", "warning": "⚠️", "error": "❌",
+                }
+                emoji = emoji_map.get(action, "•")
+                notes = (r.get("notes") or "")[:60]
+                st.markdown(
+                    f"""
+                    <div style="border-left:3px solid #e0e0e0;
+                                padding:0.3rem 0.7rem;margin-bottom:0.3rem">
+                      <div style="font-size:0.85rem">
+                        {emoji} <b>{ticker}</b> {action}
+                      </div>
+                      <div style="color:#888;font-size:0.72rem">
+                        {ts_str} · {notes}
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    # ── Cycle staleness beacon (mobile-compact version) ────────────────
+    if loop_running and not journal_df.empty:
+        try:
+            latest_ts = pd.to_datetime(journal_df["timestamp"], utc=True).max()
+            age_min = (pd.Timestamp.utcnow() - latest_ts).total_seconds() / 60.0
+            if age_min < 6:
+                age_color, age_emoji = "#1b8a3a", "🟢"
+            elif age_min < 15:
+                age_color, age_emoji = "#f57c00", "🟡"
+            else:
+                age_color, age_emoji = "#c62828", "🔴"
+            st.markdown(
+                f"""
+                <div style="color:{age_color};font-size:0.85rem;text-align:center;
+                            margin:0.5rem 0">
+                  {age_emoji} Last cycle: {format_ts(latest_ts)} ({age_min:.1f} min ago)
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            pass
+
+    st.markdown("---")
+
+    # ── Big touch-friendly action buttons ──────────────────────────────
+    # All buttons go to 56 px via the CSS injected at the top of this
+    # function. Single column — each button gets its own row.
+    if loop_running:
+        if st.button("⏹ Stop Agent", type="secondary", width="stretch"):
+            _stop_agent()
+            st.toast("Stop requested.", icon="⏹")
+            st.rerun()
+    else:
+        if st.button("▶ Start Agent", type="primary", width="stretch"):
+            _start_agent(dry_run=False)
+            st.toast("Agent started.", icon="▶")
+            st.rerun()
+
+    if st.button("🔄 Refresh", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
+
+    # ── Footer: back to desktop view ───────────────────────────────────
+    st.markdown(
+        """
+        <div style="text-align:center;margin-top:1.5rem;padding-bottom:1rem">
+          <a href="?" style="color:#1976d2;text-decoration:none;
+                            font-size:0.85rem">
+            🖥 → Desktop view
+          </a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )

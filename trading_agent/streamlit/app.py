@@ -132,6 +132,27 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ── Mobile-essentials early route ────────────────────────────────────────
+# Visiting the dashboard with ``?view=mobile`` short-circuits the full
+# desktop render and shows a single-column compact page optimised for
+# phone screens. The footer link in the mobile page navigates back to
+# the root URL (which has no view param → falls through to desktop).
+#
+# Rationale: the @media-based CSS shim above improves the desktop
+# dashboard's mobile reading but data-heavy widgets (st.dataframe, the
+# guardrail grid) still scroll horizontally on small viewports. The
+# mobile page side-steps that entirely by re-rendering only the fields
+# an operator needs at-a-glance: agent state, equity, day P&L, open
+# positions count, last 5 journal events, large Start/Stop buttons.
+#
+# Note: ``st.stop()`` after the mobile render is REQUIRED — without
+# it, Streamlit would continue down and render the desktop tabs below,
+# resulting in a janky mixed mobile+desktop view.
+if st.query_params.get("view") == "mobile":
+    from trading_agent.streamlit.live_monitor import render_mobile_dashboard
+    render_mobile_dashboard()
+    st.stop()
+
 # ── Page header with Market-Status badge in the top-right ────────────────
 # Layout: title + caption on the left, OPEN/CLOSED badge floated to the
 # right. Lives at the page root (above ``st.tabs``) so the badge is
