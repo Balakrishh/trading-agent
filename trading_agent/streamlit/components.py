@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from trading_agent.sector_map import sector_for
+
 # ── Timezone for UI rendering ────────────────────────────────────────────
 # Journal rows record timestamps in UTC (tz-aware ISO-8601). The dashboard
 # renders them in America/New_York so the values align with how the
@@ -262,10 +264,22 @@ def metric_row(
         )
 
     with c3:
+        # Pre-2026-05-15 this was labelled "Dominant Regime" which read
+        # as if it were a global gate driving decisions. It's not — the
+        # decision engine uses ``current_regimes[ticker]`` per-ticker.
+        # This pill is purely a summary aggregation (mode of the last
+        # 50 classified journal rows). Renamed to "Market Lean" with a
+        # tooltip so the operator doesn't conflate the two.
         color = REGIME_COLORS.get(regime.lower(), "#9e9e9e")
         st.markdown(
-            f"""<div style="text-align:center;padding-top:6px">
-            <p style="margin:0;font-size:0.85em;color:#888">Dominant Regime</p>
+            f"""<div style="text-align:center;padding-top:6px"
+                title="Mode of the last 50 classified journal rows. "
+                      "Summary view — NOT a global gate. Each ticker's "
+                      "trade decision uses its own per-ticker regime.">
+            <p style="margin:0;font-size:0.85em;color:#888">
+              Market Lean
+              <span style="font-size:0.75em;color:#aaa">(50-cycle mode)</span>
+            </p>
             <span style="background:{color};color:#fff;padding:3px 14px;
             border-radius:12px;font-weight:600;font-size:1em">{regime.upper()}</span>
             </div>""",
@@ -276,6 +290,112 @@ def metric_row(
         c4.metric("Next Cycle In", "—", delta="Stopped", delta_color="off")
     else:
         c4.metric("Next Cycle In", f"{cycle_secs}s", delta=" ", delta_color="off")
+
+
+# ---------------------------------------------------------------------------
+# Sector-level regime aggregation (skill 11 / skill 28 sibling)
+# ---------------------------------------------------------------------------
+
+def sector_regime_aggregation(journal_df: pd.DataFrame) -> List[Tuple[str, str, Dict[str, int]]]:
+    """Return ``[(sector, dominant_regime, {regime: count}), ...]``.
+
+    Computed off the LATEST classified row per ticker (one row per
+    ticker, the freshest with a non-empty / non-unknown regime label).
+    The per-sector aggregation is the mode of those latest rows.
+
+    Useful for answering "is the financial sector bullish, or just XLF
+    idiosyncratically?" without scrolling through the per-ticker grid.
+    Sectors with only one ticker in the universe still render as a row
+    so the operator sees the full sector exposure at a glance.
+
+    Returns an empty list when ``journal_df`` is empty or carries no
+    classified rows — caller renders a captioned no-data row in that
+    case rather than blanking the panel.
+    """
+    if journal_df is None or journal_df.empty:
+        return []
+    if "regime" not in journal_df.columns or "ticker" not in journal_df.columns:
+        return []
+    valid = journal_df[
+        journal_df["regime"].notna()
+        & (journal_df["regime"] != "")
+        & (journal_df["regime"] != "unknown")
+    ].copy()
+    if valid.empty:
+        return []
+    # Latest classified row per ticker (the freshest regime call)
+    if "timestamp" in valid.columns:
+        valid = valid.sort_values("timestamp")
+    latest = valid.groupby("ticker", as_index=False).last()
+
+    from collections import Counter, defaultdict
+    sector_regimes: Dict[str, Counter] = defaultdict(Counter)
+    for _, row in latest.iterrows():
+        sec = sector_for(str(row["ticker"]))
+        sector_regimes[sec][str(row["regime"])] += 1
+
+    out: List[Tuple[str, str, Dict[str, int]]] = []
+    for sec in sorted(sector_regimes):
+        counter = sector_regimes[sec]
+        dominant = counter.most_common(1)[0][0]
+        out.append((sec, dominant, dict(counter)))
+    return out
+
+
+def sector_regime_strip(journal_df: pd.DataFrame) -> None:
+    """Render a one-row horizontal strip of per-sector regime pills.
+
+    Lives above the per-ticker guardrail grid so the operator gets the
+    sector-level picture before scanning row-by-row. Each pill is
+    colour-coded by the sector's dominant regime and shows a compact
+    breakdown like ``Financials: bullish (2b · 1s)`` — read as "two
+    bullish, one sideways".
+
+    Falls through to a "no classified rows yet" caption when the
+    journal is too fresh to have classified anything (cold-start),
+    so the panel isn't blank or empty-block on a freshly-restarted Pi.
+    """
+    rows = sector_regime_aggregation(journal_df)
+    if not rows:
+        st.caption(
+            "📊 Sector lean — no classified rows yet this session. "
+            "The strip populates after the first regime classification."
+        )
+        return
+
+    # Compact regime → letter for the breakdown caption inside each pill.
+    # 'b' = bullish, 'r' = bearish, 's' = sideways, 'm' = mean_reversion,
+    # '?' = unknown (should never reach here per the filter above).
+    short = {"bullish": "b", "bearish": "r", "sideways": "s",
+             "mean_reversion": "m", "unknown": "?"}
+
+    pills_html: List[str] = []
+    for sec, dominant, breakdown in rows:
+        color = REGIME_COLORS.get(dominant.lower(), "#9e9e9e")
+        # Order breakdown by count desc, then regime name for stable display
+        ordered = sorted(breakdown.items(), key=lambda kv: (-kv[1], kv[0]))
+        breakdown_str = " · ".join(f"{n}{short.get(r,r[0])}" for r, n in ordered)
+        pills_html.append(
+            f"<span style='background:{color};color:#fff;padding:4px 10px;"
+            f"border-radius:6px;font-size:0.78em;margin:2px;"
+            f"display:inline-block;white-space:nowrap'>"
+            f"<b>{sec}</b>: {dominant} "
+            f"<span style='opacity:0.85;font-weight:400'>"
+            f"({breakdown_str})</span>"
+            f"</span>"
+        )
+    st.markdown(
+        "<div style='font-size:0.85em;color:#666;margin-bottom:4px'>"
+        "📊 <b>Sector lean</b> — latest classified regime per ticker, "
+        "aggregated per sector. Decision logic uses each ticker's own "
+        "regime; this strip is summary view only."
+        "</div>"
+        "<div style='display:flex;flex-wrap:wrap;gap:4px;"
+        "margin-bottom:8px'>"
+        + "".join(pills_html) +
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def guardrail_cards(guardrail_status: List[Dict]) -> None:
@@ -474,8 +594,20 @@ def guardrail_grid(grid_rows: List[Dict],
             approved_label = "REJECTED"
             approved_fg    = state_text_fg["fail"]
 
+        # Annotate the ticker cell with its sector (skill 17 / sector_map).
+        # Small grey subtext so the per-row sector is visible at a glance
+        # — useful for spotting "two financials open" or "no exposure to
+        # utilities" patterns when scanning the grid. Sector lookup is
+        # silent on "Other" (unknown ticker) to avoid noisy annotations.
+        _sec = sector_for(row['ticker'])
+        _sec_html = (
+            f"<br><span style='font-size:0.7em;color:#999;"
+            f"font-weight:400;white-space:nowrap'>{_sec}</span>"
+            if _sec and _sec != "Other" else ""
+        )
         cells_html = [
-            f"<td style='padding:6px 8px;font-weight:600;white-space:nowrap'>{row['ticker']}</td>",
+            f"<td style='padding:6px 8px;font-weight:600;white-space:nowrap'>"
+            f"{row['ticker']}{_sec_html}</td>",
             f"<td style='padding:6px 8px;color:#777;font-size:0.85em;white-space:nowrap'>{ts}</td>",
             (
                 f"<td style='padding:6px 8px;text-align:center;background:{approved_bg};"
@@ -593,6 +725,7 @@ def positions_table(spreads: List[Dict],
         )
         row = {
             "Symbol":         s.get("underlying", ""),
+            "Sector":         sector_for(s.get("underlying", "")),
             "Strategy":       s.get("strategy_name", ""),
             "Credit ($)":     credit,
             "Unreal. P&L ($)": pnl,

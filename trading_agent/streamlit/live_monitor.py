@@ -44,6 +44,7 @@ from trading_agent.streamlit.components import (
     guardrail_grid,
     metric_row,
     positions_table,
+    sector_regime_strip,
     ungrouped_legs_table,
 )
 from trading_agent.strategy_presets import (
@@ -2929,8 +2930,13 @@ def render_live_monitor() -> None:
         if not nonzero.empty:
             equity = nonzero.iloc[-1]
 
-    # ── Dominant Regime ───────────────────────────────────────────────
+    # ── Market Lean (50-cycle regime mode) ────────────────────────────
     # Take the mode regime across the last 50 *classified* journal rows.
+    # Surfaced on the metric row as a summary aggregation — the decision
+    # engine uses each ticker's OWN per-ticker regime, never this rolled-up
+    # value. Pre-2026-05-15 this was labelled "Dominant Regime" which read
+    # as if it were a global gate; relabelled to "Market Lean" so the
+    # operator doesn't conflate the rollup with the actual decision input.
     # We exclude rows whose regime field is empty / "unknown" because
     # those are predominantly ``skipped_existing`` entries — the agent
     # skips a ticker before classification fires when it already has an
@@ -3127,6 +3133,15 @@ def render_live_monitor() -> None:
         f"🛡️ Risk Guardrail Status — Latest Cycle [{active_mode}]",
         expanded=True,
     ):
+        # Sector-lean strip (added 2026-05-15). Renders above the
+        # per-ticker grid so the operator gets the rolled-up picture
+        # first — useful for spotting "all financials bullish, but
+        # XLF idiosyncratically sideways" patterns that the row-by-row
+        # grid would otherwise force you to assemble in your head.
+        # Computed off the LATEST classified row per ticker, grouped
+        # by sector via trading_agent.sector_map.
+        sector_regime_strip(journal_df)
+
         # Read the active preset's max_risk_pct so the Max-Loss column
         # header reflects the actual budget (e.g. "≤ 5% Equity" instead
         # of the hardcoded legacy "≤ 2% Equity").  Defensive try/except —

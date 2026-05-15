@@ -243,8 +243,12 @@ def _render_close_failures_today(journal_df):
 - `13_preset_system_hot_reload.md` — `max_risk_pct` mismatch between `.env` and preset (the original 2026-05-06 incident chain that exposed the close-loop fragility).
 - `18_order_submission_idempotency.md` — companion skill covering the OPEN side; `client_order_id` UUID + retry. Together skills 17 + 18 describe the agent's full broker-interaction safety story.
 - `19_journal_schema.md` — full enumeration of `action` values including `closed`, `close_failed`, `warning`.
-- Tests: `tests/test_close_cooldown.py` (12 cases), `tests/test_production_readiness.py` (3 cooldown-surface cases).
+- Tests: `tests/test_close_cooldown.py` (12 cases), `tests/test_production_readiness.py` (3 cooldown-surface cases), `tests/test_sector_map.py` (25 cases for the per-sector cap sibling).
+
+## Sibling: per-sector position cap (added 2026-05-15)
+
+Alongside `MAX_POSITIONS_PER_TICKER = 1`, the agent now also enforces `MAX_POSITIONS_PER_SECTOR = 2` (default) via the `trading_agent.sector_map` module. Both caps are computed in the same Stage 1.5 block and union into the same `tickers_with_positions` set that Stage 2 reads. Rationale: a universe like `XLF, KRE, KBE` would otherwise let three financials stack simultaneously even though each respects the per-ticker cap — the per-sector cap prevents that concentration. Sector map source: `trading_agent/sector_map.py`. Dashboard surfaces the sector inline under the ticker name in the guardrail grid and as a new `Sector` column in the Open Positions table.
 
 ---
 
-*Last verified against repo HEAD on 2026-05-13.*
+*Last verified against repo HEAD on 2026-05-15 (incl. per-sector cap).*

@@ -161,6 +161,18 @@ CLOSE_COOLDOWN_MINUTES = 60
 # explicitly want stacked spreads on a single underlying.
 MAX_POSITIONS_PER_TICKER = 1
 
+# Per-sector position cap. Imported alongside ``MAX_POSITIONS_PER_TICKER``
+# from ``trading_agent.sector_map``. The cap is enforced in Stage 1.5
+# (right after position fetch) — any ticker whose sector already has
+# ``MAX_POSITIONS_PER_SECTOR`` filled spreads is added to
+# ``tickers_with_positions`` so Stage 2 skips it. Prevents
+# over-concentration when the trading universe has multiple tickers in
+# the same sector (e.g., XLF + KRE both Financials).
+from trading_agent.sector_map import (  # noqa: E402
+    MAX_POSITIONS_PER_SECTOR,
+    sector_for,
+)
+
 # OCC option symbol → underlying root.  Format ROOT(1-6) + YYMMDD(6) +
 # C/P(1) + STRIKE*1000(8).  Used both for stale-order cancel scoping
 # and open-order dedup, so identical to the dashboard helper in
@@ -673,22 +685,47 @@ class TradingAgent:
         # tried to open a new GLD spread).  Now we count every reported
         # position regardless of signal and cap at MAX_POSITIONS_PER_TICKER.
         positions_per_ticker: Dict[str, int] = {}
+        positions_per_sector: Dict[str, int] = {}
         for sr in monitor_results.get("positions", []):
             underlying = sr.get("underlying", "")
             if underlying:
                 positions_per_ticker[underlying] = (
                     positions_per_ticker.get(underlying, 0) + 1
                 )
+                sec = sector_for(underlying)
+                positions_per_sector[sec] = (
+                    positions_per_sector.get(sec, 0) + 1
+                )
 
         tickers_with_positions: Set[str] = {
             t for t, n in positions_per_ticker.items()
             if n >= MAX_POSITIONS_PER_TICKER
         }
+        # Per-sector cap: any ticker in the universe whose sector is
+        # already at MAX_POSITIONS_PER_SECTOR gets blocked. Stage 2's
+        # existing dedup uses ``tickers_with_positions`` so we just
+        # union the sector-blocked tickers into that set.
+        sectors_at_cap: Set[str] = {
+            s for s, n in positions_per_sector.items()
+            if n >= MAX_POSITIONS_PER_SECTOR
+        }
+        if sectors_at_cap:
+            tickers_with_positions |= {
+                t for t in tickers
+                if sector_for(t) in sectors_at_cap
+                # Don't fire the sector block for tickers ALREADY caught
+                # by the per-ticker cap — keeps the log noise focused on
+                # the sector-as-additional-gate signal.
+                and t not in tickers_with_positions
+            }
         if positions_per_ticker:
             logger.info(
-                "Open positions snapshot — %s (cap: %d/ticker)",
+                "Open positions snapshot — %s (cap: %d/ticker, "
+                "%d/sector); sectors at cap: %s",
                 {t: n for t, n in sorted(positions_per_ticker.items())},
                 MAX_POSITIONS_PER_TICKER,
+                MAX_POSITIONS_PER_SECTOR,
+                sorted(sectors_at_cap) or "[]",
             )
 
         # ------------------------------------------------------------------
