@@ -2150,9 +2150,22 @@ def _fetch_spreads_cached(
             try:
                 data = json.loads(fp.read_text())
                 for entry in data.get("state_history", []):
-                    tp = entry.get("trade_plan")
-                    if tp:
-                        trade_plans.append(tp)
+                    # Append the FULL envelope (containing both
+                    # ``trade_plan`` and ``risk_verdict``), not just the
+                    # inner plan.  ``group_into_spreads`` will unwrap via
+                    # ``_extract_inner_plan`` and use ``risk_verdict``
+                    # to skip plans the risk manager rejected — without
+                    # the envelope, a rejected plan whose legs overlap
+                    # the actually-submitted plan claims those legs and
+                    # the dashboard shows the rejected plan's economics
+                    # (mis-attributed credit + max_loss). Pre-2026-05-15
+                    # this stripped to ``entry["trade_plan"]`` only, so
+                    # the risk-verdict filter never fired for the UI
+                    # path — see the GLD 2026-05-15 incident where the
+                    # dashboard showed cr=$1.75 / -60% instead of the
+                    # real cr=$1.95 / -54%.
+                    if entry.get("trade_plan"):
+                        trade_plans.append(entry)
             except Exception:
                 pass
 

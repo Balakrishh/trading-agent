@@ -424,6 +424,64 @@ def test_rejected_plan_does_not_claim_legs_from_submitted_plan():
     assert s.max_loss == pytest.approx(103.0)
 
 
+def test_multiple_risk_rejected_envelopes_with_identical_legs():
+    """The 2026-05-15 GLD reproduction.
+
+    State history retains EVERY plan the chain scanner emitted that
+    cycle, with the risk manager flagging each as approved=True or
+    False. For a single ticker that the planner re-emits 80x in a day,
+    you can easily have 3+ risk-rejected envelopes whose legs are
+    identical to the eventually-submitted one (the legs converge as
+    the chain matures even when the credit drifts above/below the CW
+    floor). Without proper envelope handling those rejected entries
+    win the iteration race and the dashboard shows the WRONG plan's
+    economics — concretely on 2026-05-15 GLD displayed cr=$1.75 / 60%
+    loss when the real fill was cr=$1.95 / 54% loss.
+    """
+    INNER = {
+        "ticker": "GLD", "strategy": "Iron Condor",
+        "expiration": "2026-06-05", "spread_width": 5.0, "valid": True,
+        "legs": [
+            {"symbol": "GLD260605P00408000", "strike": 408.0, "action": "sell"},
+            {"symbol": "GLD260605P00403000", "strike": 403.0, "action": "buy"},
+            {"symbol": "GLD260605C00428000", "strike": 428.0, "action": "sell"},
+            {"symbol": "GLD260605C00432000", "strike": 432.0, "action": "buy"},
+        ],
+    }
+    # Three rejected envelopes with different cr/ml but SAME legs as
+    # the submitted one, then the actual submission.
+    envelopes = [
+        {"trade_plan": {**INNER, "net_credit": 1.75, "max_loss": 325.0},
+         "risk_verdict": {"approved": False,
+                          "checks_failed": ["Credit/Width ratio 0.35 < 0.4"]}},
+        {"trade_plan": {**INNER, "net_credit": 1.80, "max_loss": 320.0},
+         "risk_verdict": {"approved": False,
+                          "checks_failed": ["Credit/Width ratio 0.36 < 0.4"]}},
+        {"trade_plan": {**INNER, "net_credit": 1.95, "max_loss": 305.0},
+         "risk_verdict": {"approved": False,
+                          "checks_failed": ["Max loss > 5% equity"]}},
+        {"trade_plan": {**INNER, "net_credit": 1.95, "max_loss": 305.0},
+         "risk_verdict": {"approved": True}},
+    ]
+    broker = [
+        _snap("GLD260605P00408000", qty=-1),
+        _snap("GLD260605P00403000", qty=+1),
+        _snap("GLD260605C00428000", qty=-1),
+        _snap("GLD260605C00432000", qty=+1),
+    ]
+    spreads = _monitor().group_into_spreads(broker, envelopes)
+    assert len(spreads) == 1
+    s = spreads[0]
+    assert s.original_credit == pytest.approx(1.95), (
+        f"Expected SUBMITTED cr=1.95, got {s.original_credit}. "
+        "If this assertion fails, a rejected plan is winning the "
+        "iteration race against the submitted plan — the 2026-05-15 "
+        "GLD regression has re-opened."
+    )
+    assert s.max_loss == pytest.approx(305.0)
+    assert len(s.legs) == 4
+
+
 def test_envelope_with_risk_verdict_rejected_is_filtered():
     """Envelope shape carrying ``risk_verdict.approved=False`` must
     also be filtered, even if the inner plan happens to have

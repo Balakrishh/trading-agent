@@ -24,6 +24,7 @@ If you're trying to understand HOW the dedup gate works, read `docs/skills/17_cl
 | "I have a partial-fill broken spread on the broker" | [`03_zombie_position_recovery.md`](03_zombie_position_recovery.md) |
 | "What does this Alpaca/Schwab error code mean?" | [`04_broker_api_errors.md`](04_broker_api_errors.md) *(stub)* |
 | "I think multiple agent processes are running" | [`05_ghost_process_diagnostic.md`](05_ghost_process_diagnostic.md) *(stub)* |
+| "One ticker on the dashboard looks wrong — credit / P&L / max-loss / two-rows-instead-of-one" | [`06_ticker_dashboard_diagnostic.md`](06_ticker_dashboard_diagnostic.md) |
 | "I want pre-tuned prompts for talking to ChatGPT / Claude / Gemini" | [`prompts.md`](prompts.md) |
 
 ---
