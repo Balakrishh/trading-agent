@@ -43,7 +43,93 @@ st.set_page_config(
     page_title="Trading Agent Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # "auto" collapses the sidebar on narrow screens (<768 px) so the
+    # dashboard isn't covered by an open sidebar on phones; on desktop it
+    # behaves as if "expanded" was set. Pre-2026-05-15 this was hardcoded
+    # to "expanded" which made the dashboard unusable on mobile.
+    initial_sidebar_state="auto",
+)
+
+# ── Mobile responsive overlay (quick-win shim) ───────────────────────────
+# Streamlit's ``layout="wide"`` plus ``st.columns([...])`` produces fixed
+# horizontal splits that don't collapse on narrow viewports — a 4-column
+# metric row stays 4 columns at 375 px wide and becomes unreadable. This
+# stylesheet targets Streamlit's stable ``data-testid`` selectors to:
+#   1. Stack ``st.columns`` containers vertically below 768 px
+#   2. Tighten main-content padding (mobile browsers eat margin already)
+#   3. Reduce heading + metric font sizes for thumb-sized screens
+#   4. Compact the tab strip so all tabs are reachable without scrolling
+#
+# This is a shim — not a real mobile UI. Data-heavy widgets (st.dataframe,
+# the guardrail grid, the journal table) still scroll horizontally on
+# phones because Streamlit doesn't expose a way to stack table columns.
+# Tracked in task #104: build a dedicated mobile-essentials page that
+# shows only the on-the-go monitoring fields (Start/Stop, day P&L, open
+# positions count, last cycle status). Until then, this CSS makes the
+# existing dashboard at-least-glanceable on a phone.
+st.markdown(
+    """
+    <style>
+    @media (max-width: 768px) {
+        /* Stack st.columns rows vertically instead of side-by-side */
+        [data-testid="stHorizontalBlock"] {
+            flex-direction: column !important;
+            gap: 0.5rem !important;
+        }
+        [data-testid="stHorizontalBlock"] > [data-testid="column"],
+        [data-testid="stHorizontalBlock"] > div {
+            width: 100% !important;
+            min-width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+        /* Reclaim the wide-layout side margins on a small screen */
+        .block-container,
+        [data-testid="stAppViewBlockContainer"] {
+            padding-left: 0.6rem !important;
+            padding-right: 0.6rem !important;
+            padding-top: 1rem !important;
+        }
+        /* Shrink headings — desktop sizes overflow on a 375 px viewport */
+        h1 { font-size: 1.4rem !important; line-height: 1.25 !important; }
+        h2 { font-size: 1.2rem !important; line-height: 1.25 !important; }
+        h3 { font-size: 1.05rem !important; line-height: 1.25 !important; }
+        /* Compact metric tiles so 3+ stacked tiles still fit a phone screen */
+        [data-testid="stMetric"] {
+            padding: 0.25rem 0.5rem !important;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 1.1rem !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 0.75rem !important;
+        }
+        /* Tighter tab strip — Streamlit's default tabs are >40 px wide each */
+        [data-baseweb="tab"] {
+            padding: 0.5rem 0.75rem !important;
+            font-size: 0.85rem !important;
+        }
+        [data-baseweb="tab-list"] {
+            overflow-x: auto !important;
+            flex-wrap: nowrap !important;
+        }
+        /* When the sidebar IS opened on mobile, let it take full width
+           so its content is actually readable (default is ~244 px which
+           clips longer preset names). */
+        [data-testid="stSidebar"] {
+            min-width: 85vw !important;
+            max-width: 85vw !important;
+        }
+        /* Market-status badge in the header — when the header columns
+           stack on mobile the badge wrapper still right-aligns; pull it
+           back to flex-start so it sits flush with the title above it. */
+        [data-testid="stMarkdownContainer"] div[style*="justify-content:flex-end"] {
+            justify-content: flex-start !important;
+            padding-top: 0.25rem !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # ── Page header with Market-Status badge in the top-right ────────────────

@@ -40,6 +40,7 @@ import streamlit as st
 from trading_agent.streamlit.components import (
     GUARDRAIL_NAMES,
     equity_curve_chart,
+    format_ts,
     guardrail_grid,
     metric_row,
     positions_table,
@@ -1266,7 +1267,7 @@ def _render_closed_today(journal_df: pd.DataFrame) -> None:
         pl = float(rs.get("net_unrealized_pl") or 0.0)
         net_pl += pl
         rows.append({
-            "Time":         pd.Timestamp(r["timestamp"]).strftime("%H:%M:%S"),
+            "Closed (ET)":  format_ts(r["timestamp"], with_tz=False),
             "Ticker":       r.get("ticker", ""),
             "Strategy":     rs.get("strategy", ""),
             "Exit Signal":  rs.get("exit_signal", ""),
@@ -1377,16 +1378,17 @@ def _render_close_failures_today(journal_df: pd.DataFrame) -> None:
         )
         if cooldown_active:
             cooldown_warnings.append(
-                (ticker, cooldown_until.strftime("%H:%M:%S UTC"))
+                (ticker, format_ts(cooldown_until))
             )
 
         # Build the streak cell — "🚨 cooldown until …" if locked,
         # "2/3" if pre-lockout, "—" if the producer doesn't carry the
-        # field (legacy row before this surface was added).
+        # field (legacy row before this surface was added). Formatted
+        # in ET via format_ts() so it lines up with the operator's
+        # market-hours frame of reference (Pi clock + log lines are ET).
         if cooldown_active:
             streak_cell = (
-                f"🚨 cooldown until "
-                f"{cooldown_until.strftime('%H:%M:%S UTC')}"
+                f"🚨 cooldown until {format_ts(cooldown_until)}"
             )
         elif isinstance(streak, (int, float)) and isinstance(threshold, (int, float)):
             streak_cell = f"{int(streak)}/{int(threshold)}"
@@ -1394,7 +1396,7 @@ def _render_close_failures_today(journal_df: pd.DataFrame) -> None:
             streak_cell = "—"
 
         rows.append({
-            "Last Attempt": pd.Timestamp(latest["timestamp"]).strftime("%H:%M:%S"),
+            "Last Attempt (ET)": format_ts(latest["timestamp"], with_tz=False),
             "Ticker":       ticker,
             "Strategy":     rs.get("strategy", ""),
             "Exit Signal":  rs.get("exit_signal", ""),
@@ -1492,7 +1494,11 @@ def _render_cycle_staleness_beacon(
         return
 
     age_min = age_sec / 60.0
-    when = latest_ts.strftime("%H:%M:%S UTC")
+    # Show the latest-event time as a full ET timestamp so an operator
+    # eyeballing the beacon at 09:30 the next morning can tell the
+    # "last entry was 18:02 yesterday" from "last entry was 09:02
+    # today" — pre-2026-05-15 this was HH:MM:SS UTC only.
+    when = format_ts(latest_ts)
 
     # Thresholds match the comment above.  Tighter than the 270s
     # cycle hard-guard so a single hung cycle still surfaces — we

@@ -8,11 +8,51 @@ llm_extension never import plotly directly.
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+# ── Timezone for UI rendering ────────────────────────────────────────────
+# Journal rows record timestamps in UTC (tz-aware ISO-8601). The dashboard
+# renders them in America/New_York so the values align with how the
+# operator thinks about market hours — pre-market open / regular session /
+# after-hours / overnight. The constant lives module-level so every
+# rendering site uses the same conversion (single source of truth).
+_DISPLAY_TZ = ZoneInfo("America/New_York")
+
+
+def format_ts(ts, with_tz: bool = True) -> str:
+    """Format a journal timestamp as ``YYYY-MM-DD HH:MM:SS ET``.
+
+    Accepts a string (the on-disk ISO form), a pandas Timestamp, or a
+    Python datetime. Returns ``"—"`` for missing/empty inputs so the UI
+    never crashes on a sparse row. Falls back to a stringified version
+    truncated to 19 chars on any unexpected error.
+
+    Parameters
+    ----------
+    ts : str | pd.Timestamp | datetime | None
+        The timestamp to format. UTC offset is honoured if present;
+        naive timestamps are assumed UTC (older history files predate
+        the explicit-offset convention).
+    with_tz : bool, default True
+        Append ``" ET"`` to the result. Set to False inside a table
+        where the column header already says "Entered (ET)".
+    """
+    if ts is None or ts == "":
+        return "—"
+    try:
+        t = pd.Timestamp(ts)
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        t_et = t.tz_convert(_DISPLAY_TZ)
+        return t_et.strftime("%Y-%m-%d %H:%M:%S" + (" ET" if with_tz else ""))
+    except Exception:
+        return str(ts)[:19]
+
 
 REGIME_COLORS: Dict[str, str] = {
     "bullish": "#00c853",
@@ -543,12 +583,21 @@ def positions_table(spreads: List[Dict],
         origin = s.get("origin", "trade_plan")
         source_label = "📋 plan" if origin == "trade_plan" else "🔮 inferred"
         why_label, why_payload = _why_for(s)
+        # Entry timestamp comes from the journal-matched raw_signal's
+        # ``_ts`` field (attached during ``entry_lookup`` construction).
+        # Em-dash for inferred rows that have no matching journal entry.
+        entered_str = (
+            format_ts(why_payload["_ts"], with_tz=False)
+            if why_payload and why_payload.get("_ts")
+            else "—"
+        )
         row = {
             "Symbol":         s.get("underlying", ""),
             "Strategy":       s.get("strategy_name", ""),
             "Credit ($)":     credit,
             "Unreal. P&L ($)": pnl,
             "% Profit":       pct,
+            "Entered (ET)":   entered_str,
             "Expiry":         s.get("expiration", ""),
             "Exit Signal":    s.get("exit_signal", "hold"),
             "Source":         source_label,
@@ -599,6 +648,17 @@ def positions_table(spreads: List[Dict],
 def _render_position_justification(header: str, rs: Dict) -> None:
     """Render one spread's entry thesis + risk-manager checks."""
     st.markdown(f"**{header}**")
+
+    # ── Entry timestamp ──────────────────────────────────────────────
+    # When the position was opened. Sourced from the journal row that
+    # was matched into ``entry_lookup`` in ``positions_table`` — the
+    # ``_ts`` field was attached there. Shown in ET so it lines up
+    # with how the operator reads market-hours context; falls back to
+    # an em-dash if the field was lost (older journal rows pre-2026-05
+    # may not have a usable timestamp).
+    entry_ts = rs.get("_ts")
+    if entry_ts:
+        st.caption(f"⏱ **Entered:** {format_ts(entry_ts)}")
 
     thesis = rs.get("thesis") or {}
     if isinstance(thesis, dict):
