@@ -93,6 +93,23 @@ class PresetConfig:
     width_grid_pct:        Tuple[float, ...] = (0.010, 0.015, 0.020, 0.025)
 
     # ------------------------------------------------------------------
+    # Per-leg liquidity gate (added 2026-05-15 — see skill 29).
+    # Rejects candidates where ANY single leg has a bid-ask spread wider
+    # than the looser of two thresholds. Catches wide-spread option
+    # chains (typically GLD, high-spot index ETFs) whose day-1 mark
+    # would otherwise show 50%+ of credit eaten by bid-ask drag.
+    #
+    # Defaults are permissive — SPY/QQQ/IWM/XLF chains pass easily
+    # (their per-leg spreads are 2–8 ¢). The 2026-05-15 GLD trade
+    # (each leg 25–35 ¢, 5–8 % of mid) would have been rejected.
+    # ------------------------------------------------------------------
+    # Absolute spread cap (dollars). Reject if (ask − bid) > X for any leg.
+    max_leg_spread_cents:    float = 0.15
+    # Relative spread cap (fraction of mid). Reject if (ask − bid)/mid > X.
+    # Applied alongside the absolute cap — both must pass.
+    max_leg_spread_pct_mid:  float = 0.05
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
@@ -122,6 +139,8 @@ class PresetConfig:
                 f"ADAPTIVE scan • DTE∈{list(self.dte_grid)} Δ∈{list(self.delta_grid)} "
                 f"w∈{[f'{w*100:.1f}%' for w in self.width_grid_pct]} • "
                 f"Edge ≥ {self.edge_buffer:.0%} • POP ≥ {self.min_pop:.0%} • "
+                f"LegSpread ≤ ${self.max_leg_spread_cents:.2f}/"
+                f"{self.max_leg_spread_pct_mid:.0%}mid • "
                 f"Max risk {self.max_risk_pct*100:.0f}%"
             )
         return (

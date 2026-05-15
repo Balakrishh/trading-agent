@@ -355,7 +355,17 @@ def fake_today():
 
 @pytest.fixture
 def adaptive_preset():
-    """BALANCED but flipped to adaptive scan mode + tight grids."""
+    """BALANCED but flipped to adaptive scan mode + tight grids.
+
+    Per-leg liquidity thresholds are deliberately set permissive (1.00 /
+    100%) so the gate added in skill 29 (2026-05-15) does NOT engage in
+    these tests — they're focused on candidate selection / sorting /
+    journal-safety, not on the liquidity gate (which has its own
+    dedicated tests in ``TestLegSpreadGate``). The fixture's stub chains
+    use spread widths chosen for readability (15–20 ¢ on cheap strikes)
+    which would otherwise be rejected by the production defaults
+    (15 ¢ / 5 % of mid).
+    """
     return replace(
         BALANCED,
         name="custom",
@@ -367,6 +377,9 @@ def adaptive_preset():
         dte_grid=(7, 10, 14, 17),
         delta_grid=(0.20, 0.25, 0.30, 0.35),
         width_grid_pct=(0.020, 0.025, 0.033),  # 3.0/5.0/$ at 150 spot
+        # Disable the leg-liquidity gate for this fixture — see docstring.
+        max_leg_spread_cents=1.00,
+        max_leg_spread_pct_mid=1.00,
     )
 
 
@@ -551,3 +564,80 @@ class TestChainHelpers:
         chain = [{"strike": s} for s in (140, 145, 150, 155)]
         assert ChainScanner._find_strike(chain, 147)["strike"] == 145
         assert ChainScanner._find_strike(chain, 148)["strike"] == 150
+
+
+# =====================================================================
+# Per-leg liquidity gate (skill 29, shipped 2026-05-15 after GLD incident)
+# =====================================================================
+#
+# The gate rejects candidates where ANY single option leg has a bid-ask
+# spread wider than BOTH the absolute cap AND the relative cap. Using
+# AND-of-thresholds means penny-cheap legs (low absolute spread but high
+# % of mid) pass, while expensive legs with wide absolute spreads also
+# get rejected only when they're proportionally bad too.
+
+
+from trading_agent.chain_scanner import _leg_spread_too_wide
+
+
+class TestLegSpreadGate:
+    """Pins the gate behavior against real-world option quote shapes."""
+
+    # GLD's 2026-05-15 short put 408: bid 5.15, ask 5.50.
+    # 35¢ spread, 6.6% of $5.33 mid. Fails BOTH thresholds.
+    def test_gld_wide_spread_rejected(self):
+        assert _leg_spread_too_wide(5.15, 5.50, 0.15, 0.05) is True
+
+    # SPY-style tight spread: bid 4.00, ask 4.10.
+    # 10¢ spread, 2.5% of $4.05 mid. Passes (relative under 5%).
+    def test_spy_tight_spread_passes(self):
+        assert _leg_spread_too_wide(4.00, 4.10, 0.15, 0.05) is False
+
+    # XLF-style penny option: bid 0.05, ask 0.10.
+    # 5¢ spread, 100% of $0.075 mid. Passes (absolute under 15¢).
+    # This is the key reason for AND-not-OR — we MUST keep XLF tradable.
+    def test_xlf_penny_option_passes_via_absolute_cap(self):
+        assert _leg_spread_too_wide(0.05, 0.10, 0.15, 0.05) is False
+
+    # Borderline: spread = max_cents exactly should pass (strict >).
+    def test_at_absolute_threshold_passes(self):
+        assert _leg_spread_too_wide(1.00, 1.15, 0.15, 0.05) is False
+
+    # Just over absolute AND just over relative → rejected.
+    def test_just_over_both_thresholds_rejected(self):
+        # 16¢ spread on $2.00 mid → 8% of mid. Both > thresholds.
+        assert _leg_spread_too_wide(1.92, 2.08, 0.15, 0.05) is True
+
+    # Wide absolute spread but penny-cheap → passes. Validates that an
+    # option like bid=0.20 / ask=0.40 (20¢, 67% mid) doesn't fail the
+    # gate purely on relative — the absolute is 20¢ > 15¢ but the
+    # relative is meaningless on penny strikes. NO wait — this should
+    # fail because BOTH are over. Let's use a case that PASSES on
+    # absolute but FAILS on relative.
+    def test_high_relative_but_low_absolute_passes(self):
+        # 10¢ spread on 0.30 mid = 33% of mid. Relative fails (33% > 5%)
+        # but absolute passes (10¢ ≤ 15¢). AND → passes.
+        assert _leg_spread_too_wide(0.25, 0.35, 0.15, 0.05) is False
+
+    # Missing bid (zero) → treated as missing quote, gate doesn't fire.
+    # Caller should reject upstream for "no usable quote".
+    def test_zero_bid_does_not_fire_gate(self):
+        assert _leg_spread_too_wide(0.0, 0.50, 0.15, 0.05) is False
+
+    def test_zero_ask_does_not_fire_gate(self):
+        assert _leg_spread_too_wide(0.20, 0.0, 0.15, 0.05) is False
+
+    def test_negative_quotes_treated_as_missing(self):
+        # Defensive: a bad data feed could send a negative quote.
+        assert _leg_spread_too_wide(-0.1, 0.50, 0.15, 0.05) is False
+        assert _leg_spread_too_wide(0.20, -0.1, 0.15, 0.05) is False
+
+    def test_inverted_quote_does_not_fire_gate(self):
+        """A crossed/inverted market (bid > ask) is a data anomaly, not
+        a liquidity issue. The gate computes a negative spread; since
+        negative spread can't exceed a positive threshold, the gate
+        correctly does not fire. The caller's normal quote-validity
+        check should reject this candidate separately.
+        """
+        # bid 5.50, ask 5.15 (inverted by 35¢)
+        assert _leg_spread_too_wide(5.50, 5.15, 0.15, 0.05) is False

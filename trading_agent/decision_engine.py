@@ -52,6 +52,7 @@ from typing import Any, Dict, List, Optional
 
 from trading_agent.chain_scanner import (
     REJECT_CW_BELOW_FLOOR,
+    REJECT_LEG_SPREAD_WIDE,
     REJECT_NO_CHAIN,
     REJECT_NO_LONG_CONTRACT,
     REJECT_NO_SHORT_CONTRACT,
@@ -59,6 +60,7 @@ from trading_agent.chain_scanner import (
     ChainScanner,
     ScanDiagnostics,
     SpreadCandidate,
+    _leg_spread_too_wide,
     _quote_credit,
     _score_candidate_with_reason,
 )
@@ -136,6 +138,10 @@ def decide(inp: DecisionInput, *, max_candidates: int = 10) -> DecisionOutput:
     width_grid    = list(preset.width_grid_pct)
     edge_buffer   = float(preset.edge_buffer)
     min_pop       = float(preset.min_pop)
+    # Per-leg liquidity gate (skill 29). Pulled once outside the inner
+    # loop so we don't repeatedly read the same fields per grid point.
+    max_leg_spread_cents   = float(getattr(preset, "max_leg_spread_cents", 0.15))
+    max_leg_spread_pct_mid = float(getattr(preset, "max_leg_spread_pct_mid", 0.05))
 
     n_dte   = len(inp.chain_slices)
     n_delta = len(delta_grid)
@@ -178,6 +184,27 @@ def decide(inp: DecisionInput, *, max_candidates: int = 10) -> DecisionOutput:
                 actual_width = abs(short_strike - float(long_contract["strike"]))
                 if actual_width <= 0:
                     diag.record(REJECT_NON_POSITIVE_WIDTH)
+                    continue
+
+                # ── Per-leg liquidity gate (skill 29) ─────────────────
+                # Before estimating credit / scoring EV, verify both
+                # legs have tight enough bid-ask that the day-1 mark
+                # won't eat half the credit. The 2026-05-15 GLD trade
+                # (35¢ spread on $5 short put, 6.6% of mid) opened
+                # at -$115 P&L because nothing here rejected it. With
+                # this gate it would have been skipped → no panic on
+                # the dashboard, no surprise -54% display, and the
+                # adaptive scanner moves on to a tighter strike pair.
+                # AND-of-two-thresholds means penny-cheap legs still
+                # pass; only structurally wide legs are rejected.
+                if _leg_spread_too_wide(
+                    float(short_contract["bid"]), float(short_contract["ask"]),
+                    max_leg_spread_cents, max_leg_spread_pct_mid,
+                ) or _leg_spread_too_wide(
+                    float(long_contract["bid"]), float(long_contract["ask"]),
+                    max_leg_spread_cents, max_leg_spread_pct_mid,
+                ):
+                    diag.record(REJECT_LEG_SPREAD_WIDE)
                     continue
 
                 # Single source of truth for credit estimation. Mid-mid

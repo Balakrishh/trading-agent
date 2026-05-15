@@ -2437,6 +2437,35 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 help="e.g. 0.010, 0.015, 0.020, 0.025",
             )
 
+        # ── Per-leg liquidity gate (skill 29, added 2026-05-15) ──────
+        # AND-of-two-thresholds: reject a leg ONLY if its bid-ask is
+        # > X cents absolute AND > Y% of mid. Penny options stay
+        # tradable on XLF; GLD-style wide-spread chains are filtered.
+        st.markdown("**Per-leg liquidity gate** *(skill 29)*")
+        gl1, gl2 = st.columns(2)
+        with gl1:
+            max_leg_spread_cents = st.slider(
+                "Max leg bid-ask (cents)",
+                0.05, 1.00,
+                float(getattr(seed, "max_leg_spread_cents", 0.15)),
+                0.05, key="cust_leg_cents",
+                help="Reject if (ask − bid) > this AND % of mid is also "
+                     "over the relative cap below. 0.15 = 15¢ — catches "
+                     "GLD's 25–35¢ option spreads without blocking SPY's "
+                     "5–10¢ spreads.",
+            )
+        with gl2:
+            max_leg_spread_pct_mid = st.slider(
+                "Max leg bid-ask (% of mid)",
+                0.01, 0.30,
+                float(getattr(seed, "max_leg_spread_pct_mid", 0.05)),
+                0.01, key="cust_leg_pct",
+                help="Reject if (ask − bid) / mid > this AND absolute cap "
+                     "above is also exceeded. 0.05 = 5% — catches GLD's "
+                     "5–8% per-leg spreads without rejecting XLF's "
+                     "penny-cheap-but-fractionally-wide options.",
+            )
+
     payload = {
         "max_delta":          max_delta,
         "dte_vertical":       dte_vertical,
@@ -2448,6 +2477,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "min_credit_ratio":   min_credit_ratio,
         "max_risk_pct":       max_risk_pct,
         "min_pop":            min_pop,
+        "max_leg_spread_cents":   max_leg_spread_cents,
+        "max_leg_spread_pct_mid": max_leg_spread_pct_mid,
     }
     # Only persist grids when they parse cleanly — silently fall back to
     # seed value otherwise so a malformed text box doesn't poison the file.

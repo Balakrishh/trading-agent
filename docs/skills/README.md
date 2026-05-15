@@ -35,6 +35,7 @@ Read top-to-bottom on a first pass. Each row's "Depends on" column lists the pre
 | 18 | [Order-submission idempotency (`client_order_id` + retry)](18_order_submission_idempotency.md) | risk | `executor.py:60-76, 299-541` |
 | 19 | [Signal-journal schema (action enum + dedup bypass)](19_journal_schema.md) | architecture | `journal_kb.py:95-101, 155-432` |
 | 28 | [Position-monitor spread grouping (plan-match-then-infer)](28_position_monitor_spread_grouping.md) | architecture | `position_monitor.py:294-373` |
+| 29 | [Per-leg liquidity gate](29_per_leg_liquidity_gate.md) | strategy | `chain_scanner.py:_leg_spread_too_wide`, `decision_engine.py` call-site |
 
 ## Phase 2 (planned, not yet written)
 

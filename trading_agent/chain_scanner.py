@@ -60,6 +60,13 @@ REJECT_CREDIT_NON_POSITIVE   = "credit_non_positive"
 REJECT_CREDIT_GE_WIDTH       = "credit_ge_width"
 REJECT_CW_BELOW_FLOOR        = "cw_below_floor"
 REJECT_EV_NON_POSITIVE       = "ev_non_positive"
+# Added 2026-05-15. Fires when ANY single leg's bid-ask is wider than
+# the preset's ``max_leg_spread_cents`` (absolute) AND wider than
+# ``max_leg_spread_pct_mid`` (relative). Catches wide-spread option
+# chains whose day-1 mark would otherwise eat 50%+ of credit in
+# bid-ask drag — see skill 29 for the math and the GLD 2026-05-15
+# worked example.
+REJECT_LEG_SPREAD_WIDE       = "leg_spread_wide"
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +167,46 @@ def _quote_credit(short_bid: float, short_ask: float,
 def _cw_floor(short_delta: float, edge_buffer: float) -> float:
     """Required C/W floor = |Δ| × (1 + edge_buffer). |Δ| is breakeven C/W."""
     return abs(short_delta) * (1.0 + edge_buffer)
+
+
+def _leg_spread_too_wide(bid: float, ask: float,
+                         max_cents: float, max_pct_mid: float) -> bool:
+    """True iff a single option leg's bid-ask spread fails BOTH liquidity gates.
+
+    A leg fails the gate when its quoted bid-ask is wider than ``max_cents``
+    AND wider than ``max_pct_mid`` of mid. Using AND rather than OR makes
+    the gate tolerant of two valid leg shapes:
+
+      * **Penny-cheap options** (XLF $0.05 mid, 5¢ spread = 100% of mid)
+        — fail the *relative* cap but pass the absolute (5¢ ≤ 15¢).
+      * **High-spot options** (SPY $4 mid, 10¢ spread = 2.5% of mid)
+        — fail the *absolute* cap on penny-pilot symbols but pass the
+        relative (2.5% ≤ 5%).
+
+    A leg has to fail BOTH to be rejected, which targets the actual
+    failure mode (GLD-style $5 options with 25¢+ spreads = 5%+ of mid).
+
+    A bid or ask of zero or below is treated as a missing quote — the
+    caller should reject the candidate upstream for "no usable quote";
+    this helper returns False so the gate doesn't double-fire.
+
+    >>> _leg_spread_too_wide(5.15, 5.50, 0.15, 0.05)   # GLD-style
+    True
+    >>> _leg_spread_too_wide(0.05, 0.10, 0.15, 0.05)   # XLF penny option
+    False
+    >>> _leg_spread_too_wide(4.00, 4.10, 0.15, 0.05)   # SPY tight spread
+    False
+    >>> _leg_spread_too_wide(0.0, 0.0, 0.15, 0.05)     # missing quote
+    False
+    """
+    if bid <= 0 or ask <= 0:
+        return False
+    spread = ask - bid
+    mid = (ask + bid) / 2.0
+    if mid <= 0:
+        return False
+    pct_of_mid = spread / mid
+    return spread > max_cents and pct_of_mid > max_pct_mid
 
 
 def _ev_per_dollar_risked(credit: float, width: float,
@@ -533,6 +580,7 @@ __all__ = [
     "_score_candidate",
     "_score_candidate_with_reason",
     "_quote_credit",
+    "_leg_spread_too_wide",
     "DEFAULT_FILL_HAIRCUT",
     # Reject-reason taxonomy (stable journal keys).
     "REJECT_NO_CHAIN",
@@ -545,4 +593,5 @@ __all__ = [
     "REJECT_CREDIT_GE_WIDTH",
     "REJECT_CW_BELOW_FLOOR",
     "REJECT_EV_NON_POSITIVE",
+    "REJECT_LEG_SPREAD_WIDE",
 ]
