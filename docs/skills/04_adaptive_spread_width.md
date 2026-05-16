@@ -118,8 +118,30 @@ The three named presets carry distinct grid shapes optimized for their risk post
 
 Conservative deliberately omits the 0.5% width because it shouldn't be trading SPY-style spreads. Aggressive extends to 0.45 delta + 3.0% width for premium-rich tickers but keeps DTE short to maximise theta velocity.
 
-The 0.5% width does NOT lower the C/W floor — it only adds candidate shapes to the scanner's sweep. The agent will still reject narrow-width SPY candidates on low-IV days because C/W stays below `|Δ| × (1 + edge_buffer)`. This is correct self-regulating behavior; trades fire when IVRank rises enough to support the C/W math (cross-reference skill 09 + the IVRank colour-coded annotation in the guardrail grid: green ≥50, amber 25–50, grey <25).
+The 0.5% width does NOT lower the C/W floor — it only adds candidate shapes to the scanner's sweep. The agent will still reject narrow-width SPY candidates on low-IV days because C/W stays below `|Δ| × (1 + edge_buffer)`. This is correct self-regulating behavior; trades fire when IVRank rises enough to support the C/W math.
+
+## 7. IVRank Goldilocks zone — the FULL gating story
+
+Credit-spread profitability isn't a "more IV = better" monotonic — it's a Goldilocks band gated from BOTH ends:
+
+```
+IVRank:    0 ────── 25 ────── 50 ────── 75 ────── 95 ────── 100
+            ←─ too thin ─→ ←──── tradable zone ────→ ←─ too hot ─→
+            C/W floor                                defense_first
+            rejects                                  filter blocks
+```
+
+| Zone | IVRank | Agent behavior | Dashboard annotation |
+|---|---|---|---|
+| Too thin | <25 | C/W floor rejects (premium can't clear `|Δ|×1.10`) | Grey `IV NN` |
+| Borderline | 25–50 | May fire on shorter widths / higher delta | Amber `IV NN` |
+| Sweet spot | 50–95 | Trades fire most readily | **Green** `IV NN` |
+| Too hot | >95 | `defense_first` filter blocks all new entries (`agent.py:_process_ticker`, log line `HighIV: IV rank N > 95th pct — extreme volatility, blocking all new entries`) | **Red** `IV NN` |
+
+The "too hot" defense exists because IVRank >95 typically means the market is pricing in a known catalyst (earnings, FOMC, geopolitical shock). The fat premium is COMPENSATION for that risk, not free money — selling vol into the spike has poor risk-adjusted returns historically. The 2026-05-15 XLE incident (IVRank 97.2 → defense_first skipped despite excellent C/W) is the canonical example.
+
+Both filters work in concert with this skill's width-grid retune: the 0.5% width opens narrow-spread shapes the scanner can consider, the C/W floor gates the bottom of the IV range, and `defense_first` gates the top. The dashboard's IVRank annotation reads green only in the 50–95 zone — anywhere else the operator should expect the agent to skip the ticker, and that's the correct call.
 
 ---
 
-*Last verified against repo HEAD on 2026-05-15 (grid retune + IVRank UI).*
+*Last verified against repo HEAD on 2026-05-15 (grid retune + IVRank UI + Goldilocks zone documentation).*

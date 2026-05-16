@@ -619,17 +619,49 @@ def guardrail_grid(grid_rows: List[Dict],
             if _iv_val is None:
                 _iv_html = ""
             else:
-                if _iv_val >= 50:
-                    _iv_color = "#1b8a3a"   # green — premium-rich
+                # Four-zone IVRank colour coding aligned with the agent's
+                # actual gates (see skill 04 §6):
+                #   <25  grey   — chain too thin, C/W floor rejects
+                #   25-50 amber — borderline, fires on short widths only
+                #   50-95 green — sweet spot, premium pays and tail-risk OK
+                #   >95  red   — defense_first will BLOCK new entries
+                #                (agent.py:1648 — "extreme volatility")
+                # Pre-2026-05-15 the >95 case was painted green which
+                # contradicted the agent's actual behavior — operator
+                # would see "trade me!" while the journal logged
+                # ``skipped_defense_first``.
+                if _iv_val > 95:
+                    _iv_color = "#c62828"   # red — defense_first blocks
+                    _iv_tooltip = (
+                        "IVRank > 95th percentile — defense_first filter "
+                        "will block new entries. Premium looks juicy but "
+                        "the market is pricing in a known catalyst "
+                        "(earnings / FOMC / shock); selling vol here is "
+                        "high-tail-risk. Agent is correctly sitting out."
+                    )
+                elif _iv_val >= 50:
+                    _iv_color = "#1b8a3a"   # green — sweet spot
+                    _iv_tooltip = (
+                        "IVRank in the 50-95 sweet spot — premium pays "
+                        "enough to clear C/W AND fundamentals aren't "
+                        "screaming. Trades fire most readily here."
+                    )
                 elif _iv_val >= 25:
                     _iv_color = "#f57c00"   # amber — borderline
+                    _iv_tooltip = (
+                        "IVRank 25-50 — borderline. Premium may clear C/W "
+                        "on shorter widths / higher deltas only."
+                    )
                 else:
-                    _iv_color = "#999"      # grey — thin chain
+                    _iv_color = "#999"      # grey — too thin
+                    _iv_tooltip = (
+                        "IVRank < 25 — chain too thin. C/W floor will "
+                        "reject most candidates regardless of width."
+                    )
                 _iv_html = (
                     f"<span style='font-size:0.68em;color:{_iv_color};"
                     f"font-weight:600;margin-left:6px;white-space:nowrap'"
-                    f" title='IVRank — 1-year percentile of current IV. "
-                    f"≥50 means premium is paying enough to clear C/W.'>"
+                    f" title='{_iv_tooltip}'>"
                     f"IV {_iv_val:.0f}</span>"
                 )
         _annotation = ""
