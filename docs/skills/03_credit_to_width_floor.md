@@ -83,4 +83,4 @@ cw_floor = short_max_delta * (1.0 + self.edge_buffer)
 
 ---
 
-*Last verified against repo HEAD on 2026-05-02.*
+*Last verified against repo HEAD on 2026-05-15.*

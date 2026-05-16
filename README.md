@@ -16,6 +16,7 @@ An autonomous trading agent that generates daily income through high-probability
 - [Setup & Configuration](#setup--configuration)
 - [Project Structure](#project-structure)
 - [Signal Journal Format](#signal-journal-format)
+- [Spec-Driven Development (SDD)](#spec-driven-development-sdd)
 
 ---
 
@@ -194,11 +195,15 @@ decision_engine.decide()    ← pure scoring entrypoint (no I/O)
 
 ```bash
 python3 scripts/checks/scan_invariant_check.py                # AST invariants
+python3 scripts/checks/scan_skill_quotes_match.py             # SDD §3 quotes vs source
+python3 scripts/checks/scan_skill_freshness.py                # SDD footer date vs git-mtime
+python3 scripts/checks/build_traceability.py                  # SDD coverage matrix refresh
 python3 scripts/checks/run_scan_diagnostics_check.py          # ChainScanner + decide() integration
 python3 scripts/checks/run_journal_split_check.py             # JournalKB run_mode split
+pytest tests/conformance/                                     # SDD documented-behavior tests
 ```
 
-All three must pass before any change to scoring, pricing, or floor logic ships. (The legacy `run_unified_backtest_check.py` and `run_live_vs_backtest_parity_check.py` were retired with the May 2026 backtest rewrite — live ↔ backtest parity is now structural since the backtest package wires through `decide()` directly.)
+All must pass before any change to scoring, pricing, or floor logic ships. The three SDD checks (`scan_skill_quotes_match`, `scan_skill_freshness`, `build_traceability`) catch spec-vs-code drift at CI time — see [Spec-Driven Development](#spec-driven-development-sdd) below. (The legacy `run_unified_backtest_check.py` and `run_live_vs_backtest_parity_check.py` were retired with the May 2026 backtest rewrite — live ↔ backtest parity is now structural since the backtest package wires through `decide()` directly.)
 
 ### Backtest Pricing Model
 
@@ -678,3 +683,34 @@ When the active preset is in adaptive mode, every `plan()` invocation that runs 
 | `credit_non_positive` | `bid_short − ask_long ≤ 0` |
 | `credit_ge_width` | Credit ≥ width — would be a debit, not a credit |
 | `cw_below_floor` | `C/W < |Δ| × (1 + edge_buffer)` — most common in thin-premium regimes |
+
+---
+
+## Spec-Driven Development (SDD)
+
+This project follows a Spec-Driven Development workflow: every architectural concept is documented as an atomic "skill" file before the corresponding code is shipped, and CI verifies the spec and code never drift apart. Five tools — three CI gates and two workflow helpers — enforce this mechanically.
+
+**Where the specs live.** Each concept is one file under `docs/skills/NN_short_name.md` (currently 22 skills). The format is fixed: theory → math → reference Python (quoted verbatim from source) → edge cases → cross-references → footer dated to the last verification. `CLAUDE.md` documents the SDLC contract; `CONTRIBUTING.md` operationalises it into commands.
+
+**The five CI gates** (`.github/workflows/ci.yml` runs all of them on every push):
+
+| Gate | What it asserts |
+|---|---|
+| `scan_invariant_check.py` | AST-level architectural invariants (C/W formula parity, no shadow scorers, backtest wires through `decide()`) |
+| `scan_skill_quotes_match.py` | Every skill's §3 first code-line still appears verbatim in the cited source. Catches signature drift. |
+| `scan_skill_freshness.py` | Every skill's footer date ≥ the git-mtime of every cited source file. Catches forgotten footer re-stamps. |
+| `build_traceability.py` + `git diff --exit-code` | The skill ↔ source ↔ test coverage matrix at `docs/traceability.md` is in sync with the repo. |
+| `pytest tests/conformance/` | Documented math/behavior is asserted against the live implementation for skills 03, 04, 17, 29 (back-fill in progress). |
+
+**The two workflow helpers** (run on demand, not gates):
+
+| Script | Use case |
+|---|---|
+| `scripts/specify_new_feature.py NAME` | Scaffolds `docs/skills/NN_NAME.md` + `tests/conformance/test_skill_NN_NAME.py` from the template. Forces spec-first (the conformance test fails until the spec is authored). |
+| `scripts/checks/check_skill_updates_for_diff.py` | Pre-commit helper. Reads the current diff, prints a checklist of which skills cite the changed source files. Wire into `.git/hooks/pre-commit` to enforce locally. |
+
+**The coverage map.** `docs/traceability.md` is auto-generated and committed. It surfaces orphan source files (paths with no skill) and orphan skills (skills with no conformance test) — useful both for back-fill prioritisation and for sanity-checking that new code didn't escape the spec layer.
+
+**The principle.** Specs are the source of truth. When the code says one thing and the spec says another, the question is "did the spec change?" — not "is the spec wrong?". This inversion is what makes the whole pipeline work, and what catches the kind of subtle drift that produced the 2026-05-15 GLD dashboard incident (see [skill 28's §4](docs/skills/28_position_monitor_spread_grouping.md) for that worked example).
+
+For the rationale, the war story, and the full toolchain in one place, see `CONTRIBUTING.md` Step 5.

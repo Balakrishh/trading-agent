@@ -26,9 +26,57 @@ jobs:
           python-version: "3.11"
       - run: python3 scripts/checks/scan_invariant_check.py
 
+  sdd_checks:
+    # Spec-Driven Development checks added 2026-05-15/16. These are
+    # pure-Python doc scanners — no third-party deps, run in <2s total.
+    # Run in parallel with invariants since they're independent. The
+    # ``fetch-depth: 0`` checkout is REQUIRED for scan_skill_freshness
+    # to read ``git log`` history of cited source files.
+    name: SDD spec-vs-code drift detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for `git log -1` per file
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Static check — §3 Reference Python quotes still appear in source.
+      # Hard gate; failure means a skill is documenting code that no
+      # longer exists in the form shown. Should always pass on main.
+      - name: SDD — §3 quotes still match source
+        run: python3 scripts/checks/scan_skill_quotes_match.py
+
+      # Static check — skill footer dates vs. git-mtime of cited source.
+      # Hard gate as of 2026-05-15 housekeeping pass (task #7 cleared
+      # the 9 stale skills that were the baseline failure). A new failure
+      # here means: a contributor modified a source file but didn't
+      # re-stamp the cited skill's footer. Fix is to re-verify §3 and
+      # bump the footer date.
+      - name: SDD — skill footers vs. cited-source mtime
+        run: python3 scripts/checks/scan_skill_freshness.py
+
+      # Refresh the traceability matrix and fail CI if it would have
+      # changed — keeps ``docs/traceability.md`` in sync with the
+      # skill ↔ source ↔ test reality without requiring contributors
+      # to remember to regenerate it.
+      - name: SDD — traceability matrix is current
+        run: |
+          python3 scripts/checks/build_traceability.py
+          if ! git diff --exit-code docs/traceability.md; then
+            echo "::error::docs/traceability.md is stale."
+            echo "::error::Run 'python3 scripts/checks/build_traceability.py'"
+            echo "::error::and commit the result."
+            exit 1
+          fi
+
   tests:
     name: Unit tests + smoke checks
-    needs: invariants
+    # Wait for BOTH gates — invariants and SDD static checks. Failing
+    # either short-circuits the matrix so we don't waste 3 Python-
+    # version runners on a known-broken commit.
+    needs: [invariants, sdd_checks]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -57,7 +105,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Pytest (full repo suite)
+      - name: Pytest (full repo suite — includes tests/conformance/)
+        # The conformance/ subdir is picked up by pytest's default
+        # recursive discovery (no testpaths config), so the SDD-Tier-1
+        # conformance assertions run alongside every module test.
         run: pytest tests/ -v --maxfail=10
 
       # Smoke checks run after pytest so unit-test regressions surface

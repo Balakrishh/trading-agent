@@ -89,11 +89,31 @@ Run locally:
 
 ```bash
 pytest tests/                                          # full suite
+pytest tests/conformance/                              # SDD: spec-vs-code conformance
 pytest tests/test_<module>.py -v                       # focused
 python scripts/checks/scan_invariant_check.py          # AST-level invariants
+python scripts/checks/scan_skill_freshness.py          # SDD: skill footer vs git-mtime
+python scripts/checks/scan_skill_quotes_match.py       # SDD: §3 quotes vs source
 python scripts/checks/run_scan_diagnostics_check.py    # ChainScanner ↔ decide() integration
 python scripts/checks/run_journal_split_check.py       # JournalKB run_mode split
 ```
+
+The five SDD checks (added 2026-05-15 / 2026-05-16) work together:
+
+**Tier 1 — drift detection (CI gates):**
+
+- **`scan_skill_freshness.py`** — flags any skill whose cited source was modified in git AFTER the skill's `*Last verified*` footer date. Failure means "re-verify §3 + re-stamp footer to today."
+- **`scan_skill_quotes_match.py`** — regex-checks that each §3 Reference-Python block's first code line still appears verbatim in the cited source file. Catches signature drift.
+- **`tests/conformance/`** — pytest-runnable assertions that the SKILL's documented math/behavior holds against the live implementation. Catches semantic drift the static checks can't see.
+
+**Tier 2 — workflow tooling (run on demand):**
+
+- **`build_traceability.py`** — generates `docs/traceability.md`, the coverage matrix mapping each skill ↔ source ↔ tests ↔ runbooks. Run after adding/removing skills or shifting citations. Surfaces orphan source files (no skill) and orphan skills (no conformance test).
+- **`check_skill_updates_for_diff.py`** — pre-commit helper. Given a git diff, lists which skills cite the changed source files. Returns exit 1 if any cited skill wasn't also updated. Wire into `.git/hooks/pre-commit` to enforce.
+
+**`specify_new_feature.py`** (Tier 2 scaffolding) — generates the skill stub + conformance test stub for a new feature. Forces the SDD flow (spec → failing test → code → re-stamp).
+
+All Tier 1 checks should pass on every PR. If they're failing on the current `main`, the right fix is to bring the skills back in sync — don't suppress the check.
 
 If you added a verification harness, add it to `.github/workflows/ci.yml`.
 
