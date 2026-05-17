@@ -9,30 +9,30 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 
 | # | Skill | Cited source | Module tests | Conformance test | Runbooks |
 |---|---|---|---|---|---|
-| 00 | sdlc and conventions | — | — | ❌ MISSING | — |
-| 01 | pop from delta | chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py | ❌ MISSING | — |
-| 02 | strike snapping | strategy.py, chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_executor.py, test_risk_manager.py, test_strategy.py | ❌ MISSING | — |
+| 00 | sdlc and conventions | — | — | conformance/test_skill_00_sdlc_and_conventions.py | — |
+| 01 | pop from delta | chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py | conformance/test_skill_01_pop_from_delta.py | — |
+| 02 | strike snapping | strategy.py, chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_executor.py, test_risk_manager.py, test_strategy.py | conformance/test_skill_02_strike_snapping.py | — |
 | 03 | credit to width floor | chain_scanner.py, risk_manager.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_executor.py, test_risk_manager.py | conformance/test_skill_03_cw_floor.py | — |
 | 04 | adaptive spread width | strategy.py | test_executor.py, test_risk_manager.py, test_strategy.py | conformance/test_skill_04_adaptive_spread_width.py | — |
-| 05 | ev per dollar risked | chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py | ❌ MISSING | — |
-| 06 | stale spread risk gate | risk_manager.py | test_executor.py, test_risk_manager.py | ❌ MISSING | — |
-| 07 | anchor map for leadership | regime.py | test_backtest/test_sim_position.py, test_multi_tf_regime.py, test_regime.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | ❌ MISSING | — |
-| 08 | leadership zscore | market_data.py, regime.py | test_backtest/test_sim_position.py, test_market_data.py, test_market_data_factory.py, test_market_data_schwab.py, test_multi_tf_regime.py, test_regime.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | ❌ MISSING | — |
-| 09 | vix zscore inhibitor | regime.py, strategy.py | test_backtest/test_sim_position.py, test_executor.py, test_multi_tf_regime.py, test_regime.py, test_risk_manager.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | ❌ MISSING | 02_zero_trades_diagnostic.md |
-| 10 | adx wilder smoothing | multi_tf_regime.py | test_multi_tf_regime.py, test_watchlist_chart.py | ❌ MISSING | — |
-| 11 | six regime classifier | regime.py | test_backtest/test_sim_position.py, test_multi_tf_regime.py, test_regime.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | ❌ MISSING | — |
-| 12 | multi timeframe resolution | multi_tf_regime.py | test_multi_tf_regime.py, test_watchlist_chart.py | ❌ MISSING | — |
-| 13 | preset system hot reload | strategy_presets.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_streamlit/test_backtest_ui.py | ❌ MISSING | — |
-| 14 | adaptive vs static scan modes | strategy_presets.py, strategy.py, chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_executor.py, test_risk_manager.py, test_strategy.py, test_streamlit/test_backtest_ui.py | ❌ MISSING | 02_zero_trades_diagnostic.md |
-| 15 | backtest live parity | backtest/__init__.py, backtest/runner.py, backtest/cycle.py, backtest/sim_position.py, backtest/account.py, backtest/historical_port.py, backtest/synthetic_chain.py, backtest/clock.py, backtest/black_scholes.py, streamlit/backtest_ui.py | test_backtest/test_account.py, test_backtest/test_black_scholes.py, test_backtest/test_clock.py, test_backtest/test_historical_port.py, test_backtest/test_sim_position.py, test_backtest/test_synthetic_chain.py, test_streamlit/test_backtest_ui.py | ❌ MISSING | — |
-| 16 | market data provider routing | market_data_factory.py, market_data_schwab.py, market_data_yahoo.py, schwab_oauth.py | test_market_data_factory.py, test_market_data_schwab.py, test_production_readiness.py, test_schwab_oauth.py | ❌ MISSING | 02_zero_trades_diagnostic.md, 04_broker_api_errors.md |
+| 05 | ev per dollar risked | chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py | conformance/test_skill_05_ev_per_dollar_risked.py | — |
+| 06 | stale spread risk gate | risk_manager.py | test_executor.py, test_risk_manager.py | conformance/test_skill_06_stale_spread_risk_gate.py | — |
+| 07 | anchor map for leadership | regime.py | test_backtest/test_sim_position.py, test_multi_tf_regime.py, test_regime.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_07_anchor_map_for_leadership.py | — |
+| 08 | leadership zscore | market_data.py, regime.py | test_backtest/test_sim_position.py, test_market_data.py, test_market_data_factory.py, test_market_data_schwab.py, test_multi_tf_regime.py, test_regime.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_08_leadership_zscore.py | — |
+| 09 | vix zscore inhibitor | regime.py, strategy.py | test_backtest/test_sim_position.py, test_executor.py, test_multi_tf_regime.py, test_regime.py, test_risk_manager.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_09_vix_zscore_inhibitor.py | 02_zero_trades_diagnostic.md |
+| 10 | adx wilder smoothing | multi_tf_regime.py | test_multi_tf_regime.py, test_watchlist_chart.py | conformance/test_skill_10_adx_wilder_smoothing.py | — |
+| 11 | six regime classifier | regime.py | test_backtest/test_sim_position.py, test_multi_tf_regime.py, test_regime.py, test_rsi_gate.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_11_six_regime_classifier.py | — |
+| 12 | multi timeframe resolution | multi_tf_regime.py | test_multi_tf_regime.py, test_watchlist_chart.py | conformance/test_skill_12_multi_timeframe_resolution.py | — |
+| 13 | preset system hot reload | strategy_presets.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_13_preset_system_hot_reload.py | — |
+| 14 | adaptive vs static scan modes | strategy_presets.py, strategy.py, chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_executor.py, test_risk_manager.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_14_adaptive_vs_static_scan_modes.py | 02_zero_trades_diagnostic.md |
+| 15 | backtest live parity | backtest/__init__.py, backtest/runner.py, backtest/cycle.py, backtest/sim_position.py, backtest/account.py, backtest/historical_port.py, backtest/synthetic_chain.py, backtest/clock.py, backtest/black_scholes.py, streamlit/backtest_ui.py | test_backtest/test_account.py, test_backtest/test_black_scholes.py, test_backtest/test_clock.py, test_backtest/test_historical_port.py, test_backtest/test_sim_position.py, test_backtest/test_synthetic_chain.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_15_backtest_live_parity.py | — |
+| 16 | market data provider routing | market_data_factory.py, market_data_schwab.py, market_data_yahoo.py, schwab_oauth.py | test_market_data_factory.py, test_market_data_schwab.py, test_production_readiness.py, test_schwab_oauth.py | conformance/test_skill_16_market_data_provider_routing.py | 02_zero_trades_diagnostic.md, 04_broker_api_errors.md |
 | 17 | close failure and cooldown | agent.py, streamlit/live_monitor.py, sector_map.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_sector_map.py, test_streamlit/test_live_monitor.py | conformance/test_skill_17_position_cap.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md, 05_ghost_process_diagnostic.md |
-| 18 | order submission idempotency | executor.py | test_executor.py, test_production_readiness.py | ❌ MISSING | 03_zombie_position_recovery.md, 04_broker_api_errors.md |
-| 19 | journal schema | journal_kb.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_dedup.py, test_journal_derived_cooldown.py, test_journal_kb.py, test_production_readiness.py | ❌ MISSING | 01_daily_close_review.md, 03_zombie_position_recovery.md |
-| 28 | position monitor spread grouping | position_monitor.py | test_backtest/test_sim_position.py, test_position_monitor.py, test_production_readiness.py | ❌ MISSING | 06_ticker_dashboard_diagnostic.md |
+| 18 | order submission idempotency | executor.py | test_executor.py, test_production_readiness.py | conformance/test_skill_18_order_submission_idempotency.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md |
+| 19 | journal schema | journal_kb.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_dedup.py, test_journal_derived_cooldown.py, test_journal_kb.py, test_production_readiness.py | conformance/test_skill_19_journal_schema.py | 01_daily_close_review.md, 03_zombie_position_recovery.md |
+| 28 | position monitor spread grouping | position_monitor.py | test_backtest/test_sim_position.py, test_position_monitor.py, test_production_readiness.py | conformance/test_skill_28_position_monitor_spread_grouping.py | 06_ticker_dashboard_diagnostic.md |
 | 29 | per leg liquidity gate | chain_scanner.py, decision_engine.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py | conformance/test_skill_29_leg_liquidity_gate.py | — |
 
-**Skills with conformance tests:** 4 / 22 (18%)
+**Skills with conformance tests:** 22 / 22 (100%)
 
 ## Orphan source files
 
@@ -77,24 +77,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 
 Skills with no corresponding `tests/conformance/test_skill_NN_*.py` file. These are candidates for back-filling conformance tests so the skill's documented behavior gets pinned by an executable assertion.
 
-- `docs/skills/00_sdlc_and_conventions.md`
-- `docs/skills/01_pop_from_delta.md`
-- `docs/skills/02_strike_snapping.md`
-- `docs/skills/05_ev_per_dollar_risked.md`
-- `docs/skills/06_stale_spread_risk_gate.md`
-- `docs/skills/07_anchor_map_for_leadership.md`
-- `docs/skills/08_leadership_zscore.md`
-- `docs/skills/09_vix_zscore_inhibitor.md`
-- `docs/skills/10_adx_wilder_smoothing.md`
-- `docs/skills/11_six_regime_classifier.md`
-- `docs/skills/12_multi_timeframe_resolution.md`
-- `docs/skills/13_preset_system_hot_reload.md`
-- `docs/skills/14_adaptive_vs_static_scan_modes.md`
-- `docs/skills/15_backtest_live_parity.md`
-- `docs/skills/16_market_data_provider_routing.md`
-- `docs/skills/18_order_submission_idempotency.md`
-- `docs/skills/19_journal_schema.md`
-- `docs/skills/28_position_monitor_spread_grouping.md`
+*(none — every skill has a conformance test)*
 
 ---
 
