@@ -67,10 +67,13 @@ SOURCE_OF_TRUTH_RE = re.compile(
 # repo-root doesn't exist. Filtering to "must contain `/`" eliminates
 # those false positives.
 CITATION_PATH_RE = re.compile(
-    # Captures the .py path. The optional ``:...`` after ``.py``
-    # tolerates both line-range citations (``:160-162``) AND
-    # function-name citations (``:_leg_spread_too_wide``).
-    r"`([^`\s]+/[^`\s]+\.py)(?::[^`\s]+)?`",
+    # Captures the .py path. Everything between ``.py`` and the closing
+    # backtick is consumed as the (discarded) citation suffix so the
+    # regex tolerates comma-separated line lists like
+    # ``risk_manager.py:50, 79, 166-190`` and function-name citations
+    # like ``chain_scanner.py:_leg_spread_too_wide`` — see traceability
+    # builder for the full discussion.
+    r"`([^`\s]+/[^`\s]+\.py)[^`]*`",
 )
 
 # Footer line: "*Last verified against repo HEAD on YYYY-MM-DD*"

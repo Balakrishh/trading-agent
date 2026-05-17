@@ -131,4 +131,4 @@ if leadership_anchor and hasattr(self.data, "get_leadership_zscore"):
 
 ---
 
-*Last verified against repo HEAD on 2026-05-03.*
+*Last verified against repo HEAD on 2026-05-15.*

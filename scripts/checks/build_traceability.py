@@ -54,12 +54,17 @@ SOURCE_OF_TRUTH_RE = re.compile(
     re.MULTILINE,
 )
 CITATION_PATH_RE = re.compile(
-    # Captures the .py path. The optional ``:...`` after .py tolerates
-    # both line-range citations (``:160-162``) AND function-name
-    # citations (``:_leg_spread_too_wide``). Anything between ``.py``
-    # and the closing backtick that isn't a backtick or whitespace
-    # counts as a continuation of the citation.
-    r"`([^`\s]+/[^`\s]+\.py)(?::[^`\s]+)?`",
+    # Captures the .py path. Everything between ``.py`` and the closing
+    # backtick is consumed as the (discarded) citation suffix — this
+    # tolerates ALL the suffix shapes used in the repo today:
+    #   `path.py`                       (no suffix)
+    #   `path.py:160-162`               (single line range)
+    #   `path.py:50, 79, 166-190`       (comma-separated line list)
+    #   `path.py:_function_name`        (function-name citation)
+    # The non-greedy `[^`]*` allows commas and spaces inside the
+    # backtick pair without breaking the match — that was the
+    # 2026-05-15 bug that hid skills 06 and 11.
+    r"`([^`\s]+/[^`\s]+\.py)[^`]*`",
 )
 FOOTER_DATE_RE = re.compile(
     r"\*Last verified against repo HEAD on (\d{4}-\d{2}-\d{2})",
@@ -94,16 +99,52 @@ def _parse_skill_metadata(skill_path: Path) -> Tuple[List[str], Optional[date]]:
     return paths, footer_date
 
 
-def _tests_referencing_each_skill() -> Dict[str, Set[str]]:
+def _tests_referencing_each_skill(
+    skill_to_sources: Dict[str, List[str]],
+) -> Dict[str, Set[str]]:
     """Walk tests/ and map skill_NN → {test_files referencing it}.
 
-    Module tests (e.g. ``tests/test_chain_scanner.py``) are detected
-    via their docstring/header content. Conformance tests (under
-    ``tests/conformance/test_skill_NN_*.py``) are detected via filename.
+    Three linkage paths, applied in order:
+
+      1. **Conformance tests** (under ``tests/conformance/test_skill_NN_*.py``)
+         — detected via filename. Always strongest signal.
+      2. **Explicit references in test content** — comments or
+         docstrings containing ``Skill NN``. Strongest editorial
+         signal but the rarest in practice.
+      3. **Import-based linkage** — if a test imports a module that
+         a skill cites in its Source-of-truth header, link the test
+         to the skill. Catches the bulk of "I tested this function
+         but didn't think to mention the skill number" tests.
+
+    Path #3 was added 2026-05-16 after the matrix's first generation
+    showed only 2 / 22 skills with module tests, despite the obvious
+    coupling between ``test_chain_scanner.py`` and skills 01/03/05/29.
     """
     out: Dict[str, Set[str]] = defaultdict(set)
     if not TESTS_DIR.exists():
         return out
+
+    # Build the inverse map: source_path -> [skill_number, ...] for
+    # cheap O(1) lookup during the test scan.
+    source_to_skills: Dict[str, List[str]] = defaultdict(list)
+    for skill_num, sources in skill_to_sources.items():
+        for src in sources:
+            source_to_skills[src].append(skill_num)
+
+    # Regex to match imports of trading_agent.X.Y modules. Both
+    # ``from trading_agent.X import ...`` and ``import trading_agent.X``
+    # supported. Captures the module path so it can be mapped back
+    # to ``trading_agent/X/Y.py``.
+    import_re = re.compile(
+        r"(?:from|import)\s+trading_agent(?:\.[\w.]+)?",
+    )
+    from_re = re.compile(
+        r"from\s+(trading_agent(?:\.[\w]+)*)\s+import",
+    )
+    direct_re = re.compile(
+        r"import\s+(trading_agent(?:\.[\w]+)*)",
+    )
+
     for test_path in TESTS_DIR.rglob("test_*.py"):
         rel = test_path.relative_to(REPO_ROOT).as_posix()
         # Conformance tests: filename carries the skill number.
@@ -111,13 +152,36 @@ def _tests_referencing_each_skill() -> Dict[str, Set[str]]:
         if m:
             out[m.group(1)].add(rel)
             continue
-        # Module tests: scan content for Skill NN references.
+
         try:
             content = test_path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+
+        # Linkage path 2: explicit "Skill NN" references in content.
         for sk in set(SKILL_REFERENCE_RE.findall(content)):
             out[sk].add(rel)
+
+        # Linkage path 3: imports → cited sources → skills.
+        modules_imported: Set[str] = set()
+        for m in from_re.finditer(content):
+            modules_imported.add(m.group(1))
+        for m in direct_re.finditer(content):
+            modules_imported.add(m.group(1))
+
+        # Convert each imported module to its file path and check
+        # whether any skill cites that file.
+        for mod in modules_imported:
+            # ``trading_agent.chain_scanner`` → ``trading_agent/chain_scanner.py``
+            file_path = mod.replace(".", "/") + ".py"
+            for sk in source_to_skills.get(file_path, []):
+                out[sk].add(rel)
+            # Also try package-style: ``trading_agent.backtest`` may
+            # import the package's __init__.py.
+            pkg_init = mod.replace(".", "/") + "/__init__.py"
+            for sk in source_to_skills.get(pkg_init, []):
+                out[sk].add(rel)
+
     return out
 
 
@@ -175,7 +239,19 @@ def _git_last_modified(repo_relative_path: str) -> Optional[date]:
 def build_matrix() -> str:
     """Return the full traceability markdown."""
     skills = sorted(SKILLS_DIR.glob("[0-9][0-9]_*.md"))
-    test_map = _tests_referencing_each_skill()
+
+    # First pass: parse each skill's SoT citations so the test-import
+    # linkage in _tests_referencing_each_skill can resolve source-path
+    # references back to skill numbers.
+    skill_to_sources: Dict[str, List[str]] = {}
+    for sf in skills:
+        m = SKILL_FILENAME_RE.match(sf.name)
+        if not m:
+            continue
+        cites, _ = _parse_skill_metadata(sf)
+        skill_to_sources[m.group(1)] = cites
+
+    test_map = _tests_referencing_each_skill(skill_to_sources)
     runbook_map = _runbooks_referencing_each_skill()
     all_sources = _all_source_files()
 

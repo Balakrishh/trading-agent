@@ -102,4 +102,4 @@ if underlying_bid_ask is not None:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-03.*
+*Last verified against repo HEAD on 2026-05-15.*

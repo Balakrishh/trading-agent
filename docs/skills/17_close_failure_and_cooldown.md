@@ -1,7 +1,7 @@
 # Close-Failure Action + Partial-Fill Cooldown + PDT Suppression
 
 > **One-line summary:** When `executor.close_spread` reports a partial-fill zombie, the agent (a) tags the journal row `action="close_failed"` instead of `"closed"`, (b) **derives** the per-ticker partial-fill streak from journal rows and parks the ticker in a 60-min cooldown after 3 strikes (cross-process safe), and (c) suppresses same-day `REGIME_SHIFT` exits on PDT-restricted accounts (<$25K equity).
-> **Source of truth:** [`trading_agent/agent.py:124-220`](../../trading_agent/agent.py), [`trading_agent/agent.py:867-1015`](../../trading_agent/agent.py), [`trading_agent/agent.py:_close_failed_streak_within_window`](../../trading_agent/agent.py), [`trading_agent/streamlit/live_monitor.py:1095-1316`](../../trading_agent/streamlit/live_monitor.py)
+> **Source of truth:** [`trading_agent/agent.py:124-220`](../../trading_agent/agent.py), [`trading_agent/agent.py:867-1015`](../../trading_agent/agent.py), [`trading_agent/agent.py:_close_failed_streak_within_window`](../../trading_agent/agent.py), [`trading_agent/streamlit/live_monitor.py:1095-1316`](../../trading_agent/streamlit/live_monitor.py), [`trading_agent/sector_map.py`](../../trading_agent/sector_map.py) *(per-sector cap sibling, added 2026-05-15)*
 > **Phase:** 2  •  **Group:** risk
 > **Depends on:** `00_sdlc_and_conventions.md` (journal schema + dedup), `13_preset_system_hot_reload.md` (max_risk_pct + budget mismatch warning), `19_journal_schema.md` (close_failed action enum)
 > **Consumed by:** `streamlit/live_monitor.py:_render_close_failures_today` (UI banner), Recent Journal Entries panel (downstream of `journal_kb.log_signal`).
