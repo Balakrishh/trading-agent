@@ -63,7 +63,15 @@ def test_skill_06_thresholds_are_user_overridable() -> None:
 
 
 class TestSkill06GateMath:
-    """Skill 06 §2: gate fires when spread > max(abs_floor, bps × mid)."""
+    """Skill 06 §2: gate fires when spread > max(abs_floor, bps_of_mid × mid).
+
+    The two thresholds bind in different regimes:
+      * Low-spot underlyings (mid < $100 for default 5 bps): the
+        absolute $0.05 floor binds.
+      * High-spot underlyings (mid > $100): the bps cap dominates
+        because 0.0005 × $100 = $0.05 is the crossover point. At
+        SPY's ~$733 mid, the threshold is ~$0.37, not $0.05.
+    """
 
     @staticmethod
     def _gate_fires(bid: float, ask: float,
@@ -74,22 +82,33 @@ class TestSkill06GateMath:
         threshold = max(abs_cap, bps_of_mid * mid)
         return spread > threshold
 
-    def test_tight_quote_passes(self) -> None:
-        """SPY at $733, 2¢ spread → 2¢ < 5¢ absolute → passes."""
-        assert not self._gate_fires(732.99, 733.01)
+    def test_low_spot_tight_quote_passes(self) -> None:
+        """XLF at $50, 2¢ spread → 2¢ < 5¢ absolute floor → passes."""
+        assert not self._gate_fires(49.99, 50.01)
 
-    def test_wide_absolute_spread_fires(self) -> None:
-        """SPY-style underlying with a 10¢ spread → fires the absolute
-        threshold (10¢ > 5¢)."""
-        assert self._gate_fires(732.95, 733.05)
+    def test_low_spot_wide_spread_fires_absolute_cap(self) -> None:
+        """XLF at $50, 10¢ spread → exceeds the $0.05 absolute floor
+        (the bps cap of 0.0005 × $50 = $0.025 is below the floor and
+        the max() picks the larger threshold = $0.05)."""
+        assert self._gate_fires(49.95, 50.05)
 
-    def test_high_spot_uses_bps_threshold(self) -> None:
-        """At spot $10,000 (hypothetical), 5 bps × mid = $0.50, which
-        is much greater than the absolute floor of 5¢. The bps cap
-        dominates here."""
-        # spread 0.30 on mid 10000 → 0.30 < 0.50 → passes
-        assert not self._gate_fires(9999.85, 10000.15,
-                                    abs_cap=0.05, bps_of_mid=0.0005)
-        # spread 0.60 on mid 10000 → 0.60 > 0.50 → fires
-        assert self._gate_fires(9999.70, 10000.30,
-                                abs_cap=0.05, bps_of_mid=0.0005)
+    def test_high_spot_tight_quote_passes(self) -> None:
+        """SPY at $733, 10¢ spread → 10¢ < 36.65¢ bps cap → passes.
+        Demonstrates that the bps cap protects high-spot underlyings
+        from being flagged as "wide" just because absolute pennies
+        look big."""
+        assert not self._gate_fires(732.95, 733.05)
+
+    def test_high_spot_wide_spread_fires_bps_cap(self) -> None:
+        """SPY at $733, 50¢ spread → exceeds 0.0005 × $733 = $0.37
+        bps cap → fires. The absolute $0.05 floor is irrelevant
+        here because the bps cap dominates."""
+        assert self._gate_fires(732.75, 733.25)
+
+    def test_very_high_spot_uses_bps_cap(self) -> None:
+        """Hypothetical GOOG-class $2,500 underlying: threshold is
+        0.0005 × 2500 = $1.25, so a $1.00 spread passes but $2.00
+        fires. The bps cap fully dominates the absolute floor at
+        these spots."""
+        assert not self._gate_fires(2499.50, 2500.50)
+        assert self._gate_fires(2499.00, 2501.00)
