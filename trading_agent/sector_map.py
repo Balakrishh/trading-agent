@@ -65,6 +65,15 @@ TICKER_SECTOR_MAP: Dict[str, str] = {
     "IBB":  "Healthcare",     # Biotech
     "XBI":  "Healthcare",     # Biotech (smaller-cap)
     "ITA":  "Industrials",    # Aerospace & Defense
+    "XME":  "Metals & Mining",  # Broad metals & mining (copper, steel, etc.)
+
+    # ── International / regional ETFs ────────────────────────────────
+    # Geographic buckets rather than sector buckets — a US Financials
+    # cap shouldn't restrict an EAFE-wide exposure, and vice versa.
+    "EFA":  "International Developed",   # iShares MSCI EAFE
+    "EWJ":  "International Developed",   # iShares MSCI Japan (future-proof)
+    "EEM":  "Emerging Markets",          # iShares MSCI Emerging Markets
+    "FXI":  "Emerging Markets",          # iShares China Large-Cap (future-proof)
 
     # ── Bond ETFs ────────────────────────────────────────────────────
     "HYG":  "High-Yield Bond",
@@ -76,6 +85,11 @@ TICKER_SECTOR_MAP: Dict[str, str] = {
     # ── Commodity ETFs ───────────────────────────────────────────────
     # Each gets its own bucket — gold and silver behave correlatedly
     # but a portfolio still shouldn't stack two metals positions.
+    # GDX / GDXJ (gold miners) share Gold's bucket because they
+    # correlate ~0.85+ with spot gold and stacking gold + miners would
+    # double-up an effectively-single bet.
+    "GDX":  "Gold",           # VanEck Gold Miners
+    "GDXJ": "Gold",           # VanEck Junior Gold Miners (future-proof)
     "GLD":  "Gold",
     "SLV":  "Silver",
     "USO":  "Energy Commodity",
