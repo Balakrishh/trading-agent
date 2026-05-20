@@ -745,6 +745,101 @@ class OrderExecutor:
 
         return summary
 
+    def roll_position_defensive(self, spread, new_verdict: "RiskVerdict") -> Dict:
+        """Atomic defensive roll: close + open in one operation.
+
+        Skill 31 §3 — sequence the two halves so the position is never
+        doubled (would happen on open-then-close) and so an open
+        failure leaves the account flat-but-recoverable (would be
+        doubled-naked on open-then-close failure).
+
+        Sequence:
+
+          1. ``close_spread(spread)`` — sorted-by-qty leg DELETEs.
+             Same machinery that fires on PROFIT_TARGET / STOP_LOSS.
+          2. If ``all_closed`` is False, abort — the open half is
+             skipped so we don't pile a new spread on top of a
+             stuck-partial close. The next cycle's STRIKE_PROXIMITY
+             re-evaluation will retry the close on its own.
+          3. ``execute(new_verdict)`` — standard live-or-dry-run order
+             submission.
+          4. If the open fails after a clean close, log ``CRITICAL``
+             — position is flat (no exposure), but the operator must
+             know a roll was attempted and the new spread never
+             entered.
+
+        Returns a dict with three blocks:
+
+          * ``status`` ∈ {"roll_completed", "roll_close_failed",
+                          "roll_open_failed", "roll_dry_run"}
+          * ``close_result`` — verbatim ``close_spread`` return value
+          * ``open_result`` — verbatim ``execute`` return value (or
+                              ``None`` if the close failed and the
+                              open was never attempted)
+        """
+        underlying = getattr(spread, "underlying", "?")
+        logger.info("[%s] Defensive-roll START — closing threatened spread "
+                    "before opening replacement", underlying)
+
+        close_result = self.close_spread(spread)
+        if not close_result.get("all_closed"):
+            logger.warning(
+                "[%s] Defensive-roll aborted — close half PARTIAL; "
+                "refusing to open replacement on top of stuck legs",
+                underlying,
+            )
+            return {
+                "status": "roll_close_failed",
+                "close_result": close_result,
+                "open_result": None,
+            }
+
+        # Close succeeded. Open the replacement spread via the same
+        # live-or-dry-run execute() path so the new position lands in
+        # the same trade_plans/ directory and is journalled identically
+        # to an organic open.
+        try:
+            open_result = self.execute(new_verdict)
+        except Exception as exc:                                  # noqa: BLE001
+            # Open submission crashed — close already filled, so we
+            # are FLAT (not doubled or naked). The operator must be
+            # alerted so they can decide whether to re-open manually.
+            logger.critical(
+                "[%s] Defensive-roll: CLOSE FILLED but OPEN CRASHED — "
+                "position is FLAT, no replacement entered. "
+                "Investigate executor logs for the underlying cause: %s",
+                underlying, exc,
+            )
+            return {
+                "status": "roll_open_failed",
+                "close_result": close_result,
+                "open_result": {"status": "error", "reason": str(exc)},
+            }
+
+        open_status = open_result.get("status")
+        if open_status in ("submitted", "dry_run"):
+            logger.info("[%s] Defensive-roll COMPLETE — close + %s",
+                        underlying, open_status)
+            return {
+                "status": ("roll_dry_run" if open_status == "dry_run"
+                           else "roll_completed"),
+                "close_result": close_result,
+                "open_result": open_result,
+            }
+
+        # Open returned rejected / error — same CRITICAL recovery path
+        # as the exception branch above.
+        logger.critical(
+            "[%s] Defensive-roll: CLOSE FILLED but OPEN returned %r — "
+            "position is FLAT. Reason: %s",
+            underlying, open_status, open_result.get("reason"),
+        )
+        return {
+            "status": "roll_open_failed",
+            "close_result": close_result,
+            "open_result": open_result,
+        }
+
     def _close_single_leg(self, symbol: str) -> Dict:
         """DELETE /v2/positions/{symbol} — close a single option leg."""
         url = f"{self.base_url}/positions/{symbol}"

@@ -2489,6 +2489,24 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                      "penny-cheap-but-fractionally-wide options.",
             )
 
+        # ── Profit-target management (skill 30, added 2026-05-19) ──────
+        # Close any position once unrealized P&L ≥ X × initial credit.
+        # 50% is the industry-standard "manage winners early" rule —
+        # captures most theta with less late-cycle gamma exposure and
+        # recycles capital ~2× per trade vs. holding to expiration.
+        st.markdown("**Profit-take threshold** *(skill 30)*")
+        profit_target_pct = st.slider(
+            "Close at X% of initial credit",
+            0.20, 0.85,
+            float(getattr(seed, "profit_target_pct", 0.50)),
+            0.05, key="cust_profit_target",
+            help="0.50 = close at 50% of credit (industry standard). "
+                 "Lower → more turnover, less per-trade $; higher → ride "
+                 "winners further but more exposure to late-cycle gamma. "
+                 "Sweep this in the backtester to find the optimum for "
+                 "your universe.",
+        )
+
     payload = {
         "max_delta":          max_delta,
         "dte_vertical":       dte_vertical,
@@ -2502,6 +2520,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "min_pop":            min_pop,
         "max_leg_spread_cents":   max_leg_spread_cents,
         "max_leg_spread_pct_mid": max_leg_spread_pct_mid,
+        "profit_target_pct":  profit_target_pct,
     }
     # Only persist grids when they parse cleanly — silently fall back to
     # seed value otherwise so a malformed text box doesn't poison the file.
@@ -2631,6 +2650,35 @@ def render_strategy_profile_panel() -> None:
                 key="strat_edge_buffer",
             )
 
+        # ── Profit-take overlay row (skill 30) ───────────────────────────
+        # Top-level slider that overlays on top of whichever profile is
+        # chosen — same pattern as scan_mode / edge_buffer. Lets an
+        # operator A/B test 30/40/50/60/70% in the backtester against
+        # the built-in preset defaults (Conservative 0.60, Balanced 0.50,
+        # Aggressive 0.40) without falling into the Custom profile.
+        # Persisted as a top-level overlay in STRATEGY_PRESET.json.
+        profit_default = saved_payload.get(
+            "profit_target_pct", current.profit_target_pct
+        )
+        try:
+            profit_default = float(profit_default)
+        except (TypeError, ValueError):
+            profit_default = current.profit_target_pct
+        # Clamp to slider range so a previously-saved out-of-range value
+        # doesn't crash the widget.
+        profit_default = max(0.20, min(0.85, profit_default))
+        profit_target_pct = st.slider(
+            "Profit-take threshold (close at X% of initial credit)",
+            0.20, 0.85, profit_default, 0.05,
+            key="strat_profit_target",
+            help="Industry-standard 50% closes winners before late-cycle "
+                 "gamma chews them up. Lower (30–40%) recycles capital "
+                 "faster; higher (60–70%) rides winners further. Per-preset "
+                 "defaults: Conservative 60%, Balanced 50%, Aggressive 40%. "
+                 "Set here to override on any preset without switching to "
+                 "Custom — saved as a top-level overlay in STRATEGY_PRESET.json.",
+        )
+
         # Preview line for the chosen built-in.
         if profile in PRESETS:
             preview = PRESETS[profile]
@@ -2638,7 +2686,8 @@ def render_strategy_profile_panel() -> None:
                         else "STATIC scan")
             st.caption(
                 f"Selected preset → {preview.description}  · {mode_tag} "
-                f"(edge buffer {edge_buffer:.2f})"
+                f"(edge buffer {edge_buffer:.2f}, "
+                f"profit-take {profit_target_pct:.0%})"
             )
 
         # Custom overrides — only meaningful when profile == "custom".
@@ -2674,10 +2723,12 @@ def render_strategy_profile_panel() -> None:
                     custom=custom_payload,
                     scan_mode=scan_mode,
                     edge_buffer=edge_buffer,
+                    profit_target_pct=profit_target_pct,
                 )
                 st.toast(
                     f"Saved profile=**{profile}**, bias=**{bias}**, "
-                    f"scan=**{scan_mode}** (edge {edge_buffer:.2f}) — "
+                    f"scan=**{scan_mode}** (edge {edge_buffer:.2f}), "
+                    f"profit-take **{profit_target_pct:.0%}** — "
                     "active on next cycle.",
                     icon="✅",
                 )

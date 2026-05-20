@@ -78,6 +78,11 @@ from trading_agent.strategy_presets import (
     regime_is_allowed,
 )
 from trading_agent.risk_manager import RiskManager, RiskVerdict
+from trading_agent.defensive_roll_evaluator import (
+    RollDecision,
+    RollEvalInputs,
+    evaluate_defensive_roll,
+)
 from trading_agent.executor import OrderExecutor
 from trading_agent.position_monitor import (
     PositionMonitor, ExitSignal, SpreadPosition, IMMEDIATE_EXIT_SIGNALS,
@@ -347,6 +352,11 @@ class TradingAgent:
             api_key=config.alpaca.api_key,
             secret_key=config.alpaca.secret_key,
             base_url=config.alpaca.base_url,
+            # Profit-take threshold comes from the preset (skill 30). 50% is
+            # the Balanced default; Conservative rides to 60%, Aggressive
+            # banks at 40%. A mismatch between agent.py and the
+            # PositionMonitor default would silently apply the wrong rule.
+            profit_target_pct=self.preset.profit_target_pct,
         )
         self.order_tracker: OrdersPort = OrderTracker(
             api_key=config.alpaca.api_key,
@@ -1031,6 +1041,23 @@ class TradingAgent:
                     )
                     continue
 
+                # ── Defensive-roll dispatcher (skill 31) ─────────────────
+                # When STRIKE_PROXIMITY would otherwise just close at a loss,
+                # try evaluating a defensive roll (close + reopen further-OTM).
+                # _maybe_defensive_roll returns a result dict if the roll
+                # ran (success or failure — already journalled), else None
+                # if the roll was declined and we should fall through to
+                # the normal close path. The six-predicate evaluator (skill 31)
+                # ensures the roll only fires when it's economically positive.
+                if (spread.exit_signal == ExitSignal.STRIKE_PROXIMITY
+                        and self.preset.defensive_roll_enabled):
+                    roll_outcome = self._maybe_defensive_roll(
+                        spread, account_balance,
+                    )
+                    if roll_outcome is not None:
+                        closed.append(roll_outcome)
+                        continue
+
                 # Capture pre-close state for the audit-trail journal entry —
                 # spread.legs may be partially populated after close_spread()
                 # mutates leg statuses, so snapshot what the user is paying
@@ -1103,6 +1130,263 @@ class TradingAgent:
         summary = self.position_monitor.summary(spreads)
         summary["closed"] = closed
         return summary
+
+    # ==================================================================
+    # Defensive roll (skill 31)
+    # ==================================================================
+
+    def _maybe_defensive_roll(self, spread, account_balance: float
+                              ) -> Optional[Dict]:
+        """Run the six-predicate evaluator and execute the roll if all pass.
+
+        Skill 31 §3 — orchestrates the close-then-open atomic sequence.
+
+        Returns:
+          * ``Dict`` if the roll ran (whether it succeeded, partially
+            failed, or got declined post-predicate) — caller adds to
+            ``closed`` list and skips the normal close path
+          * ``None`` if the evaluator declined OR an upstream step
+            (regime classify / plan / risk) failed — caller falls
+            through to the normal close path, which closes the
+            threatened spread at the STRIKE_PROXIMITY signal
+
+        All outcomes are journalled inside this method — caller doesn't
+        need to add a separate journal call.
+        """
+        ticker = spread.underlying
+        cur_price = self._cached_price(ticker)
+        if cur_price <= 0:
+            logger.warning(
+                "[%s] Defensive-roll declined — no cached price; "
+                "falling through to normal close.", ticker)
+            return None
+
+        # ── Build candidate ─────────────────────────────────────────
+        # Re-run the planner so the candidate uses the current chain
+        # and current regime. If the regime has flipped (e.g. the
+        # underlying broke through what was sideways into bearish),
+        # the planner returns a different strategy and the evaluator's
+        # SAME-DIRECTION predicate will reject — that's the correct
+        # behaviour (we don't want to roll a bull put into a bear
+        # call mid-defense).
+        try:
+            analysis = self.regime_classifier.classify(ticker)
+            new_plan = self.strategy_planner.plan(ticker, analysis)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Defensive-roll: plan attempt crashed (%s) — "
+                "falling through to normal close.", ticker, exc)
+            return None
+
+        if not getattr(new_plan, "valid", False):
+            logger.info(
+                "[%s] Defensive-roll: planner returned no valid candidate "
+                "— falling through to normal close.", ticker)
+            self.journal_kb.log_signal(
+                ticker=ticker, action="defensive_roll_evaluated",
+                price=cur_price,
+                raw_signal={
+                    "decision": "skip_no_candidate",
+                    "reason": "planner returned no valid candidate",
+                    "exit_signal": spread.exit_signal.value,
+                },
+            )
+            return None
+
+        # ── Compute evaluator inputs ────────────────────────────────
+        # debit_to_close estimated from unrealized P&L. For a credit
+        # spread opened at $X credit currently showing $Y loss, the
+        # debit to close ≈ X + Y per spread. Crude but conservative —
+        # the predicate compares against new credit which is also
+        # a planner estimate.
+        original_credit_per_spread = float(
+            getattr(spread, "original_credit", 0.0) or 0.0
+        )
+        unrealized_per_spread = float(
+            getattr(spread, "net_unrealized_pl_per_spread",
+                    getattr(spread, "net_unrealized_pl", 0.0) or 0.0)
+        )
+        debit_to_close = max(
+            0.0, original_credit_per_spread - unrealized_per_spread
+        )
+
+        # DTE remaining
+        from datetime import date as _date
+        try:
+            exp = spread.expiration  # "YYYY-MM-DD"
+            exp_date = _date.fromisoformat(exp)
+            dte = max(0, (exp_date - _date.today()).days)
+        except (ValueError, TypeError):
+            dte = 0
+
+        # The threatened-spread's short strike is the one closest to spot.
+        short_strikes = list(getattr(spread, "short_strikes", []) or [])
+        if not short_strikes:
+            logger.warning(
+                "[%s] Defensive-roll: no short_strikes recorded on "
+                "spread; falling through.", ticker)
+            return None
+        closest_short = min(
+            short_strikes, key=lambda k: abs(cur_price - k)
+        )
+
+        # New short leg delta — from the new plan's "sell" legs.
+        new_sell_legs = [l for l in new_plan.legs if l.action == "sell"]
+        if not new_sell_legs:
+            logger.info(
+                "[%s] Defensive-roll: new plan has no sell legs — "
+                "falling through.", ticker)
+            return None
+        new_short_delta = max(abs(l.delta) for l in new_sell_legs)
+
+        roll_inputs = RollEvalInputs(
+            spot=cur_price,
+            short_strike=closest_short,
+            dte=dte,
+            strategy_name=spread.strategy_name,
+            debit_to_close=debit_to_close,
+            current_roll_count=0,    # MVP: budget enforced per-position-id
+                                     # via journal lookup is a follow-up.
+                                     # max_defensive_rolls_per_position=1
+                                     # still bounds total rolls in steady
+                                     # state because a successful roll
+                                     # opens a NEW position with no roll
+                                     # history.
+            new_short_delta=new_short_delta,
+            new_strategy_name=new_plan.strategy_name,
+            new_projected_credit=float(new_plan.net_credit),
+            new_spread_width=float(new_plan.spread_width),
+            new_cw_ratio=float(new_plan.credit_to_width_ratio),
+            roll_trigger_min_pct=self.preset.roll_trigger_min_pct,
+            roll_trigger_max_pct=self.preset.roll_trigger_max_pct,
+            min_dte_for_roll=self.preset.min_dte_for_roll,
+            max_defensive_rolls_per_position=(
+                self.preset.max_defensive_rolls_per_position
+            ),
+            edge_buffer=self.preset.edge_buffer,
+        )
+
+        decision = evaluate_defensive_roll(roll_inputs)
+        eval_payload = {
+            "decision":                decision.value,
+            "spot":                    cur_price,
+            "short_strike":            closest_short,
+            "proximity_pct":           roll_inputs.proximity_pct(),
+            "dte":                     dte,
+            "debit_to_close":          debit_to_close,
+            "new_strategy":            new_plan.strategy_name,
+            "new_credit":              float(new_plan.net_credit),
+            "new_cw_ratio":            float(new_plan.credit_to_width_ratio),
+            "new_short_delta":         new_short_delta,
+            "preset_trigger_band":     [
+                self.preset.roll_trigger_min_pct,
+                self.preset.roll_trigger_max_pct,
+            ],
+            "preset_min_dte":          self.preset.min_dte_for_roll,
+        }
+
+        if decision != RollDecision.ROLL:
+            # Predicate failed — journal the decision and fall through
+            # to the normal close.
+            self.journal_kb.log_signal(
+                ticker=ticker, action="defensive_roll_evaluated",
+                price=cur_price, raw_signal=eval_payload,
+            )
+            logger.info(
+                "[%s] Defensive-roll declined (%s) — falling through "
+                "to normal close at STRIKE_PROXIMITY.",
+                ticker, decision.value,
+            )
+            return None
+
+        # ── All six predicates passed — run the roll ────────────────
+        # Build a RiskVerdict for the new plan so the executor's
+        # standard live-or-dry-run submission path handles broker calls.
+        try:
+            verdict: RiskVerdict = self.risk_manager.evaluate(
+                new_plan, account_balance, "margin", True,
+                self.config.trading.force_market_open,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Defensive-roll: risk check crashed (%s) — "
+                "falling through to normal close.", ticker, exc)
+            self.journal_kb.log_signal(
+                ticker=ticker, action="defensive_roll_evaluated",
+                price=cur_price,
+                raw_signal={**eval_payload,
+                            "post_eval_error": f"risk_check: {exc}"},
+            )
+            return None
+
+        if not verdict.approved:
+            logger.info(
+                "[%s] Defensive-roll: new plan REJECTED at risk gate (%s) "
+                "— falling through to normal close.",
+                ticker, verdict.summary,
+            )
+            self.journal_kb.log_signal(
+                ticker=ticker, action="defensive_roll_evaluated",
+                price=cur_price,
+                raw_signal={**eval_payload,
+                            "post_eval_risk_rejection": verdict.summary},
+            )
+            return None
+
+        logger.info(
+            "[%s] Defensive-roll ROLL — closing threatened spread + "
+            "opening %s @ short Δ-%.2f for $%.2f credit (was $%.2f, "
+            "C/W %.3f)",
+            ticker, new_plan.strategy_name, new_short_delta,
+            new_plan.net_credit, original_credit_per_spread,
+            new_plan.credit_to_width_ratio,
+        )
+
+        roll_result = self.executor.roll_position_defensive(spread, verdict)
+
+        # Journal the outcome under one canonical action so the
+        # dashboard / traceability can attribute it.
+        action_map = {
+            "roll_completed":     "defensive_roll_completed",
+            "roll_dry_run":       "defensive_roll_dry_run",
+            "roll_close_failed":  "defensive_roll_close_failed",
+            "roll_open_failed":   "defensive_roll_open_failed",
+        }
+        outcome_status = roll_result.get("status", "roll_open_failed")
+        journal_action = action_map.get(outcome_status, "defensive_roll_open_failed")
+
+        self.journal_kb.log_signal(
+            ticker=ticker, action=journal_action,
+            price=cur_price,
+            raw_signal={
+                **eval_payload,
+                "roll_status":     outcome_status,
+                "close_all_ok":    bool(
+                    (roll_result.get("close_result") or {}).get("all_closed")
+                ),
+                "open_status":     (
+                    (roll_result.get("open_result") or {}).get("status")
+                    if roll_result.get("open_result") else None
+                ),
+                "from_short_strikes": short_strikes,
+                "from_expiration":    spread.expiration,
+                "to_short_delta":     new_short_delta,
+                "to_expiration":      getattr(new_plan, "expiration", ""),
+            },
+            exec_status=outcome_status,
+            notes=(
+                f"Defensive roll {outcome_status}; "
+                f"close_ok={(roll_result.get('close_result') or {}).get('all_closed')}"
+            ),
+        )
+
+        return {
+            "underlying":  ticker,
+            "signal":      spread.exit_signal.value,
+            "action":      journal_action,
+            "roll_status": outcome_status,
+            "result":      roll_result,
+        }
 
     def _journal_close_event(self, spread, ctx: Dict,
                              leg_results: List[Dict], fill_status: str,

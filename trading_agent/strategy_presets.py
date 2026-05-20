@@ -110,6 +110,44 @@ class PresetConfig:
     max_leg_spread_pct_mid:  float = 0.05
 
     # ------------------------------------------------------------------
+    # Profit-target management (added 2026-05-19 — see skill 30).
+    # Close any position whose unrealized P&L ≥ profit_target_pct × initial
+    # credit. The 50% default is the industry-standard early-exit rule
+    # (see Tastytrade studies, "manage winners at 50%"). Aggressive presets
+    # take profit sooner to recycle capital faster; conservative presets
+    # ride winners further because they fire less often and want more $/trade.
+    #
+    # Wired into PositionMonitor's PROFIT_TARGET exit signal (live) and
+    # backtest/runner.py:_handle_intraday_decision (backtest parity).
+    # ------------------------------------------------------------------
+    profit_target_pct:       float = 0.50
+
+    # ------------------------------------------------------------------
+    # Defensive-roll management (added 2026-05-19 — see skill 31).
+    # When a position's short strike approaches spot, instead of just
+    # closing on STRIKE_PROXIMITY, ROLL the spread: close threatened
+    # spread + open new further-OTM spread atomically. Six predicates
+    # (see defensive_roll_evaluator.evaluate_defensive_roll) gate the
+    # decision so the roll only fires when it's economically positive.
+    #
+    # OFF by default — opt-in per preset because defensive rolls are
+    # higher-stakes than profit-takes (mistakes lock in bigger losses).
+    # ------------------------------------------------------------------
+    defensive_roll_enabled:            bool  = False
+    # Proximity band: short strike must be between roll_trigger_min_pct
+    # and roll_trigger_max_pct of spot. Below min → new strike also in
+    # danger; above max → not actually threatened enough to roll.
+    roll_trigger_min_pct:              float = 0.005    # 0.5% of spot
+    roll_trigger_max_pct:              float = 0.015    # 1.5% of spot
+    # Minimum DTE remaining for a roll to be viable. Inside this window
+    # gamma is too explosive to roll usefully — just close.
+    min_dte_for_roll:                  int   = 5
+    # Hard cap on consecutive defensive rolls per position. Without a
+    # cap, a trending market rolls the same position 3-4 times, each
+    # at a worse strike, compounding the original loss.
+    max_defensive_rolls_per_position:  int   = 1
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
@@ -133,6 +171,11 @@ class PresetConfig:
         wstr = (f"{self.width_value*100:.1f}%spot"
                 if self.width_mode == "pct_of_spot"
                 else f"${self.width_value:.0f}")
+        roll_tag = (
+            f"DefRoll@{self.roll_trigger_min_pct*100:.1f}–"
+            f"{self.roll_trigger_max_pct*100:.1f}%"
+            if self.defensive_roll_enabled else "DefRoll OFF"
+        )
         if self.scan_mode == "adaptive":
             return (
                 f"{self.name.title()} • {self.directional_bias.replace('_', ' ')} • "
@@ -141,13 +184,18 @@ class PresetConfig:
                 f"Edge ≥ {self.edge_buffer:.0%} • POP ≥ {self.min_pop:.0%} • "
                 f"LegSpread ≤ ${self.max_leg_spread_cents:.2f}/"
                 f"{self.max_leg_spread_pct_mid:.0%}mid • "
+                f"Profit-take @ {self.profit_target_pct:.0%} • "
+                f"{roll_tag} • "
                 f"Max risk {self.max_risk_pct*100:.0f}%"
             )
         return (
             f"{self.name.title()} • {self.directional_bias.replace('_', ' ')} • "
             f"Vert@{self.dte_vertical}d Δ-{self.max_delta:.2f} w={wstr} • "
             f"IC@{self.dte_iron_condor}d • MR@{self.dte_mean_reversion}d • "
-            f"C/W ≥ {self.min_credit_ratio} • Max risk {self.max_risk_pct*100:.0f}%"
+            f"C/W ≥ {self.min_credit_ratio} • "
+            f"Profit-take @ {self.profit_target_pct:.0%} • "
+            f"{roll_tag} • "
+            f"Max risk {self.max_risk_pct*100:.0f}%"
         )
 
     def to_short_summary(self) -> str:
@@ -220,6 +268,9 @@ CONSERVATIVE = PresetConfig(
     width_grid_pct=_CONS_WIDTH_GRID,
     edge_buffer=0.15,                    # demand more margin
     min_pop=0.65,                        # require higher POP
+    # Conservative fires less often — ride winners further to collect more
+    # $/trade. 60% target means longer hold but bigger banked profit.
+    profit_target_pct=0.60,
     description=(
         "Low-risk: ~85% POP, far-OTM shorts, longer DTE. Trades fire less "
         "often; credits are smaller; win rate is high."
@@ -246,6 +297,13 @@ BALANCED = PresetConfig(
     width_grid_pct=_BAL_WIDTH_GRID,
     edge_buffer=0.08,
     min_pop=0.55,
+    # Industry-standard 50% early-exit — captures most of the theta with
+    # less exposure to late-cycle gamma. Recycles capital ~2× per trade vs.
+    # holding to expiration on a 21-DTE position.
+    profit_target_pct=0.50,
+    # Defensive roll ON with standard 0.5–1.5% trigger band — Balanced
+    # is the canonical "real positions, real defense" preset.
+    defensive_roll_enabled=True,
     description=(
         "Recommended baseline: ~75% POP, 21-DTE verticals, 1.5% width. "
         "Trades fire most days; healthy credits; reasonable win rate."
@@ -271,6 +329,16 @@ AGGRESSIVE = PresetConfig(
     width_grid_pct=_AGG_WIDTH_GRID,
     edge_buffer=0.05,
     min_pop=0.50,                        # admits up to delta-0.50
+    # Aggressive cycles fire often; recycle capital faster by taking profit
+    # at 40% to enable more shots per month. Trades off bigger per-trade
+    # profit for higher annualised capital turnover.
+    profit_target_pct=0.40,
+    # Aggressive opens with near-ATM shorts — short strikes are routinely
+    # near spot, so defensive rolls fire more often. Tighten the upper
+    # band to 1.2% so the agent rolls EARLIER (more reaction time)
+    # before gamma blows up.
+    defensive_roll_enabled=True,
+    roll_trigger_max_pct=0.012,
     description=(
         "High-credit / high-variance: ~65% POP, near-ATM shorts, short DTE. "
         "Fires almost every cycle; large credits; gamma-sensitive."
@@ -379,6 +447,19 @@ def load_active_preset(path: Optional[Path] = None) -> PresetConfig:
         logger.warning("Invalid edge_buffer %r — keeping profile default %r",
                        edge_buffer, preset.edge_buffer)
 
+    # Profit-target overlay — applied on top of whichever profile is chosen,
+    # same way `directional_bias` / `scan_mode` / `edge_buffer` overlay. Lets
+    # an operator A/B test 30/40/50/60/70% in the backtester against the
+    # built-in 50% (Balanced) without falling into the Custom profile.
+    profit_target_pct = data.get("profit_target_pct")
+    if isinstance(profit_target_pct, (int, float)) and 0.10 <= profit_target_pct <= 0.95:
+        overlay["profit_target_pct"] = float(profit_target_pct)
+    elif profit_target_pct is not None:
+        logger.warning(
+            "Invalid profit_target_pct %r — keeping profile default %r",
+            profit_target_pct, preset.profit_target_pct,
+        )
+
     return replace(preset, **overlay)
 
 
@@ -388,6 +469,7 @@ def save_active_preset(profile: ProfileName,
                        *,
                        scan_mode: Optional[ScanMode] = None,
                        edge_buffer: Optional[float] = None,
+                       profit_target_pct: Optional[float] = None,
                        path: Optional[Path] = None) -> Path:
     """
     Persist the active preset selection to ``STRATEGY_PRESET.json``.
@@ -396,10 +478,10 @@ def save_active_preset(profile: ProfileName,
     written atomically (temp + rename) so a half-written JSON can never
     be observed by a concurrently-launching agent subprocess.
 
-    ``scan_mode`` and ``edge_buffer`` are persisted as top-level overlays —
-    they apply on top of whichever profile is chosen (mirrors the
-    ``directional_bias`` model). Pass ``None`` to omit them entirely;
-    the loader will then use the chosen profile's built-in default.
+    ``scan_mode``, ``edge_buffer``, and ``profit_target_pct`` are persisted
+    as top-level overlays — they apply on top of whichever profile is
+    chosen (mirrors the ``directional_bias`` model). Pass ``None`` to
+    omit; the loader will then use the chosen profile's built-in default.
     """
     fp = path or PRESET_FILE
     payload: Dict = {
@@ -410,6 +492,8 @@ def save_active_preset(profile: ProfileName,
         payload["scan_mode"] = scan_mode
     if edge_buffer is not None:
         payload["edge_buffer"] = float(edge_buffer)
+    if profit_target_pct is not None:
+        payload["profit_target_pct"] = float(profit_target_pct)
     if profile == "custom" and custom:
         # Only persist the dataclass-known keys.
         valid = {f.name for f in PresetConfig.__dataclass_fields__.values()}
@@ -418,8 +502,10 @@ def save_active_preset(profile: ProfileName,
     tmp = fp.with_suffix(fp.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(fp)
-    logger.info("Saved %s → profile=%s bias=%s scan_mode=%s edge_buffer=%s",
-                fp, profile, directional_bias, scan_mode, edge_buffer)
+    logger.info(
+        "Saved %s → profile=%s bias=%s scan_mode=%s edge_buffer=%s profit_target=%s",
+        fp, profile, directional_bias, scan_mode, edge_buffer, profit_target_pct,
+    )
     return fp
 
 

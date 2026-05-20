@@ -257,7 +257,13 @@ class BacktestRunner:
                 pos.remark(t=t, spot=spot, vix_t=vix_t)
                 signal, reason = pos.evaluate_exit(
                     t=t, spot=spot, current_regime=current_regime,
-                    profit_target_pct=0.50,
+                    # Profit-target comes from preset (skill 30). Mirrors
+                    # the live wiring in agent.py:position_monitor — backtester
+                    # would otherwise diverge from live when a non-50% preset
+                    # is active, breaking skill 15 (backtest↔live parity).
+                    profit_target_pct=getattr(
+                        self.preset, "profit_target_pct", 0.50
+                    ),
                     hard_stop_multiplier=3.0,
                     strike_proximity_pct=0.01,
                 )
