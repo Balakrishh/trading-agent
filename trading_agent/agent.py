@@ -1002,6 +1002,19 @@ class TradingAgent:
                 account_balance, sorted(same_day_tickers),
             )
 
+        # Reactive PDT-block set (skill 17 §4). Read journal once per
+        # cycle for tickers whose close attempt earlier today was rejected
+        # by Alpaca with code 40310100. Subsequent same-day attempts on
+        # these tickers will short-circuit in the close loop below — no
+        # speculative suppression, only after a real broker response.
+        pdt_blocked_today = self._pdt_blocked_today_tickers()
+        if pdt_blocked_today:
+            logger.info(
+                "PDT-blocked-today tickers (Alpaca confirmed code 40310100): "
+                "%s. Auto-close suppressed for these until UTC midnight.",
+                sorted(pdt_blocked_today),
+            )
+
         closed = []
         for spread in spreads:
             if spread.exit_signal != ExitSignal.HOLD and self._should_exit_spread(spread):
@@ -1035,7 +1048,9 @@ class TradingAgent:
                 # and let tomorrow's cycle close it without the same-day
                 # day-trade flag.  Real-risk exits (STRIKE_PROXIMITY,
                 # HARD_STOP, DTE_SAFETY) still fire because those are
-                # worth the PDT hit.
+                # worth the PDT hit — UNLESS Alpaca has actually
+                # confirmed the PDT block via API response earlier
+                # today (see next gate).
                 if (pdt_restricted
                         and spread.underlying in same_day_tickers
                         and spread.exit_signal == ExitSignal.REGIME_SHIFT):
@@ -1045,6 +1060,55 @@ class TradingAgent:
                         "threshold. Holding overnight to avoid day-trade "
                         "flag. Will reconsider on next session's cycle.",
                         spread.underlying, account_balance,
+                    )
+                    continue
+
+                # ── Reactive PDT-block suppression (skill 17 §4) ─────────
+                # Skip the close attempt ONLY when Alpaca has already
+                # responded with code 40310100 (pattern day trading
+                # protection) on this ticker earlier today. The flag
+                # was written by ``_journal_close_event`` after the
+                # first failed attempt; the helper reads the journal
+                # and looks for a same-UTC-day pdt_blocked_today marker.
+                # This is REACTIVE — we don't speculatively gate based
+                # on PDT-restriction + same-day-open. The first close
+                # attempt always proceeds; only AFTER seeing the broker
+                # respond with PDT do we stop retrying. Reduces API
+                # spam from 18+ failed close attempts per day per
+                # stuck position (observed in pi-diagnostics 2026-05-20)
+                # down to a single attempt + clean journal record.
+                if spread.underlying in pdt_blocked_today:
+                    self.journal_kb.log_signal(
+                        ticker=spread.underlying,
+                        action="skipped_pdt_blocked",
+                        price=self._cached_price(spread.underlying),
+                        raw_signal={
+                            "reason": (
+                                "Alpaca returned code 40310100 (pattern "
+                                "day trading protection) earlier today. "
+                                "Subsequent close attempts suppressed "
+                                "until UTC midnight."
+                            ),
+                            "exit_signal": spread.exit_signal.value,
+                            "exit_reason": spread.exit_reason,
+                            "account_balance": account_balance,
+                            "spread_strategy": spread.strategy_name,
+                        },
+                        notes=(
+                            f"skipped_pdt_blocked: {spread.strategy_name}, "
+                            f"{spread.exit_signal.value} — broker confirmed "
+                            f"PDT block earlier today"
+                        ),
+                    )
+                    logger.warning(
+                        "[%s] Auto-close suppressed — Alpaca confirmed PDT "
+                        "block earlier today (code 40310100). Position is "
+                        "at risk (%s: %s) but retrying is futile until "
+                        "UTC midnight. Manual close via Alpaca UI accepts "
+                        "the day-trade flag if intervention is needed.",
+                        spread.underlying,
+                        spread.exit_signal.value,
+                        spread.exit_reason,
                     )
                     continue
 
@@ -1541,6 +1605,49 @@ class TradingAgent:
                         f"intervention required to clear zombie state."
                     )
 
+                # ── Reactive PDT-block detection (skill 17 §4) ──────────
+                # If ANY leg's error string contains Alpaca's PDT code
+                # (40310100) OR the literal "pattern day trading" phrase,
+                # mark this row so the next cycle's close loop can read
+                # the journal and short-circuit retries that are doomed
+                # for the rest of UTC-today. The flag is date-keyed so
+                # the marker self-expires at midnight UTC — when the
+                # next trading day begins, the position is no longer
+                # "same-day-open" from FINRA's perspective and the close
+                # will succeed normally. Reactive design: we only mark
+                # AFTER the broker has actually responded with PDT, so
+                # legitimate closes are never speculatively suppressed.
+                pdt_signals = ("40310100", "pattern day trading")
+                pdt_blocked = any(
+                    isinstance(leg, dict)
+                    and any(
+                        s in str(leg.get("error", "")).lower()
+                        for s in pdt_signals
+                    )
+                    for leg in (leg_results or [])
+                )
+                if pdt_blocked:
+                    today_utc = (
+                        datetime.now(timezone.utc).date().isoformat()
+                    )
+                    payload["pdt_blocked_today"] = True
+                    payload["pdt_blocked_date"] = today_utc
+                    payload["pdt_blocked_reason"] = (
+                        "Alpaca returned code 40310100 (pattern day "
+                        "trading protection) on one or more legs. "
+                        "Subsequent close attempts on this ticker will "
+                        "be suppressed until UTC midnight, when the "
+                        "position is no longer same-day-open."
+                    )
+                    logger.critical(
+                        "[%s] PDT block detected from Alpaca response — "
+                        "marking ticker pdt_blocked_today=%s. Further "
+                        "auto-closes will be suppressed for the rest of "
+                        "the trading day. Manual close via Alpaca UI is "
+                        "still possible if you accept the day-trade flag.",
+                        spread.underlying, today_utc,
+                    )
+
             self.journal_kb.log_signal(
                 ticker=spread.underlying,
                 action=action,
@@ -1611,6 +1718,55 @@ class TradingAgent:
         except Exception as exc:                                # noqa: BLE001
             logger.warning(
                 "Failed to read same-day-open tickers from journal: %s",
+                exc,
+            )
+            return set()
+
+    def _pdt_blocked_today_tickers(self) -> Set[str]:
+        """Return underlyings whose journal carries an unexpired
+        ``pdt_blocked_today=True`` marker from earlier this UTC day.
+
+        Skill 17 §4 — reactive PDT suppression. The marker is written
+        only after Alpaca *actually* responds with code 40310100
+        (pattern day trading protection) on a leg DELETE — see
+        ``_journal_close_event`` PDT detection block. So a ticker
+        only ends up in this set after a real broker response, never
+        speculatively.
+
+        State self-clears at UTC midnight because the marker is
+        date-keyed (``pdt_blocked_date`` field). When today's date
+        moves forward, yesterday's markers stop matching and the
+        ticker is once again eligible for close attempts.
+        """
+        try:
+            jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+            if not jsonl_path or not os.path.isfile(jsonl_path):
+                return set()
+            today_iso = datetime.now(timezone.utc).date().isoformat()
+            blocked: Set[str] = set()
+            with open(jsonl_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("action") != "close_failed":
+                        continue
+                    rs = rec.get("raw_signal") or {}
+                    if not rs.get("pdt_blocked_today"):
+                        continue
+                    if rs.get("pdt_blocked_date") != today_iso:
+                        continue
+                    tk = rec.get("ticker")
+                    if tk:
+                        blocked.add(tk)
+            return blocked
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(
+                "Failed to derive PDT-blocked tickers from journal: %s",
                 exc,
             )
             return set()
