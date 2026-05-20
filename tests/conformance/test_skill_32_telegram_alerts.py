@@ -1,0 +1,164 @@
+"""Conformance test: skill 32 — Telegram operator alerts.
+
+Pins the public-contract surface of TelegramNotifier and the agent
+dedup helper. Behavior tests use monkeypatched _send (no real Telegram
+calls) so they're sandbox-runnable.
+
+Failure modes caught:
+- Someone renames TelegramNotifier or one of the notify_* methods
+- Someone removes the env-gating (is_active) — making the notifier
+  always-on would crash test/CI environments that don't set the env
+- Someone removes the 5-second timeout — making a slow Telegram API
+  capable of tanking the 5-min cycle
+- Someone removes the dedup helper — the operator would receive 78
+  alerts per day for the same stuck DIA position
+"""
+
+from __future__ import annotations
+
+import os
+
+
+def test_skill_32_telegram_notifier_class_exists() -> None:
+    """Skill 32 §3.1: TelegramNotifier is the documented entry point."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    assert callable(TelegramNotifier)
+
+
+def test_skill_32_is_active_requires_both_env_vars() -> None:
+    """Skill 32 §1: notifier opt-in needs BOTH TELEGRAM_BOT_TOKEN and
+    TELEGRAM_CHAT_ID. Missing either → is_active False → no-op.
+
+    Without this, a test environment with only one var set would still
+    try to call Telegram and either crash on bad creds or page someone.
+    """
+    from trading_agent.telegram_notifier import TelegramNotifier
+    # All combinations: only-False should be when both are populated.
+    assert TelegramNotifier(token="", chat_id="").is_active is False
+    assert TelegramNotifier(token="abc", chat_id="").is_active is False
+    assert TelegramNotifier(token="", chat_id="xyz").is_active is False
+    assert TelegramNotifier(token="abc", chat_id="xyz").is_active is True
+
+
+def test_skill_32_three_notify_methods_documented() -> None:
+    """Skill 32 §3.2: the three operator-actionable alert methods exist
+    with the documented names. Renaming any silently breaks the agent's
+    wire-up and CI doesn't catch it without this pin."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    n = TelegramNotifier(token="t", chat_id="c")
+    for method in ("notify_pdt_block", "notify_close_cooldown",
+                   "notify_open_failed_after_close"):
+        assert callable(getattr(n, method, None)), (
+            f"Skill 32 §3.2: TelegramNotifier.{method} must exist. "
+            f"Renaming silently breaks the agent's alert wire-up."
+        )
+
+
+def test_skill_32_send_is_bounded_by_timeout() -> None:
+    """Skill 32 §3.3: every send must use the bounded timeout.
+    A 5-second cap is the boundary between 'alert system' and 'thing
+    that can crash the trade cycle'."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "telegram_notifier.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_TELEGRAM_TIMEOUT_SEC = 5" in src, (
+        "Skill 32 §3.3: the timeout constant must be 5 seconds. "
+        "Larger values risk a slow Telegram API tanking a 5-min cycle."
+    )
+    assert "timeout=_TELEGRAM_TIMEOUT_SEC" in src, (
+        "Skill 32 §3.3: the requests.post call must use the constant. "
+        "Inline numeric timeouts drift; the constant is the contract."
+    )
+
+
+def test_skill_32_send_swallows_exceptions() -> None:
+    """Skill 32 §4: a flaky network / DNS / 502 must never propagate
+    out of _send. The agent's primary job (trade execution) cannot
+    fail because Telegram has a problem."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "telegram_notifier.py").read_text(
+        encoding="utf-8"
+    )
+    # Pin the bare-Exception catch in _send. Specific-class catches
+    # would let weird errors through (e.g. unhashable type from a JSON
+    # serialisation bug). Skill 32 §4 explicitly documents bare-Exception.
+    assert "except Exception" in src, (
+        "Skill 32 §4: _send must catch a bare Exception. Narrower "
+        "catches let a category of errors crash the agent cycle."
+    )
+
+
+def test_skill_32_agent_dedup_helper_exists() -> None:
+    """Skill 32 §3.4: agent must have a journal-derived dedup helper."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def _telegram_alert_already_sent_today" in src, (
+        "Skill 32 §3.4: agent must define _telegram_alert_already_sent_today. "
+        "Without dedup, every cycle re-fires the same alert — operator "
+        "receives 78 messages per day per stuck position."
+    )
+    assert "def _send_telegram_alert" in src, (
+        "Skill 32 §3.4: agent must define _send_telegram_alert wrapper. "
+        "The wrapper combines dedup + send + journal-write into one "
+        "call so individual call sites can't accidentally skip dedup."
+    )
+
+
+def test_skill_32_dedup_is_date_keyed_for_self_clear() -> None:
+    """Skill 32 §3.4: dedup must match on (ticker, alert_type, UTC date)
+    so the state self-clears at midnight."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    helper_start = src.find("def _telegram_alert_already_sent_today")
+    helper_end = src.find("\n    def ", helper_start + 1)
+    helper_body = src[helper_start:helper_end if helper_end > 0 else None]
+    assert 'alert_type' in helper_body, (
+        "Skill 32 §3.4: dedup must distinguish alert_type so a PDT "
+        "block and a cooldown engagement on the same ticker don't "
+        "collide into one alert."
+    )
+    assert 'alert_date' in helper_body, (
+        "Skill 32 §3.4: dedup must compare alert_date for UTC-midnight "
+        "self-clearing. Without it, yesterday's alerts would suppress "
+        "today's repeats."
+    )
+    assert 'today_iso' in helper_body, (
+        "Skill 32 §3.4: dedup must compute today's UTC date for "
+        "comparison. Hardcoding a fixed date would freeze state."
+    )
+
+
+def test_skill_32_notify_messages_carry_manual_action() -> None:
+    """Skill 32 §1: every alert tells the operator WHAT TO DO. Pin the
+    message bodies so a refactor doesn't drop the manual-action half."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    n = TelegramNotifier(token="t", chat_id="c")
+    captured = []
+    n._send = lambda text: (captured.append(text), True)[1]
+
+    n.notify_pdt_block("DIA", "Iron Condor", "strike_proximity",
+                       "$497 near $502", 4554.0)
+    assert "manually" in captured[-1].lower() or "manual" in captured[-1].lower(), (
+        "Skill 32 §1: pdt_block alert must include a manual-action step."
+    )
+
+    n.notify_close_cooldown("DIA", "Iron Condor", 3, 3,
+                            "2026-05-20T16:34:00+00:00", "DIA260612C00502000")
+    assert "manually" in captured[-1].lower() or "manual" in captured[-1].lower(), (
+        "Skill 32 §1: close_cooldown alert must include a manual-action step."
+    )
+
+    n.notify_open_failed_after_close("DIA", "Iron Condor", "timeout")
+    assert "Alpaca" in captured[-1] or "manually" in captured[-1].lower(), (
+        "Skill 32 §1: open_failed_after_close alert must mention "
+        "Alpaca UI verification or manual re-open."
+    )

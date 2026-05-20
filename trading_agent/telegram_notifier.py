@@ -1,0 +1,188 @@
+"""telegram_notifier.py — opt-in Telegram alerter for operator-actionable events.
+
+The notifier is a *thin, defensive* wrapper around Telegram's Bot API
+``sendMessage`` endpoint. Three properties matter most:
+
+  1. **Opt-in via env.** When ``TELEGRAM_BOT_TOKEN`` and
+     ``TELEGRAM_CHAT_ID`` are both set, the notifier is active.
+     Either missing → the notifier is a silent no-op. This keeps
+     existing installs (no env, no token) unchanged.
+
+  2. **Never crashes a cycle.** Every network call is wrapped in a
+     try/except + bounded timeout. A failed alert logs a single
+     warning and returns — the cycle continues. Alpaca-side actions
+     are the source of truth; the alerter is just a paging mechanism.
+
+  3. **Journal-deduped.** The agent passes a ``dedup_key`` derived
+     from ``(ticker, alert_type, UTC date)``. The notifier writes a
+     ``telegram_alert_sent`` row into the journal on success; before
+     re-sending, the agent reads back the journal for matching rows
+     and short-circuits if a same-day alert was already delivered.
+     Prevents pinging the operator 78 times per day for the same
+     stuck DIA position.
+
+Why a separate module and not inline in agent.py
+------------------------------------------------
+The agent has 11 ``journal_kb.log_signal`` call sites and only some
+of them are operator-actionable (close cooldowns, PDT blocks,
+zombie positions). Routing every journal write through Telegram
+would flood the operator. A separate module with explicit ``notify_*``
+methods keeps the alert vocabulary discoverable and reviewable in
+one file rather than scattered across the agent.
+
+Skill 32 documents the full contract surface.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Optional
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+# Bounded so a slow Telegram API can't tank a 5-minute cycle.
+_TELEGRAM_TIMEOUT_SEC = 5
+
+# Public API base — uses the user's bot token from env.
+_TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+
+
+class TelegramNotifier:
+    """Opt-in Telegram alerter for stuck-position / manual-intervention events.
+
+    Construction reads ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``
+    from the environment. If either is missing, ``is_active`` returns
+    False and every ``notify_*`` method is a no-op.
+
+    The notifier is stateless beyond the env config — dedup happens
+    upstream (in agent.py) via the journal. This module just sends
+    the message.
+    """
+
+    def __init__(self,
+                 token: Optional[str] = None,
+                 chat_id: Optional[str] = None):
+        """Args default to env-var lookup; pass explicit values in tests."""
+        self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+    @property
+    def is_active(self) -> bool:
+        """True when both env vars are populated. False otherwise."""
+        return bool(self.token and self.chat_id)
+
+    # ------------------------------------------------------------------
+    # Internal send (single network call, defensive)
+    # ------------------------------------------------------------------
+
+    def _send(self, text: str) -> bool:
+        """POST one message. Returns True on HTTP 200, False otherwise.
+
+        Any exception is caught — the agent never sees a notifier
+        crash. The single WARNING log line lets an operator notice
+        consistent delivery failures without flooding the log.
+        """
+        if not self.is_active:
+            return False
+        url = _TELEGRAM_API.format(token=self.token)
+        # ``parse_mode=HTML`` so the agent can use <b>, <code>, <pre>
+        # for formatting. Telegram's MarkdownV2 has too many escape
+        # rules to be safe across arbitrary error strings.
+        payload = {
+            "chat_id":             self.chat_id,
+            "text":                text,
+            "parse_mode":          "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            resp = requests.post(
+                url, json=payload, timeout=_TELEGRAM_TIMEOUT_SEC,
+            )
+            if resp.status_code == 200:
+                return True
+            logger.warning(
+                "Telegram sendMessage non-200 (%s): %s",
+                resp.status_code, resp.text[:200],
+            )
+            return False
+        except Exception as exc:                                  # noqa: BLE001
+            # Bare Exception: network, JSON, timeout, DNS, anything.
+            # A flaky Telegram API must not cascade into a cycle abort.
+            logger.warning("Telegram send failed: %s", exc)
+            return False
+
+    # ------------------------------------------------------------------
+    # Operator-actionable alert types
+    # ------------------------------------------------------------------
+    # Each public ``notify_*`` returns True on successful delivery, False
+    # otherwise. The agent uses the return value to decide whether to
+    # write a ``telegram_alert_sent`` journal row (which gates future
+    # same-day re-sends — see skill 32 §3.4).
+
+    def notify_pdt_block(self, ticker: str, strategy: str,
+                         exit_signal: str, exit_reason: str,
+                         account_balance: float) -> bool:
+        """Alpaca returned code 40310100 — position is stuck until tomorrow."""
+        text = (
+            f"🚨 <b>PDT block on {ticker}</b>\n"
+            f"Alpaca denied close with code <code>40310100</code> "
+            f"(pattern day trading protection).\n\n"
+            f"<b>Strategy:</b> {strategy}\n"
+            f"<b>Exit signal:</b> {exit_signal}\n"
+            f"<b>Reason:</b> {exit_reason}\n"
+            f"<b>Equity:</b> ${account_balance:,.2f} (sub-$25K = PDT-restricted)\n\n"
+            f"<b>What to do</b>\n"
+            f"• Auto-close is suppressed for {ticker} until UTC midnight.\n"
+            f"• Position is at risk of assignment if held to expiry ITM.\n"
+            f"• To intervene now: close manually in Alpaca's UI (accepts "
+            f"a day-trade flag toward your 4-trade weekly limit).\n"
+            f"• Otherwise the next session's first cycle will close cleanly."
+        )
+        return self._send(text)
+
+    def notify_close_cooldown(self, ticker: str, strategy: str,
+                              streak: int, threshold: int,
+                              cooldown_until_iso: str,
+                              failed_legs: str) -> bool:
+        """Partial-fill streak hit threshold — manual broker action needed."""
+        text = (
+            f"⚠️ <b>Close cooldown engaged on {ticker}</b>\n"
+            f"<b>Strategy:</b> {strategy}\n"
+            f"<b>Streak:</b> {streak}/{threshold} consecutive partial fills\n"
+            f"<b>Auto-close suppressed until:</b> <code>{cooldown_until_iso}</code>\n"
+            f"<b>Failed legs:</b> <code>{failed_legs}</code>\n\n"
+            f"<b>What to do</b>\n"
+            f"• Open Alpaca UI → Positions → {ticker} → Close manually.\n"
+            f"• Or wait for the cooldown to expire and retry will resume.\n"
+            f"• If the position is approaching ITM, prioritise manual close — "
+            f"the cooldown won't help if the strike is breached."
+        )
+        return self._send(text)
+
+    def notify_open_failed_after_close(self, ticker: str,
+                                       strategy: str,
+                                       reason: str) -> bool:
+        """Defensive-roll: close filled but the replacement open failed."""
+        text = (
+            f"🆘 <b>FLAT — open failed after close on {ticker}</b>\n"
+            f"Defensive roll closed the threatened spread but the "
+            f"replacement order failed to submit. The position is "
+            f"<b>flat</b> (no exposure), not doubled.\n\n"
+            f"<b>Strategy:</b> {strategy}\n"
+            f"<b>Open failure reason:</b> <code>{reason[:300]}</code>\n\n"
+            f"<b>What to do</b>\n"
+            f"• Check Alpaca UI: confirm {ticker} has no legs.\n"
+            f"• Re-open manually if desired, or let the next cycle "
+            f"plan a fresh entry.\n"
+            f"• If you suspect a duplicate-submit bug, freeze the agent "
+            f"(⏸ Pause) before investigating to avoid races."
+        )
+        return self._send(text)
+
+
+__all__ = [
+    "TelegramNotifier",
+]

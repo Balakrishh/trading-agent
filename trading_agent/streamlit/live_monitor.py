@@ -1300,6 +1300,133 @@ def _render_closed_today(journal_df: pd.DataFrame) -> None:
             )
 
 
+def _render_stuck_position_banner(journal_df: pd.DataFrame,
+                                  held_tickers: Optional[set] = None) -> None:
+    """Render a red banner at the top of Open Positions when any
+    position is currently stuck in a manual-intervention state.
+
+    Skill 32 §3.5 — aggregates two failure modes:
+
+      1. ``pdt_blocked_today`` markers from same-UTC-day close_failed
+         rows (Alpaca returned code 40310100 — see skill 17 §4)
+      2. ``close_cooldown_until`` rows with future deadlines (3+
+         consecutive partial-fill rejections — see skill 17 §1)
+
+    The banner shows ticker, time-since-detection, recommended
+    manual action. Suppressed when no stuck positions exist (clean
+    state renders nothing, no scrollbar churn).
+
+    Reads from the journal — same source of truth the agent's
+    suppression gates use, so what the banner says == what the
+    agent is actually doing.
+    """
+    if journal_df.empty:
+        return
+
+    # Per-ticker latest stuck-state lookup. We scan all today's rows
+    # and keep the most recent close_failed per ticker, then check
+    # its markers. Cheaper than scanning twice for two state types.
+    today_utc = datetime.now(timezone.utc).date()
+    df = journal_df.copy()
+    if "ticker" in df.columns:
+        df = df[df["ticker"].notna()
+                & (df["ticker"].astype(str).str.strip() != "")]
+    if df.empty or "action" not in df.columns:
+        return
+    df = df[df["action"] == "close_failed"]
+    if df.empty:
+        return
+    df = df.sort_values("timestamp")
+    df = df[df["timestamp"].dt.tz_convert("UTC").dt.date == today_utc]
+    if df.empty:
+        return
+    latest_per_ticker = df.drop_duplicates("ticker", keep="last")
+
+    pdt_rows: List[Tuple[str, pd.Timestamp, Dict]] = []
+    cooldown_rows: List[Tuple[str, pd.Timestamp, datetime, Dict]] = []
+    now_utc = datetime.now(timezone.utc)
+    for _, r in latest_per_ticker.iterrows():
+        ticker = r.get("ticker", "")
+        ts = r.get("timestamp")
+        rs = r.get("raw_signal") or {}
+        if not isinstance(rs, dict):
+            continue
+        # PDT-blocked: rs.pdt_blocked_today=True AND date matches today
+        if (rs.get("pdt_blocked_today") and
+                rs.get("pdt_blocked_date") ==
+                today_utc.isoformat()):
+            pdt_rows.append((ticker, ts, rs))
+            continue
+        # Cooldown active: rs.close_cooldown_until is a future ISO ts
+        cooldown_until_str = rs.get("close_cooldown_until")
+        if cooldown_until_str:
+            try:
+                cooldown_until = datetime.fromisoformat(cooldown_until_str)
+                if cooldown_until.tzinfo is None:
+                    cooldown_until = cooldown_until.replace(
+                        tzinfo=timezone.utc
+                    )
+                if cooldown_until > now_utc:
+                    cooldown_rows.append((ticker, ts, cooldown_until, rs))
+            except (ValueError, TypeError):
+                pass
+
+    if not pdt_rows and not cooldown_rows:
+        return
+
+    # Render a single contiguous red banner. Use raw HTML rather than
+    # st.error() so we can lay out multiple bullet rows with consistent
+    # styling and not waste vertical space.
+    lines: List[str] = [
+        "<div style='background:#ffebee; border-left:4px solid #b71c1c; "
+        "padding:12px 16px; border-radius:6px; margin:8px 0;'>"
+        "<div style='font-weight:600; color:#b71c1c; font-size:1.05em; "
+        "margin-bottom:8px;'>"
+        "🚨 Position(s) need manual intervention</div>"
+        "<div style='font-size:0.92em; color:#3e0000;'>"
+    ]
+
+    for ticker, ts, rs in pdt_rows:
+        strategy = rs.get("strategy", "?")
+        exit_signal = rs.get("exit_signal", "?")
+        time_str = (
+            pd.Timestamp(ts).tz_convert("UTC").strftime("%H:%M UTC")
+            if ts is not None else "?"
+        )
+        lines.append(
+            f"<div style='margin-bottom:6px;'>"
+            f"<b>{ticker}</b> — PDT block (Alpaca code 40310100) at "
+            f"{time_str} · {strategy} · {exit_signal}<br>"
+            f"<span style='color:#7a1f1f;'>"
+            f"&nbsp;&nbsp;Auto-close suppressed until UTC midnight. "
+            f"To intervene now: <b>close manually in Alpaca UI</b> "
+            f"(accepts a day-trade flag).</span>"
+            f"</div>"
+        )
+
+    for ticker, ts, cooldown_until, rs in cooldown_rows:
+        strategy = rs.get("strategy", "?")
+        streak = rs.get("partial_close_streak", "?")
+        threshold = rs.get("partial_close_threshold", "?")
+        mins_left = max(
+            0, int((cooldown_until - now_utc).total_seconds() // 60)
+        )
+        failed_legs_str = rs.get("close_cooldown_reason", "")[:80]
+        lines.append(
+            f"<div style='margin-bottom:6px;'>"
+            f"<b>{ticker}</b> — Close cooldown engaged "
+            f"({streak}/{threshold} partial fills) · {strategy}<br>"
+            f"<span style='color:#7a1f1f;'>"
+            f"&nbsp;&nbsp;Auto-close paused for <b>{mins_left} min</b>. "
+            f"<b>Close manually in Alpaca UI</b> to clear the zombie "
+            f"state and resume agent operation.</span>"
+            f"</div>"
+        )
+
+    lines.append("</div></div>")
+    st.markdown("".join(lines), unsafe_allow_html=True)
+
+
 def _render_close_failures_today(journal_df: pd.DataFrame) -> None:
     """
     Render the "Close Failures Today" expander above Open Positions.
@@ -3090,6 +3217,14 @@ def render_live_monitor() -> None:
     # (empty journal).  See _sweep_orphan_agents for the complementary
     # process-side health check.
     _render_cycle_staleness_beacon(journal_df, loop_running)
+
+    # ── Stuck-position banner (skill 32 §3.5) ─────────────────────────
+    # Aggregates PDT-blocked + close-cooldown state into one prominent
+    # red banner so the operator sees the manual-intervention need
+    # the moment they open the dashboard, without scrolling. Reads
+    # the same journal markers the agent's gates use, so what the
+    # banner says == what the agent is actually doing.
+    _render_stuck_position_banner(journal_df, held_tickers=None)
 
     st.divider()
 

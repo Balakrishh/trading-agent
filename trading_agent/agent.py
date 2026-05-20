@@ -84,6 +84,7 @@ from trading_agent.defensive_roll_evaluator import (
     evaluate_defensive_roll,
 )
 from trading_agent.executor import OrderExecutor
+from trading_agent.telegram_notifier import TelegramNotifier
 from trading_agent.position_monitor import (
     PositionMonitor, ExitSignal, SpreadPosition, IMMEDIATE_EXIT_SIGNALS,
 )
@@ -379,6 +380,20 @@ class TradingAgent:
         self.journal_kb = JournalKB(
             journal_dir, dry_run=bool(config.trading.dry_run)
         )
+
+        # ── Telegram alerter (skill 32, opt-in via env) ──────────────
+        # No-op when TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are unset,
+        # so existing installs without an env tweak see no behavioral
+        # change. Only fires for operator-actionable events (PDT block,
+        # close-cooldown engagement, post-close open failure).
+        self.telegram = TelegramNotifier()
+        if self.telegram.is_active:
+            logger.info("Telegram alerter active (operator notifications enabled)")
+        else:
+            logger.debug(
+                "Telegram alerter inactive — set TELEGRAM_BOT_TOKEN + "
+                "TELEGRAM_CHAT_ID to enable operator notifications"
+            )
 
         # Daily state store (drawdown + exit debounce)
         self.daily_state = DailyStateStore(config.logging.trade_plan_dir)
@@ -1451,6 +1466,22 @@ class TradingAgent:
             ),
         )
 
+        # Operator alert (skill 32) — CRITICAL case: close filled but
+        # open failed, leaving us flat. Always-on (no dedup): this is
+        # a once-per-position emergency that the operator MUST see.
+        if outcome_status == "roll_open_failed":
+            open_reason = (
+                ((roll_result.get("open_result") or {}).get("reason"))
+                or "unspecified — see executor log"
+            )
+            self._send_telegram_alert(
+                ticker=ticker,
+                alert_type="roll_open_failed",
+                send_fn=self.telegram.notify_open_failed_after_close,
+                strategy=spread.strategy_name,
+                reason=str(open_reason),
+            )
+
         return {
             "underlying":  ticker,
             "signal":      spread.exit_signal.value,
@@ -1604,6 +1635,28 @@ class TradingAgent:
                         f"{CLOSE_COOLDOWN_MINUTES} min — manual broker "
                         f"intervention required to clear zombie state."
                     )
+                    # Operator alert (skill 32). Fires once when the
+                    # cooldown FIRST engages today — dedup helper
+                    # ensures subsequent cooldown re-engagements on
+                    # the same ticker the same day don't re-spam.
+                    failed_legs = (
+                        ",".join(
+                            (leg.get("symbol") or "?")
+                            for leg in (leg_results or [])
+                            if isinstance(leg, dict)
+                               and leg.get("status") != "closed"
+                        ) or "—"
+                    )
+                    self._send_telegram_alert(
+                        ticker=spread.underlying,
+                        alert_type="close_cooldown",
+                        send_fn=self.telegram.notify_close_cooldown,
+                        strategy=ctx.get("strategy", spread.strategy_name),
+                        streak=streak,
+                        threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+                        cooldown_until_iso=deadline.isoformat(),
+                        failed_legs=failed_legs,
+                    )
 
                 # ── Reactive PDT-block detection (skill 17 §4) ──────────
                 # If ANY leg's error string contains Alpaca's PDT code
@@ -1646,6 +1699,22 @@ class TradingAgent:
                         "the trading day. Manual close via Alpaca UI is "
                         "still possible if you accept the day-trade flag.",
                         spread.underlying, today_utc,
+                    )
+                    # Operator alert (skill 32). Dedup helper short-circuits
+                    # re-sends so DIA's 18 daily detections collapse to 1
+                    # Telegram message.
+                    self._send_telegram_alert(
+                        ticker=spread.underlying,
+                        alert_type="pdt_block",
+                        send_fn=self.telegram.notify_pdt_block,
+                        strategy=ctx.get("strategy", spread.strategy_name),
+                        exit_signal=ctx.get("exit_signal",
+                                            spread.exit_signal.value),
+                        exit_reason=ctx.get("exit_reason",
+                                            spread.exit_reason),
+                        account_balance=float(
+                            getattr(spread, "account_balance", 0.0) or 0.0
+                        ),
                     )
 
             self.journal_kb.log_signal(
@@ -1721,6 +1790,107 @@ class TradingAgent:
                 exc,
             )
             return set()
+
+    def _telegram_alert_already_sent_today(self, ticker: str,
+                                            alert_type: str) -> bool:
+        """True if a successful Telegram alert for this (ticker, alert_type)
+        was already journalled earlier the same UTC day.
+
+        Skill 32 §3.4 — dedup gate. The first time the agent detects a
+        PDT block on DIA, ``notify_pdt_block`` fires and a
+        ``telegram_alert_sent`` row gets written. Across the next ~78
+        cycles of the same trading day, the same DIA detection would
+        otherwise re-fire the alert — this helper short-circuits the
+        send so the operator sees ONE alert per ticker per day per type.
+
+        Date-keyed → self-clears at UTC midnight, matching the
+        pdt_blocked_today marker's lifetime.
+        """
+        try:
+            jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+            if not jsonl_path or not os.path.isfile(jsonl_path):
+                return False
+            today_iso = datetime.now(timezone.utc).date().isoformat()
+            with open(jsonl_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("action") != "telegram_alert_sent":
+                        continue
+                    if rec.get("ticker") != ticker:
+                        continue
+                    rs = rec.get("raw_signal") or {}
+                    if rs.get("alert_type") != alert_type:
+                        continue
+                    if rs.get("alert_date") != today_iso:
+                        continue
+                    return True
+            return False
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(
+                "Failed to read telegram-alert dedup state: %s", exc,
+            )
+            # Fail-open: if we can't read dedup state, prefer one extra
+            # alert over no alert at all — duplicates are cheap, missing
+            # a stuck-position alert is not.
+            return False
+
+    def _send_telegram_alert(self, ticker: str, alert_type: str,
+                              send_fn, **payload) -> None:
+        """Helper that combines dedup + send + journal write.
+
+        ``send_fn`` is a bound method on ``self.telegram``, called as
+        ``send_fn(**payload)``. Returns nothing — failures are logged
+        but never propagate. On success, writes a journal row so the
+        same (ticker, alert_type, UTC date) won't re-fire today.
+        """
+        if not self.telegram.is_active:
+            return
+        if self._telegram_alert_already_sent_today(ticker, alert_type):
+            logger.debug(
+                "[%s] Telegram %s alert already sent today — skipping",
+                ticker, alert_type,
+            )
+            return
+        try:
+            ok = send_fn(**payload)
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(
+                "[%s] Telegram %s alert raised: %s",
+                ticker, alert_type, exc,
+            )
+            return
+        if not ok:
+            # Notifier already logged the failure detail — don't journal
+            # a fake-success row that would block legitimate retries.
+            return
+        try:
+            today_iso = datetime.now(timezone.utc).date().isoformat()
+            self.journal_kb.log_signal(
+                ticker=ticker,
+                action="telegram_alert_sent",
+                price=self._cached_price(ticker),
+                raw_signal={
+                    "alert_type": alert_type,
+                    "alert_date": today_iso,
+                    **{k: v for k, v in payload.items()
+                       if isinstance(v, (str, int, float, bool))},
+                },
+                notes=f"telegram_alert_sent: {alert_type}",
+            )
+        except Exception as exc:                                # noqa: BLE001
+            # Journal write failure here means dedup will be lossy for
+            # this ticker today — but the alert DID go out, so the
+            # operator isn't blind. Log + continue.
+            logger.warning(
+                "[%s] Telegram alert sent but journal-dedup write failed: %s",
+                ticker, exc,
+            )
 
     def _pdt_blocked_today_tickers(self) -> Set[str]:
         """Return underlyings whose journal carries an unexpired
