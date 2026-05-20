@@ -128,13 +128,27 @@ class JournalKB:
     VALID_RUN_MODES = ("live", "backtest")
 
     def __init__(self, journal_dir: str = "journal_kb",
-                 run_mode: str = "live"):
+                 run_mode: str = "live",
+                 dry_run: bool = False):
+        """``dry_run`` tags every emitted raw_signal with
+        ``mode=DRY-RUN`` (when True) or ``mode=LIVE`` (when False) so
+        the dashboard's mode filter sees consistent values across ALL
+        action paths (rejected, skipped_existing, defensive_roll_*,
+        closed, etc.). Pre-2026-05-20 only the post-risk ``_log_signal``
+        helper tagged mode; the agent's other 10 call sites left it
+        empty, which made the parser default those rows to LIVE
+        regardless of the cycle's actual mode — so a dry-run cycle
+        would surface 2/14 tickers in the LIVE-filtered guardrail
+        grid (only the skipped_existing HOLDING rows that happen to
+        have no mode tag).
+        """
         if run_mode not in self.VALID_RUN_MODES:
             raise ValueError(
                 f"run_mode must be one of {self.VALID_RUN_MODES}; got {run_mode!r}"
             )
         self.journal_dir = journal_dir
         self.run_mode    = run_mode
+        self.dry_run     = dry_run
         os.makedirs(journal_dir, exist_ok=True)
         # Path basename keyed by run_mode so live and backtest never
         # interleave bytes inside the same JSONL stream.
@@ -192,6 +206,21 @@ class JournalKB:
 
         if notes is None:
             notes = self._auto_notes(raw_signal, action)
+
+        # ── Auto-inject mode tag (fixes dashboard mode filter inconsistency) ─
+        # Every raw_signal carries a ``mode`` key so the dashboard's
+        # _guardrail_grid_from_journal mode filter works uniformly across
+        # all action paths. Pre-2026-05-20 only the post-risk ``_log_signal``
+        # in agent.py tagged this; the 10 other call sites (skipped_existing,
+        # defensive_roll_*, cycle warnings, etc.) wrote untagged dicts,
+        # causing those rows to render as LIVE regardless of the cycle's
+        # actual mode. Callers that pass an explicit ``raw_signal["mode"]``
+        # win (back-compat with the existing ``_log_signal`` writer).
+        if isinstance(raw_signal, dict) and "mode" not in raw_signal:
+            raw_signal = {
+                "mode": "DRY-RUN" if self.dry_run else "LIVE",
+                **raw_signal,
+            }
 
         # ── Rejection-spam dedup gate ────────────────────────────────────
         # Compute a per-ticker signature; on consecutive matches, suppress

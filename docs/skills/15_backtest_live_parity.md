@@ -231,4 +231,4 @@ def _preview_decision(ticker, preset_name, side="bull_put", ...):
 
 ---
 
-*Last verified against repo HEAD on 2026-05-15.*
+*Last verified against repo HEAD on 2026-05-20.*

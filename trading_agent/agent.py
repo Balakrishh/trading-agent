@@ -371,7 +371,14 @@ class TradingAgent:
             if config.intelligence and config.intelligence.journal_dir
             else "trade_journal"
         )
-        self.journal_kb = JournalKB(journal_dir)
+        # Pass dry_run so JournalKB auto-tags every raw_signal with the
+        # cycle's actual mode — fixes the dashboard mode-filter
+        # inconsistency that surfaced as "only 2 ETFs in guardrail grid"
+        # when a dry-run cycle wrote untagged skipped_existing rows
+        # alongside DRY-RUN-tagged rejected rows.
+        self.journal_kb = JournalKB(
+            journal_dir, dry_run=bool(config.trading.dry_run)
+        )
 
         # Daily state store (drawdown + exit debounce)
         self.daily_state = DailyStateStore(config.logging.trade_plan_dir)
