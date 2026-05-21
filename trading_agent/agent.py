@@ -1934,10 +1934,23 @@ class TradingAgent:
                               send_fn, **payload) -> None:
         """Helper that combines dedup + send + journal write.
 
-        ``send_fn`` is a bound method on ``self.telegram``, called as
-        ``send_fn(**payload)``. Returns nothing — failures are logged
-        but never propagate. On success, writes a journal row so the
-        same (ticker, alert_type, UTC date) won't re-fire today.
+        ``send_fn`` is a bound method on ``self.telegram``. Returns
+        nothing — failures are logged but never propagate. On
+        success, writes a journal row so the same
+        ``(ticker, alert_type, UTC date)`` won't re-fire today.
+
+        Ticker propagation (2026-05-21 hotfix). Five of the six
+        ``notify_*`` methods take ``ticker`` as a required first
+        positional/named arg; the sixth (``notify_eod_summary``)
+        uses ``ticker="__eod__"`` as a sentinel and doesn't accept
+        it in its signature. We introspect ``send_fn``'s parameters
+        and pass ``ticker=ticker`` only when the signature accepts
+        it. Pre-hotfix the helper called ``send_fn(**payload)``
+        unconditionally — ``notify_position_closed("DIA", ...)``
+        failed with ``TypeError: missing 1 required positional
+        argument: 'ticker'`` on every real close. Caught by the
+        exception handler, silently lost the alert. See pi
+        2026-05-21 09:34:19 trace.
         """
         if not self.telegram.is_active:
             return
@@ -1948,7 +1961,15 @@ class TradingAgent:
             )
             return
         try:
-            ok = send_fn(**payload)
+            import inspect
+            try:
+                sig_params = inspect.signature(send_fn).parameters
+            except (TypeError, ValueError):
+                sig_params = {}
+            call_kwargs = dict(payload)
+            if "ticker" in sig_params:
+                call_kwargs["ticker"] = ticker
+            ok = send_fn(**call_kwargs)
         except Exception as exc:                                # noqa: BLE001
             logger.warning(
                 "[%s] Telegram %s alert raised: %s",

@@ -404,6 +404,51 @@ def test_skill_32_eod_gated_on_post_market_or_weekend() -> None:
     )
 
 
+def test_skill_32_send_telegram_alert_forwards_ticker() -> None:
+    """Skill 32 §3.4 (2026-05-21 hotfix): _send_telegram_alert must
+    forward the ``ticker`` arg into ``send_fn`` when the underlying
+    notify_* signature accepts it.
+
+    Pi-deploy regression: notify_position_closed("DIA", ...) was
+    failing with "TypeError: missing 1 required positional argument:
+    'ticker'" because _send_telegram_alert consumed ticker as its
+    own named param but didn't propagate it. Every real broker
+    close silently lost its alert via the exception handler.
+
+    Pin the introspection-based pass-through so the next refactor
+    can't drop ticker for the position-closed path AND
+    notify_eod_summary (which doesn't accept ticker) keeps working.
+    """
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    helper_start = src.find("def _send_telegram_alert")
+    helper_end = src.find("\n    def ", helper_start + 1)
+    body = src[helper_start:helper_end if helper_end > 0 else None]
+    # The helper must inspect send_fn's signature and conditionally
+    # add ticker. Plain ``send_fn(**payload)`` (without ticker
+    # propagation) drops the arg silently.
+    assert "inspect.signature(send_fn)" in body, (
+        "Skill 32 §3.4: _send_telegram_alert must introspect "
+        "send_fn's signature to decide whether to pass ticker. "
+        "Pre-hotfix the helper silently dropped ticker for every "
+        "notify_* method that required it as positional arg."
+    )
+    assert '"ticker" in sig_params' in body, (
+        "Skill 32 §3.4: ticker propagation must be conditional on "
+        "the signature accepting it — notify_eod_summary doesn't "
+        "have ticker in its kwargs-only signature."
+    )
+    assert 'call_kwargs["ticker"] = ticker' in body, (
+        "Skill 32 §3.4: the helper must inject ticker into the "
+        "kwargs passed to send_fn. Without this, position_closed "
+        "alerts raise TypeError and the exception handler swallows "
+        "them — observed on pi 2026-05-21 09:34:19."
+    )
+
+
 def test_skill_32_lifecycle_alerts_deduped_per_event() -> None:
     """Skill 32 §3.6 hotfix: position_opened and position_closed alerts
     MUST go through the dedup helper. Without dedup, dry-run mode (or
