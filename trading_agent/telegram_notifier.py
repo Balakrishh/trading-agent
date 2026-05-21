@@ -53,9 +53,23 @@ _TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 class TelegramNotifier:
     """Opt-in Telegram alerter for stuck-position / manual-intervention events.
 
-    Construction reads ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``
-    from the environment. If either is missing, ``is_active`` returns
-    False and every ``notify_*`` method is a no-op.
+    Two channels, both env-gated, with fallback:
+
+      * **info channel** — `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+        Carries lifecycle events (position open, position close,
+        end-of-day summary). The "quiet" channel.
+
+      * **error channel** — `TELEGRAM_ERROR_BOT_TOKEN` /
+        `TELEGRAM_ERROR_CHAT_ID`. Carries operator-actionable alerts
+        (PDT block, close cooldown engaged, FLAT after close-then-
+        open failure). The "act now" channel.
+
+    Fallback rule: if either error env var is unset, the error
+    channel reuses the info channel's credentials. This keeps the
+    single-bot deployment unchanged for users who haven't created
+    a second bot. Set both error env vars to route errors to a
+    distinct bot; leave them blank to keep everything on the info
+    bot.
 
     The notifier is stateless beyond the env config — dedup happens
     upstream (in agent.py) via the journal. This module just sends
@@ -64,35 +78,79 @@ class TelegramNotifier:
 
     def __init__(self,
                  token: Optional[str] = None,
-                 chat_id: Optional[str] = None):
-        """Args default to env-var lookup; pass explicit values in tests."""
+                 chat_id: Optional[str] = None,
+                 error_token: Optional[str] = None,
+                 error_chat_id: Optional[str] = None):
+        """Args default to env-var lookup; pass explicit values in tests.
+
+        Error-channel credentials fall back to the info channel when
+        not supplied (preserves single-bot behavior for existing
+        deployments).
+        """
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+        # Error-channel credentials. Explicit override → env var →
+        # fallback to info channel. Each component falls back
+        # independently so partial config (one var set, one blank)
+        # still works.
+        _env_err_token = os.environ.get("TELEGRAM_ERROR_BOT_TOKEN", "").strip()
+        _env_err_chat  = os.environ.get("TELEGRAM_ERROR_CHAT_ID", "").strip()
+        self.error_token = error_token or _env_err_token or self.token
+        self.error_chat_id = (
+            error_chat_id or _env_err_chat or self.chat_id
+        )
 
     @property
     def is_active(self) -> bool:
-        """True when both env vars are populated. False otherwise."""
-        return bool(self.token and self.chat_id)
+        """True if AT LEAST ONE channel has both credentials populated.
+
+        The agent's ``_send_telegram_alert`` gates on this — when
+        active, individual method calls choose their channel and may
+        still no-op if THAT channel is empty (rare partial-config
+        edge case)."""
+        return bool(
+            (self.token and self.chat_id)
+            or (self.error_token and self.error_chat_id)
+        )
+
+    @property
+    def error_channel_distinct(self) -> bool:
+        """True iff the error channel uses different credentials from
+        the info channel — useful for the dashboard / SDD diagnostics
+        to confirm the two-bot setup is actually in effect."""
+        return (
+            (self.error_token != self.token)
+            or (self.error_chat_id != self.chat_id)
+        )
 
     # ------------------------------------------------------------------
     # Internal send (single network call, defensive)
     # ------------------------------------------------------------------
 
-    def _send(self, text: str) -> bool:
+    def _send(self, text: str, *, channel: str = "info") -> bool:
         """POST one message. Returns True on HTTP 200, False otherwise.
+
+        ``channel`` is ``"info"`` (default) or ``"error"`` — routes
+        to the matching token/chat_id pair. If the chosen channel's
+        credentials aren't populated, returns False without raising
+        (the caller treats False as "alert not delivered").
 
         Any exception is caught — the agent never sees a notifier
         crash. The single WARNING log line lets an operator notice
         consistent delivery failures without flooding the log.
         """
-        if not self.is_active:
+        if channel == "error":
+            token, chat_id = self.error_token, self.error_chat_id
+        else:
+            token, chat_id = self.token, self.chat_id
+        if not (token and chat_id):
             return False
-        url = _TELEGRAM_API.format(token=self.token)
+        url = _TELEGRAM_API.format(token=token)
         # ``parse_mode=HTML`` so the agent can use <b>, <code>, <pre>
         # for formatting. Telegram's MarkdownV2 has too many escape
         # rules to be safe across arbitrary error strings.
         payload = {
-            "chat_id":             self.chat_id,
+            "chat_id":             chat_id,
             "text":                text,
             "parse_mode":          "HTML",
             "disable_web_page_preview": True,
@@ -104,14 +162,16 @@ class TelegramNotifier:
             if resp.status_code == 200:
                 return True
             logger.warning(
-                "Telegram sendMessage non-200 (%s): %s",
-                resp.status_code, resp.text[:200],
+                "Telegram sendMessage non-200 (%s, channel=%s): %s",
+                resp.status_code, channel, resp.text[:200],
             )
             return False
         except Exception as exc:                                  # noqa: BLE001
             # Bare Exception: network, JSON, timeout, DNS, anything.
             # A flaky Telegram API must not cascade into a cycle abort.
-            logger.warning("Telegram send failed: %s", exc)
+            logger.warning(
+                "Telegram send failed (channel=%s): %s", channel, exc,
+            )
             return False
 
     # ------------------------------------------------------------------
@@ -121,6 +181,12 @@ class TelegramNotifier:
     # otherwise. The agent uses the return value to decide whether to
     # write a ``telegram_alert_sent`` journal row (which gates future
     # same-day re-sends — see skill 32 §3.4).
+
+    # ── ERROR-class alerts (route to error channel) ─────────────────
+    # These wake the operator. Their content is "something needs your
+    # attention NOW or before tomorrow's open." Telegram bot:
+    # TELEGRAM_ERROR_BOT_TOKEN / TELEGRAM_ERROR_CHAT_ID, fallback to
+    # the info bot if those env vars aren't set.
 
     def notify_pdt_block(self, ticker: str, strategy: str,
                          exit_signal: str, exit_reason: str,
@@ -141,7 +207,7 @@ class TelegramNotifier:
             f"a day-trade flag toward your 4-trade weekly limit).\n"
             f"• Otherwise the next session's first cycle will close cleanly."
         )
-        return self._send(text)
+        return self._send(text, channel="error")
 
     def notify_close_cooldown(self, ticker: str, strategy: str,
                               streak: int, threshold: int,
@@ -160,7 +226,7 @@ class TelegramNotifier:
             f"• If the position is approaching ITM, prioritise manual close — "
             f"the cooldown won't help if the strike is breached."
         )
-        return self._send(text)
+        return self._send(text, channel="error")
 
     def notify_open_failed_after_close(self, ticker: str,
                                        strategy: str,
@@ -180,17 +246,21 @@ class TelegramNotifier:
             f"• If you suspect a duplicate-submit bug, freeze the agent "
             f"(⏸ Pause) before investigating to avoid races."
         )
-        return self._send(text)
+        return self._send(text, channel="error")
 
-    # ------------------------------------------------------------------
-    # Position lifecycle alerts (skill 32 §3.6)
-    # ------------------------------------------------------------------
-    # These fire once per real position event (open submission, close
-    # completion). Each event is uniquely identifiable in the journal
-    # (run_id on open, timestamp+exit_signal on close), so no per-day
-    # dedup is needed — the agent calls these inline with the journal
-    # write that records the event, so the same event can't fire twice
-    # within one cycle.
+    # ── INFO-class alerts (route to info channel) ───────────────────
+    # These are passive notifications — what the bot did and how it
+    # turned out. Default Telegram bot: TELEGRAM_BOT_TOKEN /
+    # TELEGRAM_CHAT_ID. Operators don't need to act on these
+    # immediately; they're for awareness + EOD recap.
+    #
+    # Position lifecycle (skill 32 §3.6): fire once per real position
+    # event (open submission, close completion). Each event is
+    # uniquely identifiable in the journal (run_id on open,
+    # timestamp+exit_signal on close), so no per-day dedup is needed
+    # — the agent calls these inline with the journal write that
+    # records the event, so the same event can't fire twice within
+    # one cycle.
 
     def notify_position_opened(self, ticker: str, strategy: str,
                                regime: str, net_credit: float,
@@ -211,7 +281,7 @@ class TelegramNotifier:
             f"<b>Why</b>\n"
             f"<i>{thesis[:400]}</i>"
         )
-        return self._send(text)
+        return self._send(text, channel="info")
 
     def notify_eod_summary(self, *,
                            date_label: str,
@@ -329,7 +399,7 @@ class TelegramNotifier:
                 "<i>Close in Alpaca UI tonight or accept day-trade flag.</i>"
             )
 
-        return self._send("\n".join(lines))
+        return self._send("\n".join(lines), channel="info")
 
     def notify_position_closed(self, ticker: str, strategy: str,
                                exit_signal: str, exit_reason: str,
@@ -369,7 +439,7 @@ class TelegramNotifier:
             f"<b>Original credit:</b> ${original_credit:.2f}  ·  "
             f"<b>Max loss:</b> ${max_loss:.2f}"
         )
-        return self._send(text)
+        return self._send(text, channel="info")
 
 
 __all__ = [

@@ -143,7 +143,7 @@ def test_skill_32_notify_messages_carry_manual_action() -> None:
     from trading_agent.telegram_notifier import TelegramNotifier
     n = TelegramNotifier(token="t", chat_id="c")
     captured = []
-    n._send = lambda text: (captured.append(text), True)[1]
+    n._send = lambda text, *, channel="info": (captured.append(text), True)[1]
 
     n.notify_pdt_block("DIA", "Iron Condor", "strike_proximity",
                        "$497 near $502", 4554.0)
@@ -182,7 +182,7 @@ def test_skill_32_open_alert_body_carries_essentials() -> None:
     from trading_agent.telegram_notifier import TelegramNotifier
     n = TelegramNotifier(token="t", chat_id="c")
     captured = []
-    n._send = lambda text: (captured.append(text), True)[1]
+    n._send = lambda text, *, channel="info": (captured.append(text), True)[1]
     n.notify_position_opened(
         ticker="XLF", strategy="Bull Put Spread", regime="sideways",
         net_credit=0.47, max_loss=4.53, spread_width=5.0,
@@ -204,7 +204,7 @@ def test_skill_32_close_alert_body_distinguishes_profit_loss() -> None:
     from trading_agent.telegram_notifier import TelegramNotifier
     n = TelegramNotifier(token="t", chat_id="c")
     captured = []
-    n._send = lambda text: (captured.append(text), True)[1]
+    n._send = lambda text, *, channel="info": (captured.append(text), True)[1]
     # Profit close
     n.notify_position_closed(
         ticker="XLF", strategy="Bull Put Spread",
@@ -225,6 +225,90 @@ def test_skill_32_close_alert_body_distinguishes_profit_loss() -> None:
     )
     assert "+$0.24" in profit_msg or "+0.24" in profit_msg
     assert "$108" in loss_msg or "108" in loss_msg
+
+
+def test_skill_32_two_channel_routing() -> None:
+    """Skill 32 §3.1 (2026-05-21): error-class alerts route to channel
+    'error', lifecycle-class alerts route to channel 'info'. Pin the
+    routing so a refactor can't silently re-merge the two channels
+    (defeating the purpose of having a separate error bot)."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    # Construct with both channels distinct so we can observe routing
+    n = TelegramNotifier(token="info_t", chat_id="info_c",
+                        error_token="err_t", error_chat_id="err_c")
+    routed = []
+    n._send = lambda text, *, channel="info": (
+        routed.append(channel), True
+    )[1]
+
+    # ERROR-class
+    n.notify_pdt_block("DIA", "Iron Condor", "strike_proximity",
+                       "?", 4554.0)
+    n.notify_close_cooldown("DIA", "Iron Condor", 3, 3, "?", "?")
+    n.notify_open_failed_after_close("DIA", "Iron Condor", "?")
+    # INFO-class
+    n.notify_position_opened("XLF", "Bull Put", "sideways",
+                             0.47, 4.53, 5.0, "2026-06-05", "$50", "?")
+    n.notify_position_closed("XLF", "Bull Put", "profit_target",
+                             "?", 0.24, 0.47, 4.53)
+    n.notify_eod_summary(
+        date_label="?", account_balance=0.0, starting_balance=None,
+        opens_today=[], closes_today=[], realized_pl_today=0.0,
+        unrealized_pl_today=0.0, cycles_today=0, errors_today=0,
+        stuck_tickers=[],
+    )
+
+    expected = ["error", "error", "error", "info", "info", "info"]
+    assert routed == expected, (
+        f"Skill 32 §3.1: channel routing drifted. Expected "
+        f"{expected}, got {routed}. The three error-class methods "
+        f"(notify_pdt_block, notify_close_cooldown, "
+        f"notify_open_failed_after_close) must route to channel="
+        f"'error'; the three info-class methods (notify_position_"
+        f"opened/closed, notify_eod_summary) must route to "
+        f"channel='info'."
+    )
+
+
+def test_skill_32_error_channel_falls_back_to_info() -> None:
+    """Skill 32 §3.1: when error env vars are unset, the error channel
+    inherits the info channel's credentials. Single-bot deployments
+    must continue working unchanged."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    # Only the info channel is configured
+    n = TelegramNotifier(token="info_t", chat_id="info_c")
+    assert n.token == "info_t" and n.chat_id == "info_c"
+    assert n.error_token == "info_t", (
+        "Skill 32 §3.1: error_token must fall back to info token when "
+        "no error env var is set. Without fallback, single-bot users "
+        "would silently lose error alerts."
+    )
+    assert n.error_chat_id == "info_c", (
+        "Skill 32 §3.1: error_chat_id must fall back to info chat_id."
+    )
+    assert n.error_channel_distinct is False, (
+        "Skill 32 §3.1: error_channel_distinct must be False when "
+        "credentials match — informs the dashboard whether two bots "
+        "are actually wired."
+    )
+
+
+def test_skill_32_is_active_covers_either_channel() -> None:
+    """Skill 32 §3.1: is_active = True when AT LEAST ONE channel is
+    configured. Otherwise an error-only deployment couldn't fire alerts."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    # Error-only (no info)
+    n = TelegramNotifier(token="", chat_id="",
+                        error_token="err_t", error_chat_id="err_c")
+    assert n.is_active is True, (
+        "Skill 32 §3.1: is_active must be True even when only the "
+        "error channel is configured. Otherwise _send_telegram_alert "
+        "would short-circuit before any alert fires."
+    )
+    # Fully unconfigured
+    n2 = TelegramNotifier(token="", chat_id="",
+                         error_token="", error_chat_id="")
+    assert n2.is_active is False
 
 
 def test_skill_32_eod_summary_method_exists() -> None:
@@ -255,7 +339,7 @@ def test_skill_32_eod_body_aggregates_essentials() -> None:
     from trading_agent.telegram_notifier import TelegramNotifier
     n = TelegramNotifier(token="t", chat_id="c")
     captured = []
-    n._send = lambda text: (captured.append(text), True)[1]
+    n._send = lambda text, *, channel="info": (captured.append(text), True)[1]
     n.notify_eod_summary(
         date_label="Wednesday 2026-05-20",
         account_balance=4550.05,

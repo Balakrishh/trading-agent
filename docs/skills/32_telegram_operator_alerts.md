@@ -42,15 +42,32 @@ The agent calls `_send_telegram_alert` which combines (a) `is_active`, (b) `not 
 
 ## 3. Reference Python Implementation
 
-### 3.1 Notifier construction (env-gated)
+### 3.1 Notifier construction (env-gated, two channels)
 
 ```python
 # trading_agent/telegram_notifier.py
 class TelegramNotifier:
-    def __init__(self, token=None, chat_id=None):
+    def __init__(self, token=None, chat_id=None,
+                 error_token=None, error_chat_id=None):
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+        # Error channel: explicit override → env var → fallback to info
+        _env_err_token = os.environ.get("TELEGRAM_ERROR_BOT_TOKEN", "").strip()
+        _env_err_chat  = os.environ.get("TELEGRAM_ERROR_CHAT_ID", "").strip()
+        self.error_token = error_token or _env_err_token or self.token
+        self.error_chat_id = (
+            error_chat_id or _env_err_chat or self.chat_id
+        )
 ```
+
+Two-channel routing (added 2026-05-21):
+
+| Channel | Env vars | Methods routed here |
+|---|---|---|
+| **info** (lifecycle) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | `notify_position_opened`, `notify_position_closed`, `notify_eod_summary` |
+| **error** (operator-actionable) | `TELEGRAM_ERROR_BOT_TOKEN`, `TELEGRAM_ERROR_CHAT_ID` (fallback to info if blank) | `notify_pdt_block`, `notify_close_cooldown`, `notify_open_failed_after_close` |
+
+Each `_send` call takes a `channel="info"|"error"` keyword to select the credential pair. When the error channel's env vars are unset, both `error_token` and `error_chat_id` fall back to the info channel's values — single-bot deployments work unchanged.
 
 ### 3.2 The three operator-actionable alerts
 
@@ -195,4 +212,4 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 
 ---
 
-*Last verified against repo HEAD on 2026-05-20.*
+*Last verified against repo HEAD on 2026-05-21 (two-channel routing: error bot + info bot with single-bot fallback).*
