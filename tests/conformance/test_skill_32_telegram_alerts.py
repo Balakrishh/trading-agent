@@ -311,6 +311,41 @@ def test_skill_32_is_active_covers_either_channel() -> None:
     assert n2.is_active is False
 
 
+def test_skill_32_eod_dedup_keyed_by_et_trading_date() -> None:
+    """Skill 32 §3.8 (2026-05-21 hotfix): _maybe_send_eod_summary must
+    embed the ET trading session date into the dedup ``alert_type``
+    string so Wed-evening and Thu-afternoon recaps use distinct keys
+    even when they share a UTC date.
+
+    Pi observation: Wed's recap fired 23:41 ET = 03:41 UTC Thu →
+    journal row's alert_date=2026-05-21. Thu's recap at 16:43 ET =
+    20:43 UTC also computes today_iso=2026-05-21. UTC dedup
+    falsely matched → Thu's recap silently suppressed. ET-keyed
+    alert_type breaks the collision."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    helper_start = src.find("def _maybe_send_eod_summary")
+    helper_end = src.find("\n    def ", helper_start + 1)
+    body = src[helper_start:helper_end if helper_end > 0 else None]
+    # The trading-session date string must be computed and embedded
+    # in the alert_type passed to _send_telegram_alert.
+    assert "trading_session_date" in body, (
+        "Skill 32 §3.8: _maybe_send_eod_summary must compute "
+        "trading_session_date (ET) and embed it in the dedup key. "
+        "Without this, Wed-evening and Thu-afternoon recaps "
+        "collide on the same UTC date."
+    )
+    assert 'f"eod_summary:{trading_session_date}"' in body, (
+        "Skill 32 §3.8: alert_type must be formatted as "
+        "f'eod_summary:{trading_session_date}' so the dedup helper "
+        "(which matches by alert_type) sees distinct keys per "
+        "ET trading session."
+    )
+
+
 def test_skill_32_eod_summary_method_exists() -> None:
     """Skill 32 §3.8: notify_eod_summary is the end-of-day recap entry
     point. Pin the name + signature shape (keyword-only after *) so a

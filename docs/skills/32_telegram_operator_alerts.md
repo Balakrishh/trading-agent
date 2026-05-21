@@ -176,8 +176,10 @@ def notify_eod_summary(self, *,
 Fired once per trading day from the agent's after-hours shutdown path. Only sends when:
 
 - the agent is post-16:00 ET on a weekday (or any time on weekend so Friday's recap goes out)
-- the dedup helper confirms no `eod_summary` alert has been journalled today (sentinel ticker `__eod__`)
+- the dedup helper confirms no `eod_summary` alert has been journalled for this ET trading session (see ET-keyed dedup note below)
 - today's journal contains at least one `submitted` or `closed` row (empty day → no alert)
+
+**ET-keyed dedup (2026-05-21 hotfix).** The dedup helper compares by UTC date, but the EOD recap fires after-hours and can cross UTC midnight before crossing ET midnight. Wed's recap fires at 23:41 ET Wed = 03:41 UTC Thu → journal records `alert_date=2026-05-21` (UTC). Without correction, Thursday afternoon's intended recap (16:43 ET Thu = 20:43 UTC) also computes `today_iso=2026-05-21` → false dedup match → suppressed silently. Fix: `_maybe_send_eod_summary` embeds the ET trading session date into the `alert_type` string (`eod_summary:2026-05-20` for Wed's recap, `eod_summary:2026-05-21` for Thursday's). Different keys → no collision regardless of UTC alignment.
 
 ```python
 # trading_agent/agent.py:_maybe_send_eod_summary

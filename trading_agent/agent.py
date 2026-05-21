@@ -2138,10 +2138,21 @@ class TradingAgent:
             every other notify_*)
           * AFTER today's market close in ET (post-16:00 weekday, or
             any time on weekend so Friday's recap goes out)
-          * when no same-day eod_summary alert has been journalled
-            (dedup via the existing helper)
+          * when no eod_summary alert has been journalled for THIS
+            ET trading date (dedup helper compares UTC dates, but
+            we want ET trading-session uniqueness — see hotfix note)
           * when today's journal contains at least one open or close
             (no trades → no summary worth sending)
+
+        EOD-specific dedup (2026-05-21 hotfix). Wednesday's recap
+        fires at 23:41 ET Wed = 03:41 UTC Thu — the journal row
+        records ``alert_date=2026-05-21`` (UTC). Without further
+        handling, Thursday's intended recap at 16:43 ET Thu =
+        20:43 UTC also computes ``today_iso=2026-05-21`` (UTC)
+        → false dedup match → Thursday's recap silently
+        suppressed. Fix: embed the ET trading session date into
+        the ``alert_type`` string so Wed and Thu use distinct
+        dedup keys regardless of UTC alignment.
         """
         if not self.telegram.is_active:
             return
@@ -2153,8 +2164,15 @@ class TradingAgent:
         # Pre-market on weekdays: skip (the day hasn't happened yet).
         if is_weekday and now_et.hour < 16:
             return
+        # ET trading session date embedded in the alert_type so the
+        # dedup helper (which already matches by alert_type) treats
+        # each trading day as a unique key. Wed's row is
+        # alert_type="eod_summary:2026-05-20"; Thu's intended row
+        # is "eod_summary:2026-05-21" — no collision possible.
+        trading_session_date = now_et.date().isoformat()
+        eod_alert_type = f"eod_summary:{trading_session_date}"
         if self._telegram_alert_already_sent_today(
-            ticker="__eod__", alert_type="eod_summary",
+            ticker="__eod__", alert_type=eod_alert_type,
         ):
             return
 
@@ -2166,7 +2184,7 @@ class TradingAgent:
 
         self._send_telegram_alert(
             ticker="__eod__",
-            alert_type="eod_summary",
+            alert_type=eod_alert_type,
             send_fn=self.telegram.notify_eod_summary,
             date_label=now_et.strftime("%A %Y-%m-%d"),
             account_balance=float(summary["last_balance"] or 0.0),
