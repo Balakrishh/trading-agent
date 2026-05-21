@@ -39,6 +39,12 @@ def _stub_agent(journal_path: str):
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = journal_path
     agent._cached_price = MagicMock(return_value=100.0)
+    # ``telegram`` is set in TradingAgent.__init__, not visible to
+    # MagicMock(spec=...). _journal_close_event dereferences
+    # self.telegram.notify_close_cooldown at the cooldown-engaged
+    # branch — install a permissive mock so the path stays crash-free.
+    agent.telegram = MagicMock()
+    agent.telegram.is_active = False
 
     # Bind the real methods we're testing.
     agent._close_failed_streak_within_window = types.MethodType(

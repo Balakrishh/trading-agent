@@ -53,6 +53,14 @@ def _stub_agent(journal_path: str = ""):
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = journal_path
     agent._cached_price = MagicMock(return_value=100.0)
+    # ``telegram`` is an instance attribute (set in TradingAgent.__init__)
+    # and MagicMock(spec=TradingAgent) only mirrors class attributes —
+    # _journal_close_event dereferences self.telegram.notify_close_cooldown
+    # at the cooldown-engaged branch, so we install a permissive mock
+    # to keep that path crash-free. Added 2026-05-21 with the operator-
+    # alert hooks (skill 32 §3.4 wire-up inside _journal_close_event).
+    agent.telegram = MagicMock()
+    agent.telegram.is_active = False
 
     # Bind only the helpers we test here.
     agent._tickers_opened_today = types.MethodType(
@@ -174,8 +182,12 @@ def test_journal_close_event_uses_close_failed_action_on_partial_fill():
     assert "SPY260530C00550000" in call.kwargs["notes"]
 
 
-def test_journal_close_event_dry_run_uses_closed_action():
-    """Dry run is a sentinel for a complete-by-design close → 'closed'."""
+def test_journal_close_event_dry_run_uses_dry_run_close_action():
+    """Skill 19 §4 (2026-05-21 hotfix): dry-run synthetic close writes
+    ``action="dry_run_close"`` (not ``"closed"``) so the dashboard's
+    realized-P&L sum doesn't accumulate phantom losses from a
+    stuck-in-dry-run position re-firing every cycle. See the pi
+    -$2,860 incident — 22 phantom rows × -$130 mark per cycle."""
     _, path = _write_journal([])
     agent = _stub_agent(path)
     spread = MagicMock(underlying="QQQ")
@@ -185,4 +197,10 @@ def test_journal_close_event_dry_run_uses_closed_action():
         leg_results=[], fill_status="dry_run", dry_run=True,
     )
     call = agent.journal_kb.log_signal.call_args
-    assert call.kwargs["action"] == "closed"
+    assert call.kwargs["action"] == "dry_run_close", (
+        f"Skill 19 §4: dry-run close must journal action='dry_run_close', "
+        f"NOT 'closed'. Got {call.kwargs['action']!r}."
+    )
+    # Note string still references the strategy for operator visibility
+    assert "dry_run_close" in call.kwargs["notes"]
+    assert "Iron Condor" in call.kwargs["notes"]

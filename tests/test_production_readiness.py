@@ -378,6 +378,11 @@ def test_close_failed_row_carries_streak_pre_cooldown(tmp_path):
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
+    # ``telegram`` is an instance attribute that MagicMock(spec=...)
+    # doesn't expose. Provide a permissive mock so the cooldown-
+    # engaged branch in _journal_close_event can dereference it.
+    agent.telegram = MagicMock()
+    agent.telegram.is_active = False
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
     )
@@ -441,6 +446,11 @@ def test_close_failed_row_carries_cooldown_when_locked(tmp_path):
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
+    # ``telegram`` is an instance attribute that MagicMock(spec=...)
+    # doesn't expose. Provide a permissive mock so the cooldown-
+    # engaged branch in _journal_close_event can dereference it.
+    agent.telegram = MagicMock()
+    agent.telegram.is_active = False
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
     )
@@ -488,6 +498,11 @@ def test_closed_row_does_not_carry_cooldown_fields(tmp_path):
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
+    # ``telegram`` is an instance attribute that MagicMock(spec=...)
+    # doesn't expose. Provide a permissive mock so the cooldown-
+    # engaged branch in _journal_close_event can dereference it.
+    agent.telegram = MagicMock()
+    agent.telegram.is_active = False
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
     )
