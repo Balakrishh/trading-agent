@@ -139,6 +139,36 @@ Groups today's `defensive_roll_evaluated` rows per ticker by their `decision` fi
 - `18× ⛔ credit-neg` — all 18 declined for the same reason
 - `5× ✅ / 3× ⛔` — some rolled, some declined
 
+### 3.8 End-of-day recap (added 2026-05-20)
+
+```python
+# trading_agent/telegram_notifier.py
+def notify_eod_summary(self, *,
+                       date_label: str,
+                       account_balance: float,
+                       starting_balance: Optional[float],
+                       opens_today: list,
+                       closes_today: list,
+                       realized_pl_today: float,
+                       unrealized_pl_today: float,
+                       cycles_today: int,
+                       errors_today: int,
+                       stuck_tickers: list) -> bool:
+```
+
+Fired once per trading day from the agent's after-hours shutdown path. Only sends when:
+
+- the agent is post-16:00 ET on a weekday (or any time on weekend so Friday's recap goes out)
+- the dedup helper confirms no `eod_summary` alert has been journalled today (sentinel ticker `__eod__`)
+- today's journal contains at least one `submitted` or `closed` row (empty day → no alert)
+
+```python
+# trading_agent/agent.py:_maybe_send_eod_summary
+def _maybe_send_eod_summary(self) -> None:
+```
+
+Builds the recap by walking the journal once and aggregating: opens, closes (with realized P&L), distinct-minute count as an activity proxy, error count, balance start vs. end, stuck-ticker list (PDT-blocked or cooldown-active).
+
 Filters today's `close_failed` rows, picks the latest per ticker, separates into:
 - **PDT-blocked group:** `pdt_blocked_today == True` AND `pdt_blocked_date == today UTC`
 - **Cooldown group:** `close_cooldown_until` parses as a future ISO timestamp

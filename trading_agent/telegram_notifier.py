@@ -213,6 +213,124 @@ class TelegramNotifier:
         )
         return self._send(text)
 
+    def notify_eod_summary(self, *,
+                           date_label: str,
+                           account_balance: float,
+                           starting_balance: Optional[float],
+                           opens_today: list,
+                           closes_today: list,
+                           realized_pl_today: float,
+                           unrealized_pl_today: float,
+                           cycles_today: int,
+                           errors_today: int,
+                           stuck_tickers: list) -> bool:
+        """End-of-day recap (skill 32 §3.8).
+
+        Fired once after market close. Aggregates today's trading
+        activity into a single Telegram message: opens, closes,
+        realized + unrealized P&L, cycle count, error count, account
+        balance + intraday delta, and any tickers currently stuck
+        in PDT-block or cooldown that need manual attention before
+        tomorrow.
+
+        ``opens_today``: list of dicts with keys ticker, strategy, credit
+        ``closes_today``: list of dicts with keys ticker, strategy,
+                          exit_signal, realized_pl
+        ``stuck_tickers``: list of dicts with keys ticker, reason
+        """
+        # ── Header line ─────────────────────────────────────────────
+        if starting_balance is not None and starting_balance > 0:
+            day_change = account_balance - starting_balance
+            day_change_pct = (day_change / starting_balance) * 100
+            balance_str = (
+                f"<b>Balance:</b> ${starting_balance:,.2f} → "
+                f"${account_balance:,.2f} "
+                f"({day_change_pct:+.2f}%, "
+                f"{'+' if day_change >= 0 else '-'}${abs(day_change):,.2f})"
+            )
+        else:
+            balance_str = f"<b>Balance:</b> ${account_balance:,.2f}"
+
+        total_pl = realized_pl_today + unrealized_pl_today
+        if total_pl > 0:
+            pl_emoji = "📈"
+        elif total_pl < 0:
+            pl_emoji = "📉"
+        else:
+            pl_emoji = "➖"
+
+        lines = [
+            f"📊 <b>End-of-Day Summary — {date_label}</b>",
+            "",
+            balance_str,
+            (f"{pl_emoji} <b>Day P&amp;L:</b> "
+             f"${total_pl:+,.2f}  "
+             f"(realized ${realized_pl_today:+,.2f}, "
+             f"unrealized ${unrealized_pl_today:+,.2f})"),
+            "",
+        ]
+
+        # ── Opens ───────────────────────────────────────────────────
+        if opens_today:
+            lines.append(f"<b>🟢 Opens ({len(opens_today)})</b>")
+            for o in opens_today[:10]:
+                lines.append(
+                    f"• {o.get('ticker','?')} {o.get('strategy','?')} "
+                    f"@ ${float(o.get('credit',0)):.2f}"
+                )
+            if len(opens_today) > 10:
+                lines.append(f"<i>… and {len(opens_today) - 10} more</i>")
+            lines.append("")
+        else:
+            lines.append("<b>🟢 Opens:</b> none today")
+            lines.append("")
+
+        # ── Closes ──────────────────────────────────────────────────
+        if closes_today:
+            lines.append(f"<b>🔴 Closes ({len(closes_today)})</b>")
+            for c in closes_today[:10]:
+                pl = float(c.get('realized_pl', 0))
+                sign = "+" if pl >= 0 else ""
+                lines.append(
+                    f"• {c.get('ticker','?')} {c.get('strategy','?')} "
+                    f"→ {c.get('exit_signal','?')}  "
+                    f"<b>{sign}${pl:.2f}</b>"
+                )
+            if len(closes_today) > 10:
+                lines.append(f"<i>… and {len(closes_today) - 10} more</i>")
+            lines.append("")
+        else:
+            lines.append("<b>🔴 Closes:</b> none today")
+            lines.append("")
+
+        # ── Cycle health ────────────────────────────────────────────
+        # ``cycles_today`` is journal-minute-distinct (one bucket per
+        # minute with any journal activity). Each agent cycle writes
+        # rows in ~1-2 minute buckets, so this is "agent active for
+        # ~X minutes today" — not a strict cycle count. Still a useful
+        # health signal (zero = agent didn't run; thousands = agent
+        # ran hard all day).
+        lines.append(
+            f"<b>⚙️ Agent active:</b> {cycles_today} minute(s), "
+            f"{errors_today} error(s) today"
+        )
+
+        # ── Stuck positions (surface so operator can act overnight) ─
+        if stuck_tickers:
+            lines.append("")
+            lines.append(
+                f"<b>⚠️ Needs manual attention ({len(stuck_tickers)})</b>"
+            )
+            for s in stuck_tickers:
+                lines.append(
+                    f"• {s.get('ticker','?')} — {s.get('reason','?')}"
+                )
+            lines.append(
+                "<i>Close in Alpaca UI tonight or accept day-trade flag.</i>"
+            )
+
+        return self._send("\n".join(lines))
+
     def notify_position_closed(self, ticker: str, strategy: str,
                                exit_signal: str, exit_reason: str,
                                realized_pl: float, original_credit: float,

@@ -227,6 +227,99 @@ def test_skill_32_close_alert_body_distinguishes_profit_loss() -> None:
     assert "$108" in loss_msg or "108" in loss_msg
 
 
+def test_skill_32_eod_summary_method_exists() -> None:
+    """Skill 32 §3.8: notify_eod_summary is the end-of-day recap entry
+    point. Pin the name + signature shape (keyword-only after *) so a
+    refactor can't accidentally change the contract."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    import inspect
+    n = TelegramNotifier(token="t", chat_id="c")
+    assert callable(getattr(n, "notify_eod_summary", None)), (
+        "Skill 32 §3.8: TelegramNotifier.notify_eod_summary must exist."
+    )
+    sig = inspect.signature(n.notify_eod_summary)
+    for required in ("date_label", "account_balance", "starting_balance",
+                     "opens_today", "closes_today", "realized_pl_today",
+                     "unrealized_pl_today", "cycles_today",
+                     "errors_today", "stuck_tickers"):
+        assert required in sig.parameters, (
+            f"Skill 32 §3.8: notify_eod_summary must accept "
+            f"{required!r}. Removing it silently breaks the agent's "
+            f"_maybe_send_eod_summary call site."
+        )
+
+
+def test_skill_32_eod_body_aggregates_essentials() -> None:
+    """Skill 32 §3.8: the recap body must include balance + P&L + opens
+    + closes + the manual-action note for stuck positions."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    n = TelegramNotifier(token="t", chat_id="c")
+    captured = []
+    n._send = lambda text: (captured.append(text), True)[1]
+    n.notify_eod_summary(
+        date_label="Wednesday 2026-05-20",
+        account_balance=4550.05,
+        starting_balance=4700.33,
+        opens_today=[{"ticker": "DIA", "strategy": "Iron Condor", "credit": 2.05}],
+        closes_today=[{"ticker": "SPY", "strategy": "Bear Call Spread",
+                       "exit_signal": "profit_target", "realized_pl": 202.00}],
+        realized_pl_today=202.00,
+        unrealized_pl_today=-108.00,
+        cycles_today=78,
+        errors_today=0,
+        stuck_tickers=[{"ticker": "DIA",
+                        "reason": "PDT block — manual close required"}],
+    )
+    body = captured[-1]
+    for piece in ("$4,550.05", "$4,700.33", "End-of-Day Summary",
+                  "DIA Iron Condor", "SPY Bear Call Spread",
+                  "+$202.00", "PDT block"):
+        assert piece in body, (
+            f"Skill 32 §3.8: EOD body must include {piece!r}. "
+            f"Operators rely on the at-a-glance summary."
+        )
+
+
+def test_skill_32_agent_send_helper_exists() -> None:
+    """Skill 32 §3.8: agent must define _maybe_send_eod_summary and
+    _build_eod_summary helpers."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def _maybe_send_eod_summary" in src, (
+        "Skill 32 §3.8: agent must define _maybe_send_eod_summary."
+    )
+    assert "def _build_eod_summary" in src, (
+        "Skill 32 §3.8: agent must define _build_eod_summary."
+    )
+    # Pin the after-hours hook
+    assert "self._maybe_send_eod_summary()" in src, (
+        "Skill 32 §3.8: after-hours shutdown path must call the recap. "
+        "Without this hook the alert never fires."
+    )
+
+
+def test_skill_32_eod_gated_on_post_market_or_weekend() -> None:
+    """Skill 32 §3.8: pre-market shutdowns (weekday before 16:00) must
+    NOT fire the recap. Otherwise a Monday-morning startup would send
+    Friday's data wrapped in a Monday date label."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    helper_start = src.find("def _maybe_send_eod_summary")
+    helper_end = src.find("\n    def ", helper_start + 1)
+    body = src[helper_start:helper_end if helper_end > 0 else None]
+    # Pin the post-16:00 weekday gate (or weekend pass-through)
+    assert "is_weekday" in body and "now_et.hour < 16" in body, (
+        "Skill 32 §3.8: pre-market weekday gate must be present. "
+        "Otherwise the recap fires before any trades happen today."
+    )
+
+
 def test_skill_32_open_positions_table_has_rolls_today_column() -> None:
     """Skill 32 §3.7: positions_table must add a Rolls Today column
     when journal_df is provided. Pins the dashboard hook for skill 31."""

@@ -65,7 +65,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/shutdown.py` (last modified 2026-04-19)
 - `trading_agent/streamlit/_busy.py` (last modified 2026-05-06)
 - `trading_agent/streamlit/app.py` (last modified 2026-05-15)
-- `trading_agent/streamlit/components.py` (last modified 2026-05-15)
+- `trading_agent/streamlit/components.py` (last modified 2026-05-20)
 - `trading_agent/streamlit/file_watcher.py` (last modified 2026-05-02)
 - `trading_agent/streamlit/llm_extension.py` (last modified 2026-05-02)
 - `trading_agent/streamlit/watchlist_chart.py` (last modified 2026-05-03)

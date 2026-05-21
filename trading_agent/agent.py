@@ -618,6 +618,15 @@ class TradingAgent:
                     "market_window": market_window_str(),
                 },
             )
+            # ── EOD Telegram recap (skill 32 §3.8) ─────────────────────
+            # Best-effort, deduped to once per trading day, only fires
+            # AFTER today's market close. A failure inside this helper
+            # never blocks graceful_exit — the alert is paging, not
+            # business-critical.
+            try:
+                self._maybe_send_eod_summary()
+            except Exception as exc:                            # noqa: BLE001
+                logger.warning("EOD summary attempt failed: %s", exc)
             # graceful_exit: we decided to stop; logs + journal are healthy.
             _shutdown.graceful_exit(0, reason="after_hours_shutdown", context={
                 "local_time_et": now_et.isoformat(),
@@ -1940,6 +1949,183 @@ class TradingAgent:
                 "[%s] Telegram alert sent but journal-dedup write failed: %s",
                 ticker, exc,
             )
+
+    def _build_eod_summary(self) -> Dict:
+        """Aggregate today's journal rows into the EOD recap payload.
+
+        Skill 32 §3.8 — pure read of signals_live.jsonl. Returns a dict
+        the notifier consumes directly. Never raises — partial data is
+        better than no alert.
+
+        Aggregations:
+          * opens_today / closes_today: per-event mini-summaries
+          * realized_pl_today: sum of net_unrealized_pl on every closed row
+          * cycles_today: count of distinct cycle_start journal events
+          * errors_today: count of cycle_error / warning rows
+          * last_balance: most-recent account_balance value seen today
+          * starting_balance: earliest account_balance value seen today
+          * stuck_tickers: tickers with pdt_blocked_today=today OR
+                           future close_cooldown_until
+        """
+        result: Dict = {
+            "opens_today": [],
+            "closes_today": [],
+            "realized_pl_today": 0.0,
+            "cycles_today": 0,
+            "errors_today": 0,
+            "last_balance": 0.0,
+            "starting_balance": None,
+            "stuck_tickers": [],
+        }
+        try:
+            jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+            if not jsonl_path or not os.path.isfile(jsonl_path):
+                return result
+            today_iso = datetime.now(timezone.utc).date().isoformat()
+            now_utc = datetime.now(timezone.utc)
+            seen_balances: List[float] = []
+            seen_stuck: Dict[str, str] = {}   # ticker → reason
+            # The journal has no explicit "cycle_start" row — count
+            # distinct ISO minutes instead. Each cycle takes ~30s, so
+            # one cycle ≈ one minute-bucket of journal writes. This is
+            # a proxy that works without changing every writer to emit
+            # a cycle marker.
+            seen_minutes: Set[str] = set()
+            with open(jsonl_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts_str = rec.get("timestamp", "")
+                    if not ts_str.startswith(today_iso):
+                        continue
+                    action = rec.get("action", "") or ""
+                    rs = rec.get("raw_signal") or {}
+                    if not isinstance(rs, dict):
+                        rs = {}
+                    ticker = rec.get("ticker", "") or ""
+
+                    # Cycle-bucket — distinct minutes of any journal write
+                    if len(ts_str) >= 16:
+                        seen_minutes.add(ts_str[:16])
+
+                    # Account-balance tracking
+                    bal = rs.get("account_balance")
+                    if isinstance(bal, (int, float)) and bal > 0:
+                        seen_balances.append(float(bal))
+
+                    # Opens
+                    if action == "submitted" and ticker:
+                        result["opens_today"].append({
+                            "ticker": ticker,
+                            "strategy": rs.get("strategy", "?"),
+                            "credit": rs.get("net_credit") or 0.0,
+                        })
+
+                    # Closes
+                    if action == "closed" and ticker:
+                        pl = float(rs.get("net_unrealized_pl") or 0.0)
+                        result["closes_today"].append({
+                            "ticker": ticker,
+                            "strategy": rs.get("strategy", "?"),
+                            "exit_signal": rs.get("exit_signal", "?"),
+                            "realized_pl": pl,
+                        })
+                        result["realized_pl_today"] += pl
+
+                    # Error counts
+                    if action in ("error", "cycle_error", "warning"):
+                        result["errors_today"] += 1
+
+                    # Stuck positions — PDT-blocked
+                    if (action == "close_failed"
+                            and rs.get("pdt_blocked_today")
+                            and rs.get("pdt_blocked_date") == today_iso):
+                        seen_stuck[ticker] = (
+                            "PDT block (Alpaca 40310100) — close in "
+                            "Alpaca UI or wait for next session"
+                        )
+                    # Stuck positions — close cooldown still active
+                    elif action == "close_failed":
+                        cd = rs.get("close_cooldown_until")
+                        if cd:
+                            try:
+                                cd_dt = datetime.fromisoformat(cd)
+                                if cd_dt.tzinfo is None:
+                                    cd_dt = cd_dt.replace(tzinfo=timezone.utc)
+                                if cd_dt > now_utc and ticker not in seen_stuck:
+                                    seen_stuck[ticker] = (
+                                        "Close cooldown active — manual "
+                                        "close required to clear zombie state"
+                                    )
+                            except ValueError:
+                                pass
+
+            if seen_balances:
+                result["last_balance"] = seen_balances[-1]
+                result["starting_balance"] = seen_balances[0]
+            result["cycles_today"] = len(seen_minutes)
+            result["stuck_tickers"] = [
+                {"ticker": t, "reason": r} for t, r in sorted(seen_stuck.items())
+            ]
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning("Failed to build EOD summary: %s", exc)
+        return result
+
+    def _maybe_send_eod_summary(self) -> None:
+        """Fire the end-of-day Telegram recap once per trading day.
+
+        Skill 32 §3.8 — called from the after-hours shutdown path. Only
+        sends:
+          * when the Telegram alerter is configured (env-gated, same as
+            every other notify_*)
+          * AFTER today's market close in ET (post-16:00 weekday, or
+            any time on weekend so Friday's recap goes out)
+          * when no same-day eod_summary alert has been journalled
+            (dedup via the existing helper)
+          * when today's journal contains at least one open or close
+            (no trades → no summary worth sending)
+        """
+        if not self.telegram.is_active:
+            return
+        try:
+            now_et = datetime.now(EASTERN)
+        except Exception:                                       # noqa: BLE001
+            return
+        is_weekday = now_et.weekday() < 5
+        # Pre-market on weekdays: skip (the day hasn't happened yet).
+        if is_weekday and now_et.hour < 16:
+            return
+        if self._telegram_alert_already_sent_today(
+            ticker="__eod__", alert_type="eod_summary",
+        ):
+            return
+
+        summary = self._build_eod_summary()
+        if not summary["opens_today"] and not summary["closes_today"]:
+            # No trading activity → nothing to recap. Don't burn a
+            # message on an empty day.
+            return
+
+        self._send_telegram_alert(
+            ticker="__eod__",
+            alert_type="eod_summary",
+            send_fn=self.telegram.notify_eod_summary,
+            date_label=now_et.strftime("%A %Y-%m-%d"),
+            account_balance=float(summary["last_balance"] or 0.0),
+            starting_balance=summary["starting_balance"],
+            opens_today=summary["opens_today"],
+            closes_today=summary["closes_today"],
+            realized_pl_today=summary["realized_pl_today"],
+            unrealized_pl_today=0.0,
+            cycles_today=summary["cycles_today"],
+            errors_today=summary["errors_today"],
+            stuck_tickers=summary["stuck_tickers"],
+        )
 
     def _pdt_blocked_today_tickers(self) -> Set[str]:
         """Return underlyings whose journal carries an unexpired
