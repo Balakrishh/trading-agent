@@ -7,6 +7,7 @@ llm_extension never import plotly directly.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -771,6 +772,68 @@ def positions_table(spreads: List[Dict],
             bits.append(f"C/W {float(cw):.2f}")
         return (" · ".join(bits), rs)
 
+    # ── Defensive-roll activity lookup (skill 31 §3, surfaced 2026-05-20) ──
+    # For each ticker with an open position, count how many times the
+    # defensive-roll evaluator fired today AND group by its decline
+    # decision. Operator sees at a glance: "18× declined: credit-negative"
+    # rather than having to grep the agent log for skip_credit_negative.
+    # Empty for tickers where the evaluator never fired (no rolls
+    # attempted).
+    from collections import Counter as _Counter
+    roll_activity_today: Dict[str, _Counter] = {}
+    if journal_df is not None and not journal_df.empty:
+        if "action" in journal_df.columns and "timestamp" in journal_df.columns:
+            today_utc = datetime.now(timezone.utc).date()
+            roll_df = journal_df[
+                journal_df["action"] == "defensive_roll_evaluated"
+            ]
+            for _, r in roll_df.iterrows():
+                ts = r.get("timestamp")
+                if ts is None:
+                    continue
+                try:
+                    ts_date = pd.Timestamp(ts).tz_convert("UTC").date()
+                except Exception:                                # noqa: BLE001
+                    continue
+                if ts_date != today_utc:
+                    continue
+                tk = r.get("ticker", "")
+                rs = r.get("raw_signal") or {}
+                if not isinstance(rs, dict):
+                    continue
+                decision = rs.get("decision", "unknown")
+                roll_activity_today.setdefault(tk, _Counter())[decision] += 1
+
+    def _roll_summary_for(ticker: str) -> str:
+        """Compact one-cell rendering of today's defensive-roll activity.
+
+        Examples:
+          "—"                       no rolls attempted
+          "18× ⛔ credit-neg"       all 18 declined for same reason
+          "5× rolled / 3× declined" mixed
+        """
+        c = roll_activity_today.get(ticker)
+        if not c:
+            return "—"
+        total = sum(c.values())
+        rolled = c.get("roll", 0)
+        if rolled == total:
+            return f"{total}× ✅ rolled"
+        if rolled == 0:
+            # All declined — surface the dominant reason
+            top_decision, top_n = c.most_common(1)[0]
+            # Friendlier short label for the operator
+            short = {
+                "skip_credit_negative":     "credit-neg",
+                "skip_not_in_trigger_band": "not-in-band",
+                "skip_dte_too_short":       "dte-short",
+                "skip_below_cw_floor":      "below-floor",
+                "skip_different_strategy":  "wrong-side",
+                "skip_budget_exhausted":    "budget",
+            }.get(top_decision, top_decision)
+            return f"{total}× ⛔ {short}"
+        return f"{rolled}× ✅ / {total - rolled}× ⛔"
+
     rows = []
     detail_panels: List[Tuple[str, Dict]] = []   # (header, raw_signal) for expander
     for s in spreads:
@@ -802,6 +865,9 @@ def positions_table(spreads: List[Dict],
         }
         if journal_df is not None:
             row["Why"] = why_label
+            # Defensive-roll activity (skill 31). Cheap one-cell summary
+            # of today's evaluator firings. Em-dash when no rolls fired.
+            row["Rolls Today"] = _roll_summary_for(s.get("underlying", ""))
             if why_payload:
                 detail_panels.append(
                     (f"{s.get('underlying','?')} {s.get('strategy_name','')} "

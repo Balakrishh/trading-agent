@@ -174,9 +174,16 @@ class StrategyPlanner:
         self.last_scan_diagnostics: Optional[Dict] = None
 
         # Per-strategy DTE targets and search window.
-        self._dte_vertical       = dte_vertical       if dte_vertical       is not None else self.TARGET_DTE
-        self._dte_iron_condor    = dte_iron_condor    if dte_iron_condor    is not None else self.TARGET_DTE
-        self._dte_mean_reversion = dte_mean_reversion if dte_mean_reversion is not None else max(7, self.TARGET_DTE - 14)
+        # ``_orig`` values are immutable from constructor — they're the
+        # preset's documented DTE. The plain ``_dte_*`` values are
+        # CURRENT (possibly capped via apply_pdt_dte_cap when the agent
+        # is running on a sub-$25K PDT-restricted account). See skill 33.
+        self._dte_vertical_orig       = dte_vertical       if dte_vertical       is not None else self.TARGET_DTE
+        self._dte_iron_condor_orig    = dte_iron_condor    if dte_iron_condor    is not None else self.TARGET_DTE
+        self._dte_mean_reversion_orig = dte_mean_reversion if dte_mean_reversion is not None else max(7, self.TARGET_DTE - 14)
+        self._dte_vertical       = self._dte_vertical_orig
+        self._dte_iron_condor    = self._dte_iron_condor_orig
+        self._dte_mean_reversion = self._dte_mean_reversion_orig
         # Default ± window if caller didn't supply one. Width=7 keeps the picker
         # within the same calendar-month band.
         default_window = max(1, (self.DTE_RANGE[1] - self.DTE_RANGE[0]) // 2)
@@ -194,6 +201,36 @@ class StrategyPlanner:
         # Width policy. None/None preserves the legacy adaptive formula.
         self._width_mode  = width_mode
         self._width_value = width_value
+
+    # ------------------------------------------------------------------
+    # PDT-aware DTE cap (skill 33, added 2026-05-20)
+    # ------------------------------------------------------------------
+
+    def apply_pdt_dte_cap(self, cap: Optional[int]) -> None:
+        """Cap each strategy's target DTE at ``cap`` days.
+
+        Called by the agent once per cycle:
+          * ``cap=None`` → restore the preset's original DTE values.
+            Used when the account is at-or-above the $25K PDT threshold
+            so no cap is needed.
+          * ``cap=<int>`` (e.g., 14) → set DTE = min(original, cap) for
+            each of vertical / IC / mean-reversion. Used when the
+            account is sub-$25K and same-day closes are PDT-blocked —
+            shorter DTE reduces drift risk over a single overnight.
+
+        Idempotent: re-applying the same cap is a no-op. Reactive:
+        if account state changes intraday (deposit / withdrawal /
+        unrealised P&L crossing the threshold), the next cycle's
+        call adjusts the cap up or down.
+        """
+        if cap is None:
+            self._dte_vertical       = self._dte_vertical_orig
+            self._dte_iron_condor    = self._dte_iron_condor_orig
+            self._dte_mean_reversion = self._dte_mean_reversion_orig
+            return
+        self._dte_vertical       = min(self._dte_vertical_orig, cap)
+        self._dte_iron_condor    = min(self._dte_iron_condor_orig, cap)
+        self._dte_mean_reversion = min(self._dte_mean_reversion_orig, cap)
 
     # ------------------------------------------------------------------
     # Public entry point

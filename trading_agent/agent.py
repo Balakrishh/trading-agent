@@ -1017,6 +1017,27 @@ class TradingAgent:
                 account_balance, sorted(same_day_tickers),
             )
 
+        # ── PDT-aware DTE cap (skill 33) ─────────────────────────────
+        # When sub-$25K, cap each strategy's DTE at preset.pdt_dte_cap
+        # so the planner picks shorter expirations. Reduces overnight
+        # drift risk for positions that can't be closed same-day. When
+        # the account is at-or-above the PDT threshold, restore the
+        # preset's original DTE (no cap). Called every cycle so an
+        # intraday balance transition adjusts the planner reactively.
+        cap = self.preset.pdt_dte_cap if pdt_restricted else None
+        try:
+            self.strategy_planner.apply_pdt_dte_cap(cap)
+            if pdt_restricted:
+                logger.info(
+                    "PDT DTE cap engaged — vertical/IC/mean-reversion "
+                    "capped at %d days (was preset value).",
+                    cap,
+                )
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(
+                "apply_pdt_dte_cap raised — preset DTE unchanged: %s", exc,
+            )
+
         # Reactive PDT-block set (skill 17 §4). Read journal once per
         # cycle for tickers whose close attempt earlier today was rejected
         # by Alpaca with code 40310100. Subsequent same-day attempts on
@@ -1725,6 +1746,34 @@ class TradingAgent:
                 notes=note,
                 raw_signal=payload,
             )
+
+            # ── Position-closed alert (skill 32 §3.6) ────────────────
+            # Fire only when the close fully filled (action="closed",
+            # not "close_failed" — partial fills are surfaced via the
+            # stuck-position banner + cooldown alert instead).
+            if action == "closed" and self.telegram.is_active:
+                try:
+                    self.telegram.notify_position_closed(
+                        ticker=spread.underlying,
+                        strategy=ctx.get("strategy",
+                                         spread.strategy_name),
+                        exit_signal=ctx.get("exit_signal",
+                                            spread.exit_signal.value),
+                        exit_reason=ctx.get("exit_reason",
+                                            spread.exit_reason or ""),
+                        realized_pl=float(
+                            ctx.get("net_unrealized_pl", 0.0) or 0.0
+                        ),
+                        original_credit=float(
+                            ctx.get("original_credit", 0.0) or 0.0
+                        ),
+                        max_loss=float(ctx.get("max_loss", 0.0) or 0.0),
+                    )
+                except Exception as exc:                          # noqa: BLE001
+                    logger.warning(
+                        "[%s] position-closed alert raised: %s",
+                        spread.underlying, exc,
+                    )
         except Exception as exc:                                # noqa: BLE001
             # Never let a journaling failure break the cycle — the close
             # itself already happened.  Log the error and move on.
@@ -2629,6 +2678,37 @@ class TradingAgent:
             )
         except Exception as exc:
             logger.warning("[%s] JournalKB log failed: %s", ticker, exc)
+
+        # ── Position-opened alert (skill 32 §3.6) ────────────────────
+        # Fire once when a submission to Alpaca succeeds. action="submitted"
+        # is the canonical "we have a new live position" journal row;
+        # action="dry_run" fires the same alert so paper-flow operators
+        # still see the lifecycle. action="rejected" / "skip" do NOT
+        # alert (the position never existed). No dedup gate here — the
+        # journal records one submitted row per successful order, so
+        # each Telegram message corresponds to exactly one real event.
+        if action in ("submitted", "dry_run") and plan.valid:
+            short_strikes_str = ", ".join(
+                f"${l.strike:g}" for l in plan.legs
+                if l.action == "sell"
+            ) or "—"
+            try:
+                if self.telegram.is_active:
+                    self.telegram.notify_position_opened(
+                        ticker=ticker,
+                        strategy=plan.strategy_name,
+                        regime=analysis.regime.value,
+                        net_credit=float(plan.net_credit or 0.0),
+                        max_loss=float(plan.max_loss or 0.0),
+                        spread_width=float(plan.spread_width or 0.0),
+                        expiration=str(plan.expiration or ""),
+                        short_strikes=short_strikes_str,
+                        thesis=str(thesis or ""),
+                    )
+            except Exception as exc:                              # noqa: BLE001
+                logger.warning(
+                    "[%s] position-opened alert raised: %s", ticker, exc,
+                )
 
     # ==================================================================
     # Risk guardrail helpers (delegated to daily_state module)

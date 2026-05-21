@@ -162,3 +162,84 @@ def test_skill_32_notify_messages_carry_manual_action() -> None:
         "Skill 32 §1: open_failed_after_close alert must mention "
         "Alpaca UI verification or manual re-open."
     )
+
+
+def test_skill_32_lifecycle_alerts_exist() -> None:
+    """Skill 32 §3.6: position open + close alerts are a separate
+    method pair from the operator-actionable stuck-position alerts."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    n = TelegramNotifier(token="t", chat_id="c")
+    for method in ("notify_position_opened", "notify_position_closed"):
+        assert callable(getattr(n, method, None)), (
+            f"Skill 32 §3.6: TelegramNotifier.{method} must exist. "
+            f"Renaming silently breaks the agent's lifecycle wire-up."
+        )
+
+
+def test_skill_32_open_alert_body_carries_essentials() -> None:
+    """Skill 32 §3.6: position_opened alert must include ticker,
+    strategy, credit, max-loss, and a 'why' (regime/RSI/thesis)."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    n = TelegramNotifier(token="t", chat_id="c")
+    captured = []
+    n._send = lambda text: (captured.append(text), True)[1]
+    n.notify_position_opened(
+        ticker="XLF", strategy="Bull Put Spread", regime="sideways",
+        net_credit=0.47, max_loss=4.53, spread_width=5.0,
+        expiration="2026-06-05", short_strikes="$50",
+        thesis="Sideways + RSI 47 + IV 11%",
+    )
+    msg = captured[-1]
+    for piece in ("XLF", "Bull Put Spread", "sideways", "$0.47",
+                  "$4.53", "2026-06-05", "$50"):
+        assert piece in msg, (
+            f"Skill 32 §3.6: position_opened must include {piece!r}. "
+            f"Body: {msg[:300]!r}"
+        )
+
+
+def test_skill_32_close_alert_body_distinguishes_profit_loss() -> None:
+    """Skill 32 §3.6: profit and loss close alerts must visually differ
+    (emoji + % surface) so the operator knows at a glance."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    n = TelegramNotifier(token="t", chat_id="c")
+    captured = []
+    n._send = lambda text: (captured.append(text), True)[1]
+    # Profit close
+    n.notify_position_closed(
+        ticker="XLF", strategy="Bull Put Spread",
+        exit_signal="profit_target", exit_reason="50%",
+        realized_pl=0.24, original_credit=0.47, max_loss=4.53,
+    )
+    profit_msg = captured[-1]
+    # Loss close
+    n.notify_position_closed(
+        ticker="DIA", strategy="Iron Condor",
+        exit_signal="strike_proximity", exit_reason="near short strike",
+        realized_pl=-108.00, original_credit=2.05, max_loss=297.95,
+    )
+    loss_msg = captured[-1]
+    assert profit_msg != loss_msg, (
+        "Skill 32 §3.6: profit vs loss messages must differ visually. "
+        "Identical bodies hide the win/loss outcome at a glance."
+    )
+    assert "+$0.24" in profit_msg or "+0.24" in profit_msg
+    assert "$108" in loss_msg or "108" in loss_msg
+
+
+def test_skill_32_open_positions_table_has_rolls_today_column() -> None:
+    """Skill 32 §3.7: positions_table must add a Rolls Today column
+    when journal_df is provided. Pins the dashboard hook for skill 31."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "streamlit" /
+           "components.py").read_text(encoding="utf-8")
+    assert '"Rolls Today"' in src, (
+        "Skill 32 §3.7: positions_table must populate a 'Rolls Today' "
+        "column. Without it, defensive-roll evaluator firings are "
+        "buried in the journal and require grep to surface."
+    )
+    assert "_roll_summary_for" in src, (
+        "Skill 32 §3.7: the column helper must be named _roll_summary_for "
+        "so the format ('18× ⛔ credit-neg') stays stable across refactors."
+    )

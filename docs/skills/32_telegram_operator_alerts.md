@@ -105,6 +105,40 @@ def _render_stuck_position_banner(journal_df: pd.DataFrame,
                                   held_tickers: Optional[set] = None) -> None:
 ```
 
+### 3.6 Position-lifecycle alerts (added 2026-05-20)
+
+```python
+# trading_agent/telegram_notifier.py
+def notify_position_opened(self, ticker: str, strategy: str,
+                           regime: str, net_credit: float,
+                           max_loss: float, spread_width: float,
+                           expiration: str, short_strikes: str,
+                           thesis: str) -> bool:
+```
+
+```python
+# trading_agent/telegram_notifier.py
+def notify_position_closed(self, ticker: str, strategy: str,
+                           exit_signal: str, exit_reason: str,
+                           realized_pl: float, original_credit: float,
+                           max_loss: float) -> bool:
+```
+
+Both fire inline with the corresponding journal write — `notify_position_opened` after `_log_signal` records `action="submitted"`, `notify_position_closed` after `_journal_close_event` records `action="closed"`. No dedup gate: each event is uniquely identifiable in the journal, so each alert corresponds to exactly one real broker event.
+
+### 3.7 Defensive-roll activity in Open Positions table
+
+```python
+# trading_agent/streamlit/components.py:positions_table
+row["Rolls Today"] = _roll_summary_for(s.get("underlying", ""))
+```
+
+Groups today's `defensive_roll_evaluated` rows per ticker by their `decision` field. Renders a compact label per held position:
+
+- `—` — no rolls fired
+- `18× ⛔ credit-neg` — all 18 declined for the same reason
+- `5× ✅ / 3× ⛔` — some rolled, some declined
+
 Filters today's `close_failed` rows, picks the latest per ticker, separates into:
 - **PDT-blocked group:** `pdt_blocked_today == True` AND `pdt_blocked_date == today UTC`
 - **Cooldown group:** `close_cooldown_until` parses as a future ISO timestamp

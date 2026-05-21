@@ -182,6 +182,77 @@ class TelegramNotifier:
         )
         return self._send(text)
 
+    # ------------------------------------------------------------------
+    # Position lifecycle alerts (skill 32 §3.6)
+    # ------------------------------------------------------------------
+    # These fire once per real position event (open submission, close
+    # completion). Each event is uniquely identifiable in the journal
+    # (run_id on open, timestamp+exit_signal on close), so no per-day
+    # dedup is needed — the agent calls these inline with the journal
+    # write that records the event, so the same event can't fire twice
+    # within one cycle.
+
+    def notify_position_opened(self, ticker: str, strategy: str,
+                               regime: str, net_credit: float,
+                               max_loss: float, spread_width: float,
+                               expiration: str, short_strikes: str,
+                               thesis: str) -> bool:
+        """A new spread was just submitted to Alpaca. Tells the operator
+        what was opened, why, and the immediate risk profile."""
+        cw_ratio = (net_credit / spread_width) if spread_width else 0.0
+        text = (
+            f"✅ <b>{ticker} {strategy} OPENED</b>\n"
+            f"<b>Regime:</b> {regime}\n"
+            f"<b>Credit:</b> ${net_credit:.2f}  ·  "
+            f"<b>Max loss:</b> ${max_loss:.2f}  ·  "
+            f"<b>C/W:</b> {cw_ratio:.0%}\n"
+            f"<b>Short strikes:</b> <code>{short_strikes}</code>\n"
+            f"<b>Expiration:</b> {expiration}\n\n"
+            f"<b>Why</b>\n"
+            f"<i>{thesis[:400]}</i>"
+        )
+        return self._send(text)
+
+    def notify_position_closed(self, ticker: str, strategy: str,
+                               exit_signal: str, exit_reason: str,
+                               realized_pl: float, original_credit: float,
+                               max_loss: float) -> bool:
+        """A spread just closed (all legs filled). Tells the operator
+        which exit fired, the P&L outcome, and how it compares to the
+        original credit collected at open."""
+        # Compute percent-of-credit captured so the operator can see
+        # at a glance whether this hit the 50% profit target, ran to
+        # near-max-loss, or finished somewhere in between.
+        pct_of_credit = (
+            (realized_pl / original_credit * 100)
+            if original_credit > 0 else 0.0
+        )
+        pct_of_max_loss = (
+            (abs(realized_pl) / max_loss * 100)
+            if (realized_pl < 0 and max_loss > 0) else 0.0
+        )
+        if realized_pl > 0:
+            emoji = "💰"
+            outcome = f"<b>+${realized_pl:.2f}</b> ({pct_of_credit:+.0f}% of credit)"
+        elif realized_pl < 0:
+            emoji = "❌"
+            outcome = (
+                f"<b>-${abs(realized_pl):.2f}</b> "
+                f"({pct_of_max_loss:.0f}% of max loss)"
+            )
+        else:
+            emoji = "➖"
+            outcome = "<b>break-even</b>"
+        text = (
+            f"{emoji} <b>{ticker} {strategy} CLOSED</b>\n"
+            f"<b>Result:</b> {outcome}\n"
+            f"<b>Exit signal:</b> {exit_signal}\n"
+            f"<b>Reason:</b> <i>{exit_reason[:200]}</i>\n\n"
+            f"<b>Original credit:</b> ${original_credit:.2f}  ·  "
+            f"<b>Max loss:</b> ${max_loss:.2f}"
+        )
+        return self._send(text)
+
 
 __all__ = [
     "TelegramNotifier",

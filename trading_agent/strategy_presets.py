@@ -148,6 +148,21 @@ class PresetConfig:
     max_defensive_rolls_per_position:  int   = 1
 
     # ------------------------------------------------------------------
+    # PDT-aware DTE cap (added 2026-05-20 — see skill 33).
+    # When the trading account is sub-$25K (FINRA Pattern Day Trader
+    # threshold), same-day closes get blocked by Alpaca code 40310100.
+    # The longer the DTE, the more time the underlying has to drift to
+    # a short strike before the next trading day's PDT-eligible close
+    # window. Capping DTE shorter on PDT-restricted accounts trades
+    # some theta runway for less drift risk over a single overnight.
+    #
+    # When ``account_balance >= PDT_EQUITY_THRESHOLD`` (>= $25K) the
+    # cap is IGNORED — full preset DTE applies. The cap only engages
+    # for sub-$25K accounts where same-day close failures actually hurt.
+    # ------------------------------------------------------------------
+    pdt_dte_cap:                       int   = 14
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
