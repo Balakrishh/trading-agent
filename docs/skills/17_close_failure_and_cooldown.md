@@ -253,4 +253,4 @@ Alongside `MAX_POSITIONS_PER_TICKER = 1`, the agent now also enforces `MAX_POSIT
 
 ---
 
-*Last verified against repo HEAD on 2026-05-20 (incl. per-sector cap + 5-ETF universe expansion).*
+*Last verified against repo HEAD on 2026-05-21 (incl. per-sector cap + 5-ETF universe + ticker-forwarding hotfix in _send_telegram_alert).*
