@@ -2034,7 +2034,18 @@ class TradingAgent:
             jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
             if not jsonl_path or not os.path.isfile(jsonl_path):
                 return result
-            today_iso = datetime.now(timezone.utc).date().isoformat()
+            # Trading-session date filter (2026-05-21 hotfix). Earlier
+            # version used datetime.utcnow().date() for ``today_iso``,
+            # which pulled in Wed-evening journal writes (20:00 ET Wed
+            # = 00:00 UTC Thu) into Thursday's EOD recap — that's how
+            # 22 phantom -$130 dry-run rows showed up in the Telegram
+            # summary. The right boundary is the ET calendar date that
+            # matches the trading session this recap is summarising.
+            today_et_iso = datetime.now(EASTERN).date().isoformat()
+            # UTC today retained for fields whose markers are
+            # UTC-keyed (pdt_blocked_date specifically — written by
+            # _journal_close_event with UTC today).
+            today_utc_iso = datetime.now(timezone.utc).date().isoformat()
             now_utc = datetime.now(timezone.utc)
             seen_balances: List[float] = []
             seen_stuck: Dict[str, str] = {}   # ticker → reason
@@ -2054,7 +2065,17 @@ class TradingAgent:
                     except json.JSONDecodeError:
                         continue
                     ts_str = rec.get("timestamp", "")
-                    if not ts_str.startswith(today_iso):
+                    if not ts_str:
+                        continue
+                    # Convert UTC timestamp to ET date for the filter.
+                    try:
+                        ts_dt = datetime.fromisoformat(ts_str)
+                        if ts_dt.tzinfo is None:
+                            ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                        row_et_date = ts_dt.astimezone(EASTERN).date().isoformat()
+                    except ValueError:
+                        continue
+                    if row_et_date != today_et_iso:
                         continue
                     action = rec.get("action", "") or ""
                     rs = rec.get("raw_signal") or {}
@@ -2079,8 +2100,14 @@ class TradingAgent:
                             "credit": rs.get("net_credit") or 0.0,
                         })
 
-                    # Closes
-                    if action == "closed" and ticker:
+                    # Closes — defense against pre-2026-05-21 mislabeled
+                    # rows where action="closed" + fill_status="dry_run"
+                    # (synthetic dry-run closes that pre-date the
+                    # action-label split). Skip them so realised P&L
+                    # stays clean. New code writes action="dry_run_close"
+                    # so this filter is a no-op going forward.
+                    if (action == "closed" and ticker
+                            and rs.get("fill_status") != "dry_run"):
                         pl = float(rs.get("net_unrealized_pl") or 0.0)
                         result["closes_today"].append({
                             "ticker": ticker,
@@ -2094,10 +2121,14 @@ class TradingAgent:
                     if action in ("error", "cycle_error", "warning"):
                         result["errors_today"] += 1
 
-                    # Stuck positions — PDT-blocked
+                    # Stuck positions — PDT-blocked. ``pdt_blocked_date``
+                    # is UTC-keyed (written by _journal_close_event using
+                    # UTC today); compare to UTC today for backward-
+                    # compat with that writer. The outer row filter is
+                    # ET-keyed but this internal comparison stays UTC.
                     if (action == "close_failed"
                             and rs.get("pdt_blocked_today")
-                            and rs.get("pdt_blocked_date") == today_iso):
+                            and rs.get("pdt_blocked_date") == today_utc_iso):
                         seen_stuck[ticker] = (
                             "PDT block (Alpaca 40310100) — close in "
                             "Alpaca UI or wait for next session"

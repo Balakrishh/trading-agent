@@ -311,6 +311,54 @@ def test_skill_32_is_active_covers_either_channel() -> None:
     assert n2.is_active is False
 
 
+def test_skill_32_eod_builder_uses_et_date_and_skips_dry_run() -> None:
+    """Skill 32 §3.8 (2026-05-21 hotfix): _build_eod_summary must filter
+    rows by ET trading-session date AND skip rows where
+    fill_status='dry_run'.
+
+    Pi observation: Thursday afternoon's EOD recap showed 23 phantom
+    DIA closes summing to -$2,976 because:
+
+      1. The outer ``today_iso`` filter used UTC date, pulling in 22
+         dry-run pseudo-closes written at 20:14-22:49 ET Wed (= UTC
+         next-day 00:14-02:49) into Thursday's recap.
+      2. Even with the ET-date fix, the 1 row from Thursday morning
+         that's correctly tagged would be joined by any historical
+         mislabeled action="closed" + fill_status="dry_run" rows
+         that happen to fall on Thursday's ET date.
+
+    Pin the source-level guards so these regressions can't recur.
+    """
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    builder_start = src.find("def _build_eod_summary")
+    builder_end = src.find("\n    def ", builder_start + 1)
+    body = src[builder_start:builder_end if builder_end > 0 else None]
+
+    # ET-date filter must be present
+    assert "today_et_iso" in body, (
+        "Skill 32 §3.8: _build_eod_summary must compute today_et_iso "
+        "(ET calendar date) and use it as the outer row filter. "
+        "Pure-UTC filter mistakenly includes Wed-evening rows in "
+        "Thursday's recap because UTC midnight is 4 hours after ET "
+        "trading-session boundary."
+    )
+    assert "datetime.now(EASTERN).date().isoformat()" in body, (
+        "Skill 32 §3.8: today_et_iso must come from "
+        "datetime.now(EASTERN).date().isoformat()."
+    )
+    # Skip dry-run mislabeled rows from realized-P&L sum
+    assert 'rs.get("fill_status") != "dry_run"' in body, (
+        "Skill 32 §3.8: the closes-list builder must skip rows "
+        "where fill_status='dry_run' (defense against pre-2026-05-21 "
+        "mislabeled action='closed' rows). Without this guard, "
+        "historical phantom rows still pollute the recap."
+    )
+
+
 def test_skill_32_eod_dedup_keyed_by_et_trading_date() -> None:
     """Skill 32 §3.8 (2026-05-21 hotfix): _maybe_send_eod_summary must
     embed the ET trading session date into the dedup ``alert_type``
