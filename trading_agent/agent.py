@@ -1760,29 +1760,41 @@ class TradingAgent:
             # Fire only when the close fully filled (action="closed",
             # not "close_failed" — partial fills are surfaced via the
             # stuck-position banner + cooldown alert instead).
+            #
+            # Dedup gate: same close event must not re-fire. Pi-deploy
+            # 2026-05-20 hotfix — operators in DRY-RUN mode received
+            # 3 identical "DIA closed" alerts every 5 minutes because
+            # the synthetic dry-run close path journals action="closed"
+            # every cycle without actually closing the position at the
+            # broker; STRIKE_PROXIMITY then re-fires next cycle and the
+            # alert repeats. Dedup key combines ticker + expiration +
+            # exit_signal + UTC date so a legitimate same-day re-trade
+            # (different expiration) still alerts, but the same stuck
+            # position can't spam.
             if action == "closed" and self.telegram.is_active:
-                try:
-                    self.telegram.notify_position_closed(
-                        ticker=spread.underlying,
-                        strategy=ctx.get("strategy",
-                                         spread.strategy_name),
-                        exit_signal=ctx.get("exit_signal",
-                                            spread.exit_signal.value),
-                        exit_reason=ctx.get("exit_reason",
-                                            spread.exit_reason or ""),
-                        realized_pl=float(
-                            ctx.get("net_unrealized_pl", 0.0) or 0.0
-                        ),
-                        original_credit=float(
-                            ctx.get("original_credit", 0.0) or 0.0
-                        ),
-                        max_loss=float(ctx.get("max_loss", 0.0) or 0.0),
-                    )
-                except Exception as exc:                          # noqa: BLE001
-                    logger.warning(
-                        "[%s] position-closed alert raised: %s",
-                        spread.underlying, exc,
-                    )
+                exit_sig_val = ctx.get("exit_signal",
+                                       spread.exit_signal.value)
+                exp_val = ctx.get("expiration", spread.expiration or "")
+                dedup_alert_type = (
+                    f"position_closed:{exp_val}:{exit_sig_val}"
+                )
+                self._send_telegram_alert(
+                    ticker=spread.underlying,
+                    alert_type=dedup_alert_type,
+                    send_fn=self.telegram.notify_position_closed,
+                    strategy=ctx.get("strategy",
+                                     spread.strategy_name),
+                    exit_signal=exit_sig_val,
+                    exit_reason=ctx.get("exit_reason",
+                                        spread.exit_reason or ""),
+                    realized_pl=float(
+                        ctx.get("net_unrealized_pl", 0.0) or 0.0
+                    ),
+                    original_credit=float(
+                        ctx.get("original_credit", 0.0) or 0.0
+                    ),
+                    max_loss=float(ctx.get("max_loss", 0.0) or 0.0),
+                )
         except Exception as exc:                                # noqa: BLE001
             # Never let a journaling failure break the cycle — the close
             # itself already happened.  Log the error and move on.
@@ -2870,31 +2882,35 @@ class TradingAgent:
         # is the canonical "we have a new live position" journal row;
         # action="dry_run" fires the same alert so paper-flow operators
         # still see the lifecycle. action="rejected" / "skip" do NOT
-        # alert (the position never existed). No dedup gate here — the
-        # journal records one submitted row per successful order, so
-        # each Telegram message corresponds to exactly one real event.
+        # alert (the position never existed).
+        #
+        # Dedup gate: pi-deploy 2026-05-20 hotfix. In DRY-RUN mode the
+        # planner re-emits the same trade plan every cycle as long as
+        # the regime + chain math agrees, journaling action="dry_run"
+        # repeatedly for the same notional position. Dedup key uses
+        # ticker + expiration + UTC date so a real same-day re-open
+        # (different expiration) still alerts but the same dry-run
+        # plan being re-emitted cycle after cycle does not.
         if action in ("submitted", "dry_run") and plan.valid:
             short_strikes_str = ", ".join(
                 f"${l.strike:g}" for l in plan.legs
                 if l.action == "sell"
             ) or "—"
-            try:
-                if self.telegram.is_active:
-                    self.telegram.notify_position_opened(
-                        ticker=ticker,
-                        strategy=plan.strategy_name,
-                        regime=analysis.regime.value,
-                        net_credit=float(plan.net_credit or 0.0),
-                        max_loss=float(plan.max_loss or 0.0),
-                        spread_width=float(plan.spread_width or 0.0),
-                        expiration=str(plan.expiration or ""),
-                        short_strikes=short_strikes_str,
-                        thesis=str(thesis or ""),
-                    )
-            except Exception as exc:                              # noqa: BLE001
-                logger.warning(
-                    "[%s] position-opened alert raised: %s", ticker, exc,
-                )
+            exp_str = str(plan.expiration or "")
+            dedup_alert_type = f"position_opened:{exp_str}"
+            self._send_telegram_alert(
+                ticker=ticker,
+                alert_type=dedup_alert_type,
+                send_fn=self.telegram.notify_position_opened,
+                strategy=plan.strategy_name,
+                regime=analysis.regime.value,
+                net_credit=float(plan.net_credit or 0.0),
+                max_loss=float(plan.max_loss or 0.0),
+                spread_width=float(plan.spread_width or 0.0),
+                expiration=exp_str,
+                short_strikes=short_strikes_str,
+                thesis=str(thesis or ""),
+            )
 
     # ==================================================================
     # Risk guardrail helpers (delegated to daily_state module)

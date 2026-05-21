@@ -320,6 +320,52 @@ def test_skill_32_eod_gated_on_post_market_or_weekend() -> None:
     )
 
 
+def test_skill_32_lifecycle_alerts_deduped_per_event() -> None:
+    """Skill 32 §3.6 hotfix: position_opened and position_closed alerts
+    MUST go through the dedup helper. Without dedup, dry-run mode (or
+    any other source of repeat journal writes) spams the operator —
+    pi-deploy 2026-05-20 saw 3 identical DIA close alerts every 5 min.
+
+    Dedup keys:
+      position_closed: alert_type = "position_closed:<expiration>:<exit_signal>"
+      position_opened: alert_type = "position_opened:<expiration>"
+
+    These keys let legitimate same-day re-trades (different expirations)
+    fire fresh alerts while suppressing repeats on the same event."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    # The agent must thread both alerts through _send_telegram_alert
+    # (which carries the dedup helper). Direct calls to
+    # self.telegram.notify_position_* would bypass dedup.
+    closed_block_start = src.find("Position-closed alert (skill 32")
+    closed_block = src[closed_block_start:closed_block_start + 2000]
+    assert "_send_telegram_alert(" in closed_block, (
+        "Skill 32 §3.6 hotfix: position-closed alert must route through "
+        "_send_telegram_alert (which carries the dedup gate). Direct "
+        "calls to self.telegram.notify_position_closed bypass dedup."
+    )
+    assert "position_closed:" in closed_block, (
+        "Skill 32 §3.6 hotfix: position_closed dedup_alert_type must "
+        "embed expiration + exit_signal so legitimate same-day re-"
+        "trades aren't accidentally deduped together."
+    )
+
+    opened_block_start = src.find("Position-opened alert (skill 32")
+    opened_block = src[opened_block_start:opened_block_start + 2000]
+    assert "_send_telegram_alert(" in opened_block, (
+        "Skill 32 §3.6 hotfix: position-opened alert must route through "
+        "_send_telegram_alert. Direct calls bypass dedup."
+    )
+    assert "position_opened:" in opened_block, (
+        "Skill 32 §3.6 hotfix: position_opened dedup_alert_type must "
+        "embed expiration so a real same-day re-open (different "
+        "expiry) still alerts."
+    )
+
+
 def test_skill_32_open_positions_table_has_rolls_today_column() -> None:
     """Skill 32 §3.7: positions_table must add a Rolls Today column
     when journal_df is provided. Pins the dashboard hook for skill 31."""

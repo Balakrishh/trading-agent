@@ -124,7 +124,7 @@ def notify_position_closed(self, ticker: str, strategy: str,
                            max_loss: float) -> bool:
 ```
 
-Both fire inline with the corresponding journal write — `notify_position_opened` after `_log_signal` records `action="submitted"`, `notify_position_closed` after `_journal_close_event` records `action="closed"`. No dedup gate: each event is uniquely identifiable in the journal, so each alert corresponds to exactly one real broker event.
+Both fire inline with the corresponding journal write — `notify_position_opened` after `_log_signal` records `action="submitted"`, `notify_position_closed` after `_journal_close_event` records `action="closed"`. Both route through `_send_telegram_alert` with event-scoped dedup keys (`position_opened:<exp>` and `position_closed:<exp>:<exit_signal>`) so a repeat journal write of the same event — e.g. a synthetic dry-run "close" that re-fires every cycle because the underlying position is still open — does NOT spam the operator. A legitimate same-day re-trade at a different expiration produces a different dedup key and alerts normally.
 
 ### 3.7 Defensive-roll activity in Open Positions table
 
