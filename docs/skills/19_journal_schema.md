@@ -150,6 +150,8 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 - **`close_failed` rows are auto-counted as "still-open positions" by the dashboard.** The Close Failures Today panel groups by ticker and sums attempts. The Closed Today panel filters strictly to `action="closed"` so a partial-fill zombie is never counted as a closed position. See skill 17.
 
+- **`dry_run_close` MUST NOT count toward realized P&L (2026-05-21 hotfix).** Pre-fix, `_journal_close_event` wrote `action="closed"` for dry-run synthetic closes too, which on a stuck-in-dry-run position accumulated 22 phantom -$130 rows on a single day → -$2,860 of false realized loss on the dashboard tile. The agent now writes `action="dry_run_close"`. The dashboard's realized-P&L sum and `_render_closed_today` expander additionally filter out `fill_status == "dry_run"` defensively, so any pre-fix journal rows mislabeled with `action="closed"` are still excluded. New consumers should mirror this filter: realized P&L sums must include `action == "closed"` AND `fill_status != "dry_run"`.
+
 - **`warning` rows use ticker=""` when not ticker-scoped.** Schwab OAuth refresh failures or position-fetch exhaustion don't pertain to a single ticker. The Recent Journal Entries panel renders these with an empty ticker column; that's intentional. Future ticker-filtered panels should treat empty-ticker warnings as global.
 
 - **Atomic write per row via `locked_append`.** Concurrent writers (a cron-launched cycle + a Streamlit-launched manual cycle + the backtester) won't interleave bytes mid-line and break the JSONL parser. The lock is a per-file `fcntl` exclusive lock.
@@ -167,4 +169,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-05-20 (mode-tag auto-injection moved into JournalKB.log_signal).*
+*Last verified against repo HEAD on 2026-05-21 (mode-tag auto-injection + dry_run_close action label split from `closed`).*

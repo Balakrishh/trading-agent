@@ -1582,14 +1582,34 @@ class TradingAgent:
             pl = ctx["net_unrealized_pl"]
             sign = "+" if pl >= 0 else ""
             # Action + notes branch on fill_status — see method docstring.
-            is_complete_close = fill_status in ("complete", "dry_run")
-            if is_complete_close:
+            # SKILL 19 §2 — three distinct close actions:
+            #   * "closed"         → real broker close, all legs filled.
+            #                        P&L counts toward realized total.
+            #   * "dry_run_close"  → synthetic close in dry-run mode.
+            #                        Position is NOT actually closed at the
+            #                        broker; the row is informational only.
+            #                        Must NOT count toward realized P&L.
+            #                        Pre-2026-05-21 this used action="closed"
+            #                        which on a stuck-in-dry-run position
+            #                        accumulated 22 phantom -$130 closes
+            #                        on a single day → -$2,860 false loss.
+            #   * "close_failed"   → broker rejected one or more legs
+            #                        (partial fill). Position still open.
+            if fill_status == "complete":
                 action = "closed"
                 note = (
                     f"closed: {ctx['strategy']}, P&L={sign}${pl:.2f}, "
                     f"{ctx['exit_signal']}"
                 )
                 exec_status = f"closed_{ctx['exit_signal']}"
+            elif fill_status == "dry_run":
+                action = "dry_run_close"
+                note = (
+                    f"dry_run_close: {ctx['strategy']}, "
+                    f"would-be P&L={sign}${pl:.2f}, "
+                    f"{ctx['exit_signal']}"
+                )
+                exec_status = f"dry_run_close_{ctx['exit_signal']}"
             else:
                 action = "close_failed"
                 # Surface the leg-level failure summary so an operator

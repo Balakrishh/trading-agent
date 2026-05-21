@@ -84,3 +84,65 @@ def test_skill_19_specialised_log_helpers_exist() -> None:
             f"Skill 19 §3: JournalKB.{method}() is documented but the "
             f"method is missing."
         )
+
+
+def test_skill_19_dry_run_close_action_distinct_from_closed() -> None:
+    """Skill 19 §4 (2026-05-21 hotfix): the agent must write
+    ``action="dry_run_close"`` when fill_status=="dry_run", NOT
+    ``action="closed"``. Pre-fix on the Pi, 22 dry-run synthetic
+    closes accumulated -$2,860 of phantom realized P&L on the
+    dashboard because they were tagged action="closed" + summed.
+
+    Pin the source-level branch shape so a refactor can't
+    accidentally re-collapse the two action labels."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    # The _journal_close_event branch must distinguish complete vs
+    # dry_run. The pre-fix pattern was a single ``if fill_status in
+    # ("complete", "dry_run"): action="closed"`` collapsed branch.
+    forbidden = 'fill_status in ("complete", "dry_run")'
+    assert forbidden not in src, (
+        f"Skill 19 §4: agent._journal_close_event must NOT collapse "
+        f"fill_status='complete' and fill_status='dry_run' into the "
+        f"same action='closed' branch. Pre-fix this caused -$2,860 "
+        f"of phantom realized P&L when a position was stuck in "
+        f"dry-run mode."
+    )
+    # The two action assignments must both appear, in the correct
+    # branches.
+    assert 'action = "dry_run_close"' in src, (
+        "Skill 19 §4: dry-run close must use action='dry_run_close'."
+    )
+    assert 'action = "closed"' in src, (
+        "Skill 19 §4: real broker close must still use action='closed'."
+    )
+
+
+def test_skill_19_dashboard_filters_dry_run_from_realized_pl() -> None:
+    """Skill 19 §4 (2026-05-21 hotfix): the dashboard's realized-P&L
+    sum must defensively exclude rows where fill_status='dry_run',
+    even when action='closed' (handles historical journal rows
+    written by the pre-fix agent before deploy)."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "streamlit" /
+           "live_monitor.py").read_text(encoding="utf-8")
+    # The realized-P&L iteration must contain a fill_status='dry_run'
+    # skip. We don't pin the exact line — only that the predicate is
+    # present near the realized_today computation.
+    realized_block_start = src.find("realized_today += float")
+    assert realized_block_start > 0, (
+        "Skill 19 §4: dashboard must compute realized_today from "
+        "journal rows. Removing this breaks the daily P&L tile."
+    )
+    # Look backwards a few lines for the fill_status='dry_run' guard
+    block = src[max(0, realized_block_start - 500):realized_block_start]
+    assert 'fill_status' in block and 'dry_run' in block, (
+        "Skill 19 §4: realized-P&L sum must filter rows where "
+        "rs.get('fill_status') == 'dry_run'. Without the filter, "
+        "historical mislabeled rows count as real losses (-$2,860 "
+        "phantom loss observed on the Pi pre-fix)."
+    )

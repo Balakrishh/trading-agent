@@ -1265,6 +1265,22 @@ def _render_closed_today(journal_df: pd.DataFrame) -> None:
     if closed.empty:
         return
 
+    # Dry-run defense (skill 19, 2026-05-21 hotfix). Filter out rows
+    # mislabeled by the pre-fix agent (action="closed" but
+    # fill_status="dry_run"). Going forward the agent writes
+    # action="dry_run_close" so this filter is a no-op; the filter
+    # exists to clean up historical journal rows on already-deployed
+    # Pis. See the realized-P&L sum below for the same defense.
+    def _is_real_close(r) -> bool:
+        rs = r.get("raw_signal") or {}
+        if not isinstance(rs, dict):
+            return True
+        return rs.get("fill_status") != "dry_run"
+
+    closed = closed[closed.apply(_is_real_close, axis=1)]
+    if closed.empty:
+        return
+
     closed = closed.sort_values("timestamp", ascending=False)
 
     rows = []
@@ -3192,6 +3208,19 @@ def render_live_monitor() -> None:
             for _, row in closed_today.iterrows():
                 rs = row.get("raw_signal") or {}
                 if not isinstance(rs, dict):
+                    continue
+                # ── Dry-run defense (skill 19, 2026-05-21 hotfix) ──────
+                # Pre-fix, _journal_close_event wrote action="closed"
+                # for dry-run synthetic closes too — every cycle of a
+                # stuck-in-dry-run position re-emitted a -$130 row.
+                # 22 such rows on the Pi summed to -$2,860 of phantom
+                # realized loss. The agent now writes action=
+                # "dry_run_close" so this is structurally impossible
+                # going forward; but the journal still contains
+                # historical rows mislabeled with action="closed" +
+                # fill_status="dry_run". Skip them defensively so the
+                # realized total stays correct.
+                if rs.get("fill_status") == "dry_run":
                     continue
                 # ``net_unrealized_pl`` at close time IS the realized
                 # P&L of that position — Alpaca freezes the value once
