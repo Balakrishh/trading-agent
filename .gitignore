@@ -24,6 +24,9 @@ knowledge_base/
 AGENT_LOG
 AGENT_RUNNING
 STRATEGY_PRESET.json
+DRY_RUN_MODE
+PAUSE_FLAG
+AGENT_PID
 
 # Generated reports (visualize_logs.py default output + ad-hoc runs)
 daily_report.html
