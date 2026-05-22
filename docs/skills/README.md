@@ -49,6 +49,7 @@ Skills 32–35 ship alongside the live-deployment hardening pass. Phase 1 covers
 | 33 | [PDT-aware DTE cap](33_pdt_dte_cap.md) | risk | `strategy_presets.py:PresetConfig`, `strategy.py:apply_pdt_dte_cap`, `agent.py` wiring |
 | 34 | [Exception monitor — operator visibility for silenced failures](34_exception_monitor.md) | ops | `exception_monitor.py:ExceptionMonitor`, `agent.py` + `executor.py` + `strategy.py` + `market_data_schwab.py` call sites, `telegram_notifier.py:notify_silenced_exception`, `journal_reader.py:silenced_exceptions_today` |
 | 35 | [Close-event collaborators (extracted from `_journal_close_event`)](35_close_event_collaborators.md) | architecture | `close_event_collaborators.py`, `agent.py` construction + delegation |
+| 36 | [Ticker filters — early-return pipeline](36_ticker_filters.md) | architecture | `ticker_filters.py`, `agent.py` construction + delegation |
 
 ## Phase 2 (planned, not yet written)
 

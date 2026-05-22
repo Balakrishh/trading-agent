@@ -70,12 +70,11 @@ from trading_agent.ports import (
     OrdersPort,
 )
 from trading_agent.regime import Regime, RegimeClassifier, RegimeAnalysis
-from trading_agent.rsi_gate import evaluate_rsi_gate
+# Skill 36 (item 4): RSI gate + regime_is_allowed moved into TickerFilters.
 from trading_agent.strategy import StrategyPlanner, SpreadPlan
 from trading_agent.strategy_presets import (
     PresetConfig,
     load_active_preset,
-    regime_is_allowed,
 )
 from trading_agent.risk_manager import RiskManager, RiskVerdict
 from trading_agent.defensive_roll_evaluator import (
@@ -453,6 +452,17 @@ class TradingAgent:
             pdt_detector=self._pdt_detector,
             alerts=self._close_alerts,
             price_lookup=self._cached_price,
+        )
+
+        # ── Per-ticker filter pipeline (skill 36, item 4) ─────────────
+        # Pre-2026-05-22 the three early-return filters (directional
+        # bias, RSI gate, high-IV block) were ~120 lines inlined at the
+        # top of _process_ticker. Now constructor-injected so each
+        # filter is testable in isolation. See skill 36.
+        from trading_agent.ticker_filters import TickerFilters
+        self._ticker_filters = TickerFilters(
+            journal_kb=self.journal_kb,
+            preset=self.preset,
         )
 
         # Daily state store (drawdown + exit debounce)
@@ -2022,130 +2032,19 @@ class TradingAgent:
         logger.info("[%s] Phase II — CLASSIFY", ticker)
         analysis: RegimeAnalysis = self.regime_classifier.classify(ticker)
 
-        # --- Directional-bias filter (Strategy Profile) ------------------
-        # The active preset can restrict which regimes are tradeable.  This
-        # check runs immediately after classify so we short-circuit before
-        # spinning up the sentiment pipeline or option-chain fetch — both
-        # of which are expensive and pointless when the regime would be
-        # filtered out anyway.  Mean-reversion is always allowed (the 3-σ
-        # touch override is a fear-spike signal, not a directional view).
-        if not regime_is_allowed(
-            analysis.regime.value, self.preset.directional_bias
-        ):
-            reason = (
-                f"DirectionalBias={self.preset.directional_bias} blocks "
-                f"regime={analysis.regime.value}"
-            )
-            logger.info("[%s] %s — skipping ticker", ticker, reason)
-            self.journal_kb.log_signal(
-                ticker=ticker,
-                action="skipped_bias",
-                price=analysis.current_price,
-                raw_signal={
-                    "regime": analysis.regime.value,
-                    "directional_bias": self.preset.directional_bias,
-                    "preset": self.preset.name,
-                    "reason": reason,
-                },
-            )
-            return {
-                "ticker": ticker,
-                "regime": analysis.regime.value,
-                "strategy": "skipped_bias",
-                "plan_valid": False,
-                "risk_approved": False,
-                "status": "skipped",
-                "reason": reason,
-            }
-
-        # --- RSI gate (opt-in, off by default) ---------------------------
-        # Refines the strategy choice using RSI alongside the regime. See
-        # ``trading_agent/rsi_gate.py`` for the full decision matrix and
-        # rationale. Three possible outcomes:
-        #   * skip cycle      — RSI says momentum is too active for the
-        #                       regime's default strategy
-        #   * proceed as-is   — gate has no opinion, planner uses
-        #                       ``analysis.regime`` unchanged
-        #   * regime override — gate downgrades a sideways/IC plan to a
-        #                       single-side vertical (Bull Put or Bear Call);
-        #                       we clone ``analysis`` with the new regime
-        #                       so the planner picks the right strategy
-        #                       AND the journal records the actual choice
-        #
-        # Toggle via the RSI_GATE_ENABLED env var (default off) so the
-        # change can be A/B tested in the backtester without code rolls.
-        # When the gate is disabled OR the env var is unset, this block
-        # is a no-op and the original regime → strategy mapping applies.
-        rsi_gate_enabled = os.environ.get(
-            "RSI_GATE_ENABLED", "false"
-        ).strip().lower() in ("true", "1", "yes", "on")
-        if rsi_gate_enabled:
-            decision = evaluate_rsi_gate(analysis.regime, analysis.rsi_14)
-            if not decision.allow:
-                logger.info(
-                    "[%s] RSI gate skipped cycle — %s", ticker, decision.reason
-                )
-                self.journal_kb.log_signal(
-                    ticker=ticker,
-                    action="skipped_rsi_gate",
-                    price=analysis.current_price,
-                    raw_signal={
-                        "regime":   analysis.regime.value,
-                        "rsi_14":   analysis.rsi_14,
-                        "reason":   decision.reason,
-                        "preset":   self.preset.name,
-                    },
-                )
-                return {
-                    "ticker": ticker,
-                    "regime": analysis.regime.value,
-                    "strategy": "skipped_rsi_gate",
-                    "plan_valid": False,
-                    "risk_approved": False,
-                    "status": "skipped",
-                    "reason": decision.reason,
-                }
-            if decision.override_regime is not None:
-                logger.info(
-                    "[%s] RSI gate override — %s", ticker, decision.reason
-                )
-                # Substitute the analysis with the new regime so the
-                # planner picks Bull Put / Bear Call instead of the
-                # original Iron Condor. ``RegimeAnalysis`` is a regular
-                # dataclass; ``replace`` clones it field-for-field with
-                # only the regime swapped. Every downstream consumer
-                # (planner, risk manager, journal) sees a consistent
-                # view of the cycle's intent.
-                import dataclasses
-                analysis = dataclasses.replace(
-                    analysis, regime=decision.override_regime
-                )
-
-        # --- High-IV block: IV rank > 95th pct blocks all new entries ---
-        if getattr(analysis, "high_iv_warning", False):
-            reason = (
-                f"HighIV: IV rank {getattr(analysis, 'iv_rank', 0):.1f} > 95th pct "
-                f"— extreme volatility, blocking all new entries"
-            )
-            logger.warning("[%s] %s | strategy_mode=defense_first", ticker, reason)
-            self.journal_kb.log_defense_first(
-                ticker, reason, analysis.current_price,
-                {
-                    "regime": analysis.regime.value,
-                    "iv_rank": getattr(analysis, "iv_rank", 0.0),
-                    "high_iv_warning": True,
-                },
-            )
-            return {
-                "ticker": ticker,
-                "regime": analysis.regime.value,
-                "strategy": "skipped",
-                "plan_valid": False,
-                "risk_approved": False,
-                "status": "skipped",
-                "reason": reason,
-                "strategy_mode": "defense_first",
-            }
+        # ── Skill 36 (item 4): early-return filter pipeline ─────────────
+        # Delegates the three early-return checks (directional bias,
+        # RSI gate, high-IV block) to TickerFilters. Same journal-row
+        # writes, same return shapes — pure mechanical extraction.
+        # If the RSI gate produces a regime override, the result
+        # carries an analysis_override that replaces the local
+        # ``analysis`` for the rest of the cycle.
+        filter_res = self._ticker_filters.evaluate(ticker, analysis)
+        if filter_res is not None:
+            if filter_res.analysis_override is not None:
+                analysis = filter_res.analysis_override
+            if filter_res.result.get("status") == "skipped":
+                return filter_res.result
 
         # Launch tiered sentiment pipeline (Tier-0 earnings → Tier-1 cache →
         # Tier-2 FinGPT + verifier) in the background immediately after
