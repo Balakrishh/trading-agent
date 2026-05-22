@@ -125,22 +125,36 @@ class JournalKB:
 
     # Allow-list of recognised run-modes — guards against typos that
     # would silently create a new journal file (``signals_lvie.jsonl``…).
-    VALID_RUN_MODES = ("live", "backtest")
+    # 2026-05-21 added ``"dryrun"`` so dry-run cycles write a separate
+    # ``signals_dryrun.jsonl`` and CANNOT pollute live consumers'
+    # realized-P&L, EOD recap, or dashboard tiles. See skill 19 §1.
+    VALID_RUN_MODES = ("live", "backtest", "dryrun")
 
     def __init__(self, journal_dir: str = "journal_kb",
                  run_mode: str = "live",
                  dry_run: bool = False):
-        """``dry_run`` tags every emitted raw_signal with
-        ``mode=DRY-RUN`` (when True) or ``mode=LIVE`` (when False) so
-        the dashboard's mode filter sees consistent values across ALL
-        action paths (rejected, skipped_existing, defensive_roll_*,
-        closed, etc.). Pre-2026-05-20 only the post-risk ``_log_signal``
-        helper tagged mode; the agent's other 10 call sites left it
-        empty, which made the parser default those rows to LIVE
-        regardless of the cycle's actual mode — so a dry-run cycle
-        would surface 2/14 tickers in the LIVE-filtered guardrail
-        grid (only the skipped_existing HOLDING rows that happen to
-        have no mode tag).
+        """Construct a journal writer for a specific run-mode.
+
+        ``run_mode`` controls the on-disk filename:
+          * ``"live"``   → ``signals_live.jsonl``    (real broker activity)
+          * ``"dryrun"`` → ``signals_dryrun.jsonl``  (simulated cycles)
+          * ``"backtest"``→``signals_backtest.jsonl``(historical replay)
+
+        Streams are physically separated so live consumers (the EOD
+        Telegram recap, the dashboard's realized-P&L tile, the
+        ``_render_closed_today`` panel) NEVER see dry-run synthetic
+        events. Pre-2026-05-21 dry-run wrote into ``signals_live.jsonl``
+        with a ``mode="DRY-RUN"`` tag, and consumers were expected to
+        filter — three readers forgot, producing the -$2,860 phantom
+        loss + 22 phantom closes + UTC-vs-ET dedup bugs. Separate
+        files make those failure modes structurally impossible.
+
+        ``dry_run`` tags every emitted ``raw_signal`` with the
+        appropriate ``mode`` string. Independent of ``run_mode`` so
+        backtest cycles (which set ``run_mode="backtest"``) can still
+        carry the LIVE/DRY-RUN distinction in row payloads. For most
+        callers, ``run_mode="dryrun"`` implies ``dry_run=True``; the
+        agent's ``from_env`` constructor wires this automatically.
         """
         if run_mode not in self.VALID_RUN_MODES:
             raise ValueError(
@@ -150,8 +164,8 @@ class JournalKB:
         self.run_mode    = run_mode
         self.dry_run     = dry_run
         os.makedirs(journal_dir, exist_ok=True)
-        # Path basename keyed by run_mode so live and backtest never
-        # interleave bytes inside the same JSONL stream.
+        # Path basename keyed by run_mode so live, dryrun, and backtest
+        # never interleave bytes inside the same JSONL stream.
         self.jsonl_path = os.path.join(journal_dir, f"signals_{run_mode}.jsonl")
         self.md_path    = os.path.join(journal_dir, f"signals_{run_mode}.md")
         self._ensure_md_header()

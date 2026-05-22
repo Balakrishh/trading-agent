@@ -19,6 +19,20 @@ The journal is the only durable source of truth that survives Streamlit restarts
 
 The `action` field is the verbatim categorisation. Down-stream consumers rely on `action` being from a closed set — adding a new value without updating consumers means the dashboard silently drops rows.
 
+### 1.1 Mode isolation by separate file (2026-05-21, decoupling pass #1)
+
+`JournalKB` now keys its on-disk filename by `run_mode`, producing **three physically separate streams**:
+
+| run_mode | filename | written by | read by |
+|---|---|---|---|
+| `live` | `signals_live.jsonl` | live agent process | EOD Telegram recap, dashboard realized-P&L tile, `_render_closed_today`, guardrail grid, LLM RAG |
+| `dryrun` | `signals_dryrun.jsonl` | dry-run agent process | (debug only — operator may inspect manually) |
+| `backtest` | `signals_backtest.jsonl` | backtest harness | backtest results page |
+
+Pre-2026-05-21 dry-run rows were written into `signals_live.jsonl` with a `raw_signal.mode="DRY-RUN"` tag, and three different readers were expected to filter on the tag. Three readers forgot, producing the `-$2,860 phantom P&L` family of bugs (mode-tag drift, dry_run_close mislabel, UTC-vs-ET dedup collision, EOD builder pulling 22 phantom closes). Separate files make every one of those failure modes **structurally impossible** rather than carefully defended against.
+
+The structural property is enforced by a static check: `scripts/checks/scan_dryrun_isolation.py` greps production code under `trading_agent/` for any literal reference to `signals_dryrun.jsonl` and fails CI if found outside the writer and a tiny exempt-list. New consumers MUST go through `JournalKB.jsonl_path` (which honours run_mode) or explicitly use `signals_live.jsonl`. A migration helper at `scripts/migrate_dryrun_journal_split.py` separates historical pi journals once during the upgrade.
+
 ## 2. Action enumeration
 
 Stable string keys. Grouped by lifecycle stage.
@@ -169,4 +183,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-05-21 (mode-tag auto-injection + dry_run_close action label split from `closed`).*
+*Last verified against repo HEAD on 2026-05-21 (mode-tag auto-injection + dry_run_close action label split + run_mode="dryrun" separate journal file with CI isolation gate).*

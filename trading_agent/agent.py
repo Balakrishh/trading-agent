@@ -372,13 +372,24 @@ class TradingAgent:
             if config.intelligence and config.intelligence.journal_dir
             else "trade_journal"
         )
-        # Pass dry_run so JournalKB auto-tags every raw_signal with the
-        # cycle's actual mode — fixes the dashboard mode-filter
-        # inconsistency that surfaced as "only 2 ETFs in guardrail grid"
-        # when a dry-run cycle wrote untagged skipped_existing rows
-        # alongside DRY-RUN-tagged rejected rows.
+        # Dry-run uses a SEPARATE journal file (skill 19 §1 decoupling).
+        # Pre-2026-05-21 dry-run wrote into ``signals_live.jsonl`` with
+        # a ``mode="DRY-RUN"`` tag; three readers (EOD recap, realized
+        # P&L tile, _render_closed_today) forgot to filter and produced
+        # the -$2,860 phantom-loss family of bugs. Now:
+        #   live cycles → signals_live.jsonl
+        #   dry-run     → signals_dryrun.jsonl
+        # Production consumers (Telegram EOD, dashboard P&L tile) read
+        # only signals_live.jsonl → dry-run pollution is structurally
+        # impossible, not "carefully defended against".
+        is_dry = bool(config.trading.dry_run)
+        journal_run_mode = "dryrun" if is_dry else "live"
         self.journal_kb = JournalKB(
-            journal_dir, dry_run=bool(config.trading.dry_run)
+            journal_dir, run_mode=journal_run_mode, dry_run=is_dry,
+        )
+        logger.info(
+            "Journal stream: %s (file: %s)",
+            journal_run_mode, self.journal_kb.jsonl_path,
         )
 
         # ── Telegram alerter (skill 32, opt-in via env) ──────────────

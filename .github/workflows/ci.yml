@@ -71,6 +71,15 @@ jobs:
             exit 1
           fi
 
+      # Decoupling invariant (skill 19 §1, added 2026-05-21). Dry-run
+      # cycles write to ``signals_dryrun.jsonl``; live consumers must
+      # never read it. This grep gate enforces that production code
+      # stays on ``signals_live.jsonl`` so dry-run pollution is
+      # structurally impossible. See scripts/checks/scan_dryrun_isolation.py
+      # for the ALLOWED_PATHS exemption list.
+      - name: SDD — dry-run/live journal isolation
+        run: python3 scripts/checks/scan_dryrun_isolation.py
+
   tests:
     name: Unit tests + smoke checks
     # Wait for BOTH gates — invariants and SDD static checks. Failing

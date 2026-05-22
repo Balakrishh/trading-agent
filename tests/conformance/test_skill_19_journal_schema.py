@@ -121,6 +121,94 @@ def test_skill_19_dry_run_close_action_distinct_from_closed() -> None:
     )
 
 
+def test_skill_19_dryrun_writes_to_separate_file() -> None:
+    """Skill 19 §1.1 (2026-05-21 decoupling): dry-run cycles must
+    write to ``signals_dryrun.jsonl``, not ``signals_live.jsonl``.
+
+    Pre-fix dry-run rows landed in signals_live.jsonl with a mode
+    tag and three readers were expected to filter on the tag.
+    Three readers forgot, producing the -$2,860 family of bugs.
+    Physical file separation makes the entire failure class
+    structurally impossible.
+
+    Pin the behavior by booting two JournalKB instances side-by-
+    side, writing one row each, and asserting the files don't
+    cross-contaminate."""
+    import json
+    import tempfile
+    from pathlib import Path
+    from trading_agent.journal_kb import JournalKB
+
+    with tempfile.TemporaryDirectory() as d:
+        live = JournalKB(d, run_mode="live", dry_run=False)
+        dry = JournalKB(d, run_mode="dryrun", dry_run=True)
+
+        # Physical paths must differ
+        assert live.jsonl_path != dry.jsonl_path, (
+            "Skill 19 §1.1: live and dryrun JournalKB instances "
+            "must write to physically distinct files."
+        )
+        assert Path(live.jsonl_path).name == "signals_live.jsonl"
+        assert Path(dry.jsonl_path).name == "signals_dryrun.jsonl"
+
+        # Write one row each; verify isolation
+        live.log_signal(
+            ticker="SPY", action="submitted", price=700.0,
+            raw_signal={"strategy": "Bear Call", "net_credit": 0.66},
+        )
+        dry.log_signal(
+            ticker="DIA", action="dry_run_close", price=500.0,
+            raw_signal={"strategy": "Iron Condor"},
+        )
+
+        live_rows = [
+            json.loads(line)
+            for line in Path(live.jsonl_path).read_text().splitlines()
+            if line.strip()
+        ]
+        dry_rows = [
+            json.loads(line)
+            for line in Path(dry.jsonl_path).read_text().splitlines()
+            if line.strip()
+        ]
+        # Live file: ONLY the live row. Dryrun file: ONLY the dry row.
+        assert len(live_rows) == 1 and live_rows[0]["ticker"] == "SPY"
+        assert len(dry_rows) == 1 and dry_rows[0]["ticker"] == "DIA"
+        # Negative assertion: no cross-contamination
+        assert not any(r["ticker"] == "DIA" for r in live_rows), (
+            "Skill 19 §1.1: dry-run rows must NEVER appear in "
+            "signals_live.jsonl. This is the structural guarantee "
+            "that prevents the -$2,860 phantom-loss class of bugs."
+        )
+
+
+def test_skill_19_valid_run_modes_includes_dryrun() -> None:
+    """Skill 19 §1.1: VALID_RUN_MODES must list ``dryrun`` so a typo
+    in the constructor (``"dyrun"``) fails loudly instead of
+    silently creating ``signals_dyrun.jsonl``."""
+    from trading_agent.journal_kb import JournalKB
+    assert "dryrun" in JournalKB.VALID_RUN_MODES, (
+        "Skill 19 §1.1: 'dryrun' must be in VALID_RUN_MODES. "
+        "Without this, JournalKB(run_mode='dryrun') would raise "
+        "ValueError and the agent couldn't write to the isolated "
+        "stream."
+    )
+    # Defensive: typo'd mode must still raise. Construct in a temp
+    # dir to avoid leaving stray journal_kb/ directories on test
+    # cleanup paths.
+    import tempfile
+    with tempfile.TemporaryDirectory() as _td:
+        try:
+            JournalKB(_td, run_mode="dyrun")
+            raised = False
+        except ValueError:
+            raised = True
+    assert raised, (
+        "Skill 19 §1.1: an invalid run_mode must raise ValueError "
+        "at construction, not silently create a phantom journal file."
+    )
+
+
 def test_skill_19_dashboard_filters_dry_run_from_realized_pl() -> None:
     """Skill 19 §4 (2026-05-21 hotfix): the dashboard's realized-P&L
     sum must defensively exclude rows where fill_status='dry_run',
