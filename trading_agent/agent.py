@@ -399,6 +399,17 @@ class TradingAgent:
         # change. Only fires for operator-actionable events (PDT block,
         # close-cooldown engagement, post-close open failure).
         self.telegram = TelegramNotifier()
+        # ── Exception monitor (skill 34) ─────────────────────────────
+        # Operator visibility into silently-swallowed exceptions. Every
+        # ``except Exception`` block in the agent should call
+        # ``self._exception_monitor.record(...)`` so the failure is
+        # journalled + (once per day per source) paged to the operator
+        # via the Telegram error channel. Tests can inject a stub.
+        from trading_agent.exception_monitor import ExceptionMonitor
+        self._exception_monitor = ExceptionMonitor(
+            journal_kb=self.journal_kb,
+            telegram=self.telegram,
+        )
         if self.telegram.is_active:
             logger.info("Telegram alerter active (operator notifications enabled)")
         else:
@@ -1304,6 +1315,12 @@ class TradingAgent:
             logger.warning(
                 "[%s] Defensive-roll: plan attempt crashed (%s) — "
                 "falling through to normal close.", ticker, exc)
+            # Skill 34: roll-attempt crash is risk-bearing — operator
+            # should know which subsystem broke (regime / planner).
+            self._exception_monitor.record(
+                source="agent._maybe_defensive_roll/plan",
+                exc=exc, ticker=ticker,
+            )
             return None
 
         if not getattr(new_plan, "valid", False):
@@ -1444,6 +1461,11 @@ class TradingAgent:
                 price=cur_price,
                 raw_signal={**eval_payload,
                             "post_eval_error": f"risk_check: {exc}"},
+            )
+            # Skill 34: risk-manager crash is operator-actionable
+            self._exception_monitor.record(
+                source="agent._maybe_defensive_roll/risk_check",
+                exc=exc, ticker=ticker,
             )
             return None
 
@@ -1983,9 +2005,13 @@ class TradingAgent:
                 call_kwargs["ticker"] = ticker
             ok = send_fn(**call_kwargs)
         except Exception as exc:                                # noqa: BLE001
-            logger.warning(
-                "[%s] Telegram %s alert raised: %s",
-                ticker, alert_type, exc,
+            # Skill 34: surface to operator instead of dying quietly.
+            # This is exactly the except block that swallowed the
+            # ticker-drop TypeError for 2 days unnoticed.
+            self._exception_monitor.record(
+                source=f"agent._send_telegram_alert/{alert_type}",
+                exc=exc,
+                ticker=ticker,
             )
             return
         if not ok:
@@ -2070,8 +2096,27 @@ class TradingAgent:
                 {"ticker": s.ticker, "reason": s.reason}
                 for s in reader.stuck_positions()
             ]
+            # Skill 34 — silenced exceptions recap. Lets the operator
+            # see at end-of-day what failed quietly during the session.
+            result["silenced_exceptions"] = [
+                {
+                    "source": s.source,
+                    "exc_class": s.exc_class,
+                    "count": s.count,
+                    "last_message": s.last_message,
+                    "ticker": s.ticker,
+                }
+                for s in reader.silenced_exceptions_today()
+            ]
         except Exception as exc:                                # noqa: BLE001
-            logger.warning("Failed to build EOD summary: %s", exc)
+            # Skill 34: a journal-read failure here means the EOD
+            # recap silently degrades to "no closes today" — the
+            # exact failure mode that hides the -$2,976 phantom-recap
+            # bug. Page operator so they spot-check.
+            self._exception_monitor.record(
+                source="agent._build_eod_summary",
+                exc=exc,
+            )
         return result
 
     def _maybe_send_eod_summary(self) -> None:
@@ -2141,6 +2186,7 @@ class TradingAgent:
             cycles_today=summary["cycles_today"],
             errors_today=summary["errors_today"],
             stuck_tickers=summary["stuck_tickers"],
+            silenced_exceptions=summary.get("silenced_exceptions") or [],
         )
 
     def _pdt_blocked_today_tickers(self) -> Set[str]:

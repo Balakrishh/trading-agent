@@ -103,6 +103,15 @@ _DEDUP_BYPASS_ACTIONS = frozenset({
     "error",  # errors are rare AND material — dedupe is wrong here
     "warning",  # connectivity / retry-exhausted / OAuth failures —
                 # operators must see each occurrence as it happens.
+    # Skill 34 — every silenced exception is recorded so the EOD
+    # recap and dashboard can show accurate counts. The per-day
+    # Telegram dedup happens in ExceptionMonitor; the journal
+    # remains the count-of-truth.
+    "silenced_exception",
+    "silenced_exception_paged",
+    # Skill 32 — telegram alert ack rows must always write so dedup
+    # state survives a process restart mid-day.
+    "telegram_alert_sent",
 })
 
 _MD_HEADER = (

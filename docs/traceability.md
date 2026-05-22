@@ -35,8 +35,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 31 | defensive roll | defensive_roll_evaluator.py, executor.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_31_defensive_roll.py | — |
 | 32 | telegram operator alerts | telegram_notifier.py, agent.py, streamlit/live_monitor.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_streamlit/test_live_monitor.py | conformance/test_skill_32_telegram_alerts.py | — |
 | 33 | pdt dte cap | strategy_presets.py, strategy.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_risk_manager.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_33_pdt_dte_cap.py | — |
+| 34 | exception monitor | exception_monitor.py, agent.py, telegram_notifier.py, journal_reader.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_34_exception_monitor.py | — |
 
-**Skills with conformance tests:** 26 / 26 (100%)
+**Skills with conformance tests:** 27 / 27 (100%)
 
 ## Orphan source files
 
@@ -49,7 +50,6 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
 - `trading_agent/fingpt_analyser.py` (last modified 2026-04-19)
-- `trading_agent/journal_reader.py` (last modified 2026-05-22)
 - `trading_agent/knowledge_base.py` (last modified 2026-04-02)
 - `trading_agent/llm_analyst.py` (last modified 2026-04-19)
 - `trading_agent/llm_client.py` (last modified 2026-04-19)
@@ -76,7 +76,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/trade_plan_report.py` (last modified 2026-04-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 33 / 65 files (50% uncovered)
+**Orphan source coverage:** 32 / 66 files (48% uncovered)
 
 ## Orphan skills (no conformance test)
 

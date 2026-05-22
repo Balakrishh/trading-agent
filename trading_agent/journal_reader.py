@@ -104,6 +104,21 @@ class StuckPosition:
     reason: str   # e.g. "PDT block (40310100)" / "Cooldown engaged"
 
 
+@dataclass(frozen=True)
+class SilencedException:
+    """One (source, exc_class) group from today's silenced exceptions.
+
+    Skill 34 — operator-visible record of failures the agent caught
+    and continued past. Grouped so 50 identical Schwab-token-expired
+    warnings show up as one row with ``count=50``, not 50 rows.
+    """
+    source: str
+    exc_class: str
+    count: int
+    last_message: str
+    ticker: str       # "" when the failure isn't ticker-scoped
+
+
 # ---------------------------------------------------------------------------
 # The reader
 # ---------------------------------------------------------------------------
@@ -335,6 +350,44 @@ class JournalReader:
                 n += 1
         return n
 
+    def silenced_exceptions_today(self) -> List["SilencedException"]:
+        """Skill 34 — every ``silenced_exception`` row for today's
+        ET trading session, grouped per (source, exc_class) with a
+        running count + last-seen message.
+
+        Consumed by the EOD recap so the operator sees a tally of
+        what failed quietly today even when nothing else broke. The
+        first occurrence per group fired a Telegram alert via
+        ``ExceptionMonitor`` — the recap is the catch-up view."""
+        today_et = self._today_et()
+        # Group by (source, exc_class) → (count, last_message, last_ticker)
+        groups: dict[tuple[str, str], list] = {}
+        for rec in self._iter_rows():
+            if rec.get("action") != "silenced_exception":
+                continue
+            if self._row_et_date(rec) != today_et:
+                continue
+            rs = rec.get("raw_signal") or {}
+            if not isinstance(rs, dict):
+                continue
+            key = (rs.get("source", "?"), rs.get("exc_class", "?"))
+            entry = groups.setdefault(key, [0, "", ""])
+            entry[0] += 1
+            entry[1] = rs.get("message", "") or entry[1]
+            tk = rec.get("ticker", "") or ""
+            if tk and tk != "__silenced__":
+                entry[2] = tk
+        out: List[SilencedException] = []
+        for (source, exc_class), (count, msg, ticker) in groups.items():
+            out.append(SilencedException(
+                source=source, exc_class=exc_class,
+                count=count, last_message=msg[:200],
+                ticker=ticker,
+            ))
+        # Highest-count first — operator scans top to bottom
+        out.sort(key=lambda s: (-s.count, s.source))
+        return out
+
     def account_balance_today_endpoints(
         self,
     ) -> tuple[Optional[float], Optional[float]]:
@@ -365,6 +418,7 @@ __all__ = [
     "ClosedTrade",
     "OpenedTrade",
     "StuckPosition",
+    "SilencedException",
     "JournalReader",
     "DEFAULT_LIVE_JOURNAL",
 ]

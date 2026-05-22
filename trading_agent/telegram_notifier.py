@@ -248,6 +248,33 @@ class TelegramNotifier:
         )
         return self._send(text, channel="error")
 
+    def notify_silenced_exception(self, *, source: str, exc_class: str,
+                                  message: str, ticker: str = "") -> bool:
+        """Skill 34 — page on the first silent failure per (source,
+        exc_class) per UTC day. Fires from ``ExceptionMonitor.record``
+        so an operator finds out about a quietly-swallowed exception
+        before symptoms surface elsewhere.
+
+        Routes to the error channel — same priority as PDT block /
+        close cooldown / FLAT-after-roll. Operator gets one paging
+        message per distinct failure mode per day, no spam."""
+        ticker_line = f"<b>Ticker:</b> {ticker}\n" if ticker else ""
+        text = (
+            f"⚠️ <b>Silenced exception: {exc_class}</b>\n"
+            f"<b>Source:</b> <code>{source}</code>\n"
+            f"{ticker_line}"
+            f"<b>Message:</b> <code>{message[:200]}</code>\n\n"
+            f"<b>What to do</b>\n"
+            f"• Check <code>logs/trading_agent.log</code> for the "
+            f"full traceback around the most recent occurrence.\n"
+            f"• Look in <code>signals_live.jsonl</code> for "
+            f"<code>action=\"silenced_exception\"</code> rows to see "
+            f"every occurrence today.\n"
+            f"• This is the first {exc_class} from {source} today; "
+            f"subsequent occurrences are journalled but not re-paged."
+        )
+        return self._send(text, channel="error")
+
     # ── INFO-class alerts (route to info channel) ───────────────────
     # These are passive notifications — what the bot did and how it
     # turned out. Default Telegram bot: TELEGRAM_BOT_TOKEN /
@@ -293,7 +320,8 @@ class TelegramNotifier:
                            unrealized_pl_today: float,
                            cycles_today: int,
                            errors_today: int,
-                           stuck_tickers: list) -> bool:
+                           stuck_tickers: list,
+                           silenced_exceptions: Optional[list] = None) -> bool:
         """End-of-day recap (skill 32 §3.8).
 
         Fired once after market close. Aggregates today's trading
@@ -398,6 +426,32 @@ class TelegramNotifier:
             lines.append(
                 "<i>Close in Alpaca UI tonight or accept day-trade flag.</i>"
             )
+
+        # ── Silenced exceptions (skill 34) — surface what failed quietly today ─
+        if silenced_exceptions:
+            total = sum(s.get("count", 1) for s in silenced_exceptions)
+            lines.append("")
+            lines.append(
+                f"<b>🤫 Silenced exceptions ({len(silenced_exceptions)} "
+                f"group{'s' if len(silenced_exceptions) != 1 else ''}, "
+                f"{total} total)</b>"
+            )
+            for s in silenced_exceptions[:5]:
+                ticker_tag = (
+                    f" [{s.get('ticker','')}]"
+                    if s.get("ticker") else ""
+                )
+                lines.append(
+                    f"• <code>{s.get('exc_class','?')}</code> × "
+                    f"{s.get('count',1)}{ticker_tag}\n"
+                    f"  └ {s.get('source','?')}: "
+                    f"<i>{(s.get('last_message','') or '')[:80]}</i>"
+                )
+            if len(silenced_exceptions) > 5:
+                lines.append(
+                    f"<i>… and {len(silenced_exceptions) - 5} more "
+                    f"groups in signals_live.jsonl</i>"
+                )
 
         return self._send("\n".join(lines), channel="info")
 
