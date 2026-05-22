@@ -112,13 +112,23 @@ def test_skill_32_agent_dedup_helper_exists() -> None:
 
 def test_skill_32_dedup_is_date_keyed_for_self_clear() -> None:
     """Skill 32 §3.4: dedup must match on (ticker, alert_type, UTC date)
-    so the state self-clears at midnight."""
+    so the state self-clears at midnight.
+
+    Skill 19 §1.2 (item 3, 2026-05-22) moved the helper body into
+    JournalReader.telegram_alert_sent_today_utc. The agent.py method
+    is now a one-line shim; the date-keyed comparison lives in the
+    reader."""
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "trading_agent" / "agent.py").read_text(
-        encoding="utf-8"
+    src = (
+        repo_root / "trading_agent" / "journal_reader.py"
+    ).read_text(encoding="utf-8")
+    helper_start = src.find("def telegram_alert_sent_today_utc")
+    assert helper_start > 0, (
+        "Skill 19 §1.2 / Skill 32 §3.4: JournalReader must expose "
+        "telegram_alert_sent_today_utc — the dedup gate moved here "
+        "from agent.py when the journal-read pattern was consolidated."
     )
-    helper_start = src.find("def _telegram_alert_already_sent_today")
     helper_end = src.find("\n    def ", helper_start + 1)
     helper_body = src[helper_start:helper_end if helper_end > 0 else None]
     assert 'alert_type' in helper_body, (
@@ -131,7 +141,7 @@ def test_skill_32_dedup_is_date_keyed_for_self_clear() -> None:
         "self-clearing. Without it, yesterday's alerts would suppress "
         "today's repeats."
     )
-    assert 'today_iso' in helper_body, (
+    assert 'today_utc' in helper_body, (
         "Skill 32 §3.4: dedup must compute today's UTC date for "
         "comparison. Hardcoding a fixed date would freeze state."
     )
@@ -556,38 +566,83 @@ def test_skill_32_lifecycle_alerts_deduped_per_event() -> None:
       position_opened: alert_type = "position_opened:<expiration>"
 
     These keys let legitimate same-day re-trades (different expirations)
-    fire fresh alerts while suppressing repeats on the same event."""
+    fire fresh alerts while suppressing repeats on the same event.
+
+    Skill 35 + item 6 (2026-05-22): both alerts now route through
+    CloseAlertNotifier's typed wrappers, which internally call
+    _send_telegram_alert (the dedup gate). Test verifies the route +
+    the dedup key construction inside the notifier."""
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "trading_agent" / "agent.py").read_text(
+    agent_src = (repo_root / "trading_agent" / "agent.py").read_text(
         encoding="utf-8"
     )
-    # The agent must thread both alerts through _send_telegram_alert
-    # (which carries the dedup helper). Direct calls to
-    # self.telegram.notify_position_* would bypass dedup.
-    closed_block_start = src.find("Position-closed alert (skill 32")
-    closed_block = src[closed_block_start:closed_block_start + 2000]
-    assert "_send_telegram_alert(" in closed_block, (
-        "Skill 32 §3.6 hotfix: position-closed alert must route through "
-        "_send_telegram_alert (which carries the dedup gate). Direct "
-        "calls to self.telegram.notify_position_closed bypass dedup."
+    notifier_src = (
+        repo_root / "trading_agent" / "close_event_collaborators.py"
+    ).read_text(encoding="utf-8")
+
+    # The position-closed alert is now dispatched by CloseJournalWriter
+    # (skill 35) as part of the close-event side effects.
+    # Chain: agent._journal_close_event → self._close_writer.write →
+    # writer fires alerts.notify_position_closed → _send_telegram_alert.
+    assert "self._close_writer.write(" in agent_src, (
+        "Skill 35: agent._journal_close_event must delegate to "
+        "self._close_writer.write, which fires the position-closed "
+        "alert internally."
     )
-    assert "position_closed:" in closed_block, (
-        "Skill 32 §3.6 hotfix: position_closed dedup_alert_type must "
-        "embed expiration + exit_signal so legitimate same-day re-"
-        "trades aren't accidentally deduped together."
+    # The position-opened alert is fired directly from agent._log_signal
+    # via the typed wrapper (item 6).
+    assert "self._close_alerts.notify_position_opened(" in agent_src, (
+        "Item 6: position-opened alert must route through "
+        "self._close_alerts.notify_position_opened. Direct calls "
+        "bypass dedup."
+    )
+    # And CloseJournalWriter must call notify_position_closed.
+    assert (
+        "self.alerts.notify_position_closed("
+        in notifier_src
+    ) or (
+        # close_event_collaborators.py uses `self.alerts` inside the
+        # writer (the field name in CloseJournalWriter)
+        "alerts.notify_position_closed(" in notifier_src
+    ), (
+        "Skill 35: CloseJournalWriter must call alerts.notify_position_"
+        "closed when action='closed'. Pinning the call chain prevents "
+        "regression to direct telegram calls."
     )
 
-    opened_block_start = src.find("Position-opened alert (skill 32")
-    opened_block = src[opened_block_start:opened_block_start + 2000]
-    assert "_send_telegram_alert(" in opened_block, (
-        "Skill 32 §3.6 hotfix: position-opened alert must route through "
-        "_send_telegram_alert. Direct calls bypass dedup."
+    # Inside the notifier, both wrappers must construct the right
+    # dedup keys + delegate to _send_alert (== _send_telegram_alert).
+    closed_idx = notifier_src.find("def notify_position_closed")
+    closed_body_end = notifier_src.find("\n    def ", closed_idx + 1)
+    closed_body = notifier_src[
+        closed_idx:closed_body_end if closed_body_end > 0 else None
+    ]
+    assert "position_closed:" in closed_body, (
+        "Skill 32 §3.6 hotfix: CloseAlertNotifier.notify_position_closed "
+        "must build dedup_alert_type containing expiration + exit_signal "
+        "so legitimate same-day re-trades aren't accidentally deduped "
+        "together."
     )
-    assert "position_opened:" in opened_block, (
-        "Skill 32 §3.6 hotfix: position_opened dedup_alert_type must "
-        "embed expiration so a real same-day re-open (different "
+    assert "self._send_alert(" in closed_body, (
+        "Skill 32 §3.6 hotfix: notify_position_closed must dispatch via "
+        "self._send_alert (= _send_telegram_alert) — the dedup gate "
+        "lives inside that helper."
+    )
+
+    opened_idx = notifier_src.find("def notify_position_opened")
+    opened_body_end = notifier_src.find("\n    def ", opened_idx + 1)
+    opened_body = notifier_src[
+        opened_idx:opened_body_end if opened_body_end > 0 else None
+    ]
+    assert "position_opened:" in opened_body, (
+        "Item 6: notify_position_opened must build dedup_alert_type "
+        "with expiration so a real same-day re-open (different "
         "expiry) still alerts."
+    )
+    assert "self._send_alert(" in opened_body, (
+        "Item 6: notify_position_opened must dispatch via "
+        "self._send_alert — direct telegram.notify calls bypass dedup."
     )
 
 
