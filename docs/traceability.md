@@ -38,8 +38,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 34 | exception monitor | exception_monitor.py, agent.py, telegram_notifier.py, journal_reader.py, market_data_schwab.py, executor.py, strategy.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_market_data_factory.py, test_market_data_schwab.py, test_production_readiness.py, test_risk_manager.py, test_strategy.py | conformance/test_skill_34_exception_monitor.py | — |
 | 35 | close event collaborators | close_event_collaborators.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_35_close_event_collaborators.py | — |
 | 36 | ticker filters | ticker_filters.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_36_ticker_filters.py | — |
+| 37 | position caps | position_caps.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_37_position_caps.py | — |
 
-**Skills with conformance tests:** 29 / 29 (100%)
+**Skills with conformance tests:** 30 / 30 (100%)
 
 ## Orphan source files
 
@@ -78,7 +79,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/trade_plan_report.py` (last modified 2026-04-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 32 / 68 files (47% uncovered)
+**Orphan source coverage:** 32 / 69 files (46% uncovered)
 
 ## Orphan skills (no conformance test)
 

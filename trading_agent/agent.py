@@ -803,48 +803,23 @@ class TradingAgent:
 
         monitor_results = self._stage_monitor(account_balance)
 
-        # ── Per-ticker position count + dedup set ──────────────────────
-        # Pre-2026-05-13 this only added tickers whose positions reported
-        # ``signal=HOLD``.  That silently bypassed the dedup for any
-        # ticker whose positions had triggered an exit signal but
-        # hadn't yet closed (in particular: GLD on 2026-05-12 was
-        # ``regime_shift`` exit-pending but not yet in HOLD, so Stage 2
-        # tried to open a new GLD spread).  Now we count every reported
-        # position regardless of signal and cap at MAX_POSITIONS_PER_TICKER.
-        positions_per_ticker: Dict[str, int] = {}
-        positions_per_sector: Dict[str, int] = {}
-        for sr in monitor_results.get("positions", []):
-            underlying = sr.get("underlying", "")
-            if underlying:
-                positions_per_ticker[underlying] = (
-                    positions_per_ticker.get(underlying, 0) + 1
-                )
-                sec = sector_for(underlying)
-                positions_per_sector[sec] = (
-                    positions_per_sector.get(sec, 0) + 1
-                )
-
-        tickers_with_positions: Set[str] = {
-            t for t, n in positions_per_ticker.items()
-            if n >= MAX_POSITIONS_PER_TICKER
-        }
-        # Per-sector cap: any ticker in the universe whose sector is
-        # already at MAX_POSITIONS_PER_SECTOR gets blocked. Stage 2's
-        # existing dedup uses ``tickers_with_positions`` so we just
-        # union the sector-blocked tickers into that set.
-        sectors_at_cap: Set[str] = {
-            s for s, n in positions_per_sector.items()
-            if n >= MAX_POSITIONS_PER_SECTOR
-        }
-        if sectors_at_cap:
-            tickers_with_positions |= {
-                t for t in tickers
-                if sector_for(t) in sectors_at_cap
-                # Don't fire the sector block for tickers ALREADY caught
-                # by the per-ticker cap — keeps the log noise focused on
-                # the sector-as-additional-gate signal.
-                and t not in tickers_with_positions
-            }
+        # ── Per-ticker + per-sector position-cap dedup (item 5) ────────
+        # Extracted to trading_agent/position_caps.py so the cap logic
+        # is testable in isolation. The function returns the union of
+        # tickers blocked by either cap, plus per-ticker/per-sector
+        # counts for the log + dashboards.
+        from trading_agent.position_caps import compute_position_cap_dedup_set
+        (
+            tickers_with_positions,
+            positions_per_ticker,
+            positions_per_sector,
+            sectors_at_cap,
+        ) = compute_position_cap_dedup_set(
+            monitor_results, tickers,
+            sector_for=sector_for,
+            max_positions_per_ticker=MAX_POSITIONS_PER_TICKER,
+            max_positions_per_sector=MAX_POSITIONS_PER_SECTOR,
+        )
         if positions_per_ticker:
             logger.info(
                 "Open positions snapshot — %s (cap: %d/ticker, "
