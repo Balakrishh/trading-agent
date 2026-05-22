@@ -1608,10 +1608,9 @@ class TradingAgent:
                 ((roll_result.get("open_result") or {}).get("reason"))
                 or "unspecified — see executor log"
             )
-            self._send_telegram_alert(
+            # Item 6: typed wrapper — no send_fn=... indirection.
+            self._close_alerts.notify_roll_open_failed(
                 ticker=ticker,
-                alert_type="roll_open_failed",
-                send_fn=self.telegram.notify_open_failed_after_close,
                 strategy=spread.strategy_name,
                 reason=str(open_reason),
             )
@@ -1931,10 +1930,9 @@ class TradingAgent:
             # message on an empty day.
             return
 
-        self._send_telegram_alert(
-            ticker="__eod__",
+        # Item 6: typed wrapper — no send_fn=... indirection.
+        self._close_alerts.notify_eod_summary(
             alert_type=eod_alert_type,
-            send_fn=self.telegram.notify_eod_summary,
             date_label=now_et.strftime("%A %Y-%m-%d"),
             account_balance=float(summary["last_balance"] or 0.0),
             starting_balance=summary["starting_balance"],
@@ -2511,11 +2509,9 @@ class TradingAgent:
                 if l.action == "sell"
             ) or "—"
             exp_str = str(plan.expiration or "")
-            dedup_alert_type = f"position_opened:{exp_str}"
-            self._send_telegram_alert(
+            # Item 6: typed wrapper — no send_fn=... indirection.
+            self._close_alerts.notify_position_opened(
                 ticker=ticker,
-                alert_type=dedup_alert_type,
-                send_fn=self.telegram.notify_position_opened,
                 strategy=plan.strategy_name,
                 regime=analysis.regime.value,
                 net_credit=float(plan.net_credit or 0.0),

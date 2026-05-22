@@ -431,3 +431,74 @@ def test_skill_35_journal_close_event_delegates_to_writer():
         "via self._close_writer.write — the 300-line inline body "
         "was the test-fixture nightmare we just got rid of."
     )
+
+
+def test_item_6_no_send_fn_indirection_outside_close_alerts() -> None:
+    """Item 6 (2026-05-22): every operator alert dispatch in agent.py
+    goes through CloseAlertNotifier's typed wrappers — NOT the raw
+    ``_send_telegram_alert(send_fn=...)`` indirection.
+
+    The indirection is what produced the 48-hour ticker-drop
+    TypeError bug: ``send_fn(**call_kwargs)`` couldn't validate
+    kwargs against the callee signature, so a missing ticker arg
+    silently raised TypeError every cycle for two days.
+
+    Typed wrappers force the kwarg signature to be visible at the
+    call site — a mismatch fails at call time, not 48 hours later."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    # Count actual send_fn= kwargs in CALL expressions, not in comments
+    # or method definitions.
+    offending_lines = []
+    for i, line in enumerate(src.splitlines(), start=1):
+        stripped = line.strip()
+        # Skip the method definition line itself + comments.
+        if stripped.startswith("#"):
+            continue
+        if "def _send_telegram_alert" in stripped:
+            continue
+        # An actual call passing send_fn= as a kwarg.
+        if "send_fn=" in stripped and "self._send_telegram_alert" in line:
+            offending_lines.append((i, stripped))
+    # Look across multi-line calls — same check on lines that have
+    # send_fn= without the call-site word but inside a call body.
+    # Simpler: count overall send_fn= occurrences excluding comments
+    # and the method def.
+    total = sum(
+        1 for ln in src.splitlines()
+        if "send_fn=" in ln
+        and not ln.strip().startswith("#")
+        and "def _send_telegram_alert" not in ln
+    )
+    assert total == 0, (
+        f"Item 6: agent.py has {total} remaining send_fn=... "
+        f"indirection call(s) outside CloseAlertNotifier. "
+        f"Migrate them to typed wrappers on self._close_alerts "
+        f"(notify_position_opened / notify_roll_open_failed / "
+        f"notify_eod_summary)."
+    )
+
+
+def test_item_6_close_alert_notifier_exposes_all_six_wrappers() -> None:
+    """Item 6: CloseAlertNotifier must expose typed wrappers for every
+    operator alert dispatch — close-event (3) + non-close (3)."""
+    from trading_agent.close_event_collaborators import CloseAlertNotifier
+    expected = [
+        "notify_cooldown_engaged",    # close-event
+        "notify_pdt_block",            # close-event
+        "notify_position_closed",      # close-event
+        "notify_position_opened",      # opens path (new in item 6)
+        "notify_roll_open_failed",     # defensive-roll path (new in item 6)
+        "notify_eod_summary",          # EOD recap (new in item 6)
+    ]
+    for name in expected:
+        assert hasattr(CloseAlertNotifier, name), (
+            f"Item 6: CloseAlertNotifier must expose .{name}(). "
+            f"Without all six typed wrappers, callers fall back to "
+            f"_send_telegram_alert(send_fn=...) indirection, which "
+            f"is the bug pattern that produced the 48-hour "
+            f"ticker-drop TypeError."
+        )

@@ -312,11 +312,24 @@ class PdtBlockDetector:
 
 
 class CloseAlertNotifier:
-    """Wraps the three close-event Telegram alert sites:
+    """Typed wrappers around ``_send_telegram_alert`` for every
+    operator alert the agent dispatches.
 
-      * cooldown engaged (close_cooldown channel=error)
-      * PDT block detected (pdt_block channel=error)
-      * position fully closed (position_closed channel=info)
+    Historical note: this class was introduced (skill 35) wrapping
+    only the three close-event alerts (cooldown engaged / PDT block /
+    position closed). In 2026-05-22 (item 6 of the standards
+    roadmap) the wrapper surface was extended to cover all six
+    alert sites — `roll_open_failed`, EOD summary, and
+    `position_opened` — so the agent has ZERO remaining callers of
+    the ``_send_telegram_alert(send_fn=...)`` indirection. That
+    indirection is what produced the 48-hour ticker-drop TypeError
+    bug: ``send_fn(**call_kwargs)`` couldn't validate kwargs
+    against the callee signature.
+
+    Each ``notify_*`` method below has a typed signature matching
+    the corresponding ``telegram.notify_*`` callee. Mismatches now
+    fail at agent construction or first call, not silently for 48
+    hours.
 
     Delegates the actual send + per-day dedup to the agent's existing
     ``_send_telegram_alert`` helper so behavior is identical to pre-
@@ -399,6 +412,76 @@ class CloseAlertNotifier:
                 ctx.get("original_credit", 0.0) or 0.0
             ),
             max_loss=float(ctx.get("max_loss", 0.0) or 0.0),
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Non-close-event alerts (item 6, 2026-05-22)
+    # ──────────────────────────────────────────────────────────────────
+
+    def notify_position_opened(self, *, ticker: str, strategy: str,
+                               regime: str, net_credit: float,
+                               max_loss: float, spread_width: float,
+                               expiration: str, short_strikes: str,
+                               thesis: str) -> None:
+        """Fires the position_opened Telegram alert on a successful
+        broker submission (action='submitted'). Dedup'd by
+        ``ticker:expiration`` per UTC day so re-submissions on the
+        same ticker+expiration don't re-alert."""
+        if not self._telegram.is_active:
+            return
+        dedup_alert_type = f"position_opened:{expiration}"
+        self._send_alert(
+            ticker=ticker,
+            alert_type=dedup_alert_type,
+            send_fn=self._telegram.notify_position_opened,
+            strategy=strategy,
+            regime=regime,
+            net_credit=net_credit,
+            max_loss=max_loss,
+            spread_width=spread_width,
+            expiration=expiration,
+            short_strikes=short_strikes,
+            thesis=thesis,
+        )
+
+    def notify_roll_open_failed(self, *, ticker: str, strategy: str,
+                                reason: str) -> None:
+        """Fires the roll_open_failed Telegram alert when a defensive
+        roll closes successfully but the replacement open crashes.
+        Operationally critical — position is FLAT, no replacement."""
+        self._send_alert(
+            ticker=ticker,
+            alert_type="roll_open_failed",
+            send_fn=self._telegram.notify_open_failed_after_close,
+            strategy=strategy,
+            reason=reason,
+        )
+
+    def notify_eod_summary(self, *, alert_type: str, date_label: str,
+                           account_balance: float,
+                           starting_balance,
+                           opens_today, closes_today,
+                           realized_pl_today: float,
+                           unrealized_pl_today: float,
+                           cycles_today: int, errors_today: int,
+                           stuck_tickers, silenced_exceptions) -> None:
+        """Fires the EOD recap Telegram alert. ``alert_type`` carries
+        the ET trading-session date for cross-day dedup."""
+        self._send_alert(
+            ticker="__eod__",
+            alert_type=alert_type,
+            send_fn=self._telegram.notify_eod_summary,
+            date_label=date_label,
+            account_balance=account_balance,
+            starting_balance=starting_balance,
+            opens_today=opens_today,
+            closes_today=closes_today,
+            realized_pl_today=realized_pl_today,
+            unrealized_pl_today=unrealized_pl_today,
+            cycles_today=cycles_today,
+            errors_today=errors_today,
+            stuck_tickers=stuck_tickers,
+            silenced_exceptions=silenced_exceptions,
         )
 
 
