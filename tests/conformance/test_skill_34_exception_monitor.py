@@ -230,3 +230,69 @@ def test_skill_34_eod_recap_includes_silenced_exceptions() -> None:
     assert "ValueError" in body
     assert "TypeError" in body
     assert "Schwab token expired" in body
+
+
+def test_skill_34_global_monitor_registry_round_trip() -> None:
+    """Skill 34 §3.6: set_global_monitor / get_global_monitor allow
+    pre-agent-construction modules (market_data_schwab, OAuth helper)
+    to fetch the agent's monitor lazily. Tests must tolerate None."""
+    from trading_agent.exception_monitor import (
+        ExceptionMonitor, set_global_monitor, get_global_monitor,
+    )
+    # Save + restore so this test doesn't pollute global state for others.
+    import trading_agent.exception_monitor as em
+    saved = em._global_monitor
+    try:
+        em._global_monitor = None
+        assert get_global_monitor() is None, (
+            "Skill 34 §3.6: registry must default to None so CLI scripts "
+            "and tests (no TradingAgent) don't AttributeError."
+        )
+        mon = ExceptionMonitor(journal_kb=None, telegram=None)
+        set_global_monitor(mon)
+        assert get_global_monitor() is mon, (
+            "Skill 34 §3.6: set_global_monitor must register the instance "
+            "so later get_global_monitor() returns the same object."
+        )
+    finally:
+        em._global_monitor = saved
+
+
+def test_skill_34_agent_registers_global_monitor() -> None:
+    """Skill 34 §3.6: TradingAgent.__init__ MUST call set_global_monitor
+    after constructing self._exception_monitor. Without this, modules
+    built before the agent (Schwab provider, OAuth) can't page when they
+    hit silent failures."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    assert "set_global_monitor(self._exception_monitor)" in src, (
+        "Skill 34 §3.6: agent.py must register the monitor globally "
+        "via set_global_monitor(self._exception_monitor). Without "
+        "this, market_data_schwab.py's get_global_monitor() returns "
+        "None and the Schwab token-expiry failure goes silent."
+    )
+
+
+def test_skill_34_market_data_schwab_calls_global_monitor() -> None:
+    """Skill 34 §3.6: market_data_schwab.py's auth-failure path must
+    call get_global_monitor() so silent Schwab failures page the
+    operator. Pre-2026-05-22 the operator only learned about expired
+    tokens via the absence of expected chain data."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "market_data_schwab.py").read_text(
+        encoding="utf-8"
+    )
+    assert "get_global_monitor()" in src, (
+        "Skill 34 §3.6: market_data_schwab.py must fetch the global "
+        "monitor via get_global_monitor() so expired-token failures "
+        "page the operator on the Telegram error channel."
+    )
+    assert 'source="market_data_schwab' in src, (
+        "Skill 34 §3.6: the .record(source=...) call in "
+        "market_data_schwab.py must namespace the source so the EOD "
+        "recap and dedup keys distinguish Schwab from other failures."
+    )

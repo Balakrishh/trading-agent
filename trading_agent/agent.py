@@ -405,11 +405,18 @@ class TradingAgent:
         # ``self._exception_monitor.record(...)`` so the failure is
         # journalled + (once per day per source) paged to the operator
         # via the Telegram error channel. Tests can inject a stub.
-        from trading_agent.exception_monitor import ExceptionMonitor
+        from trading_agent.exception_monitor import (
+            ExceptionMonitor, set_global_monitor,
+        )
         self._exception_monitor = ExceptionMonitor(
             journal_kb=self.journal_kb,
             telegram=self.telegram,
         )
+        # Register globally so modules constructed BEFORE the agent
+        # (market_data_schwab, schwab_oauth, etc.) can fetch the same
+        # monitor via ``get_global_monitor()`` and instrument their
+        # except blocks without needing constructor injection.
+        set_global_monitor(self._exception_monitor)
         if self.telegram.is_active:
             logger.info("Telegram alerter active (operator notifications enabled)")
         else:

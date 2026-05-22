@@ -200,6 +200,30 @@ class SchwabMarketDataProvider(MarketDataProvider):
                     path, exc,
                 )
                 self._auth_warned = True
+                # Skill 34: page operator via Telegram error channel.
+                # Per-day dedup happens inside ExceptionMonitor — repeat
+                # cycles within today silently no-op. The next UTC day
+                # pages again if the token still hasn't been refreshed.
+                try:
+                    from trading_agent.exception_monitor import (
+                        get_global_monitor,
+                    )
+                    mon = get_global_monitor()
+                    if mon is not None:
+                        mon.record(
+                            source="market_data_schwab.get",
+                            exc=exc,
+                            message=(
+                                f"Schwab auth failed on {path}: {exc}. "
+                                f"Run `python -m trading_agent."
+                                f"schwab_oauth login` to re-auth."
+                            ),
+                        )
+                except Exception:                              # noqa: BLE001
+                    # The monitor is best-effort. Schwab failure
+                    # itself is already surfaced via logger.warning;
+                    # we just couldn't page Telegram.
+                    pass
             else:
                 logger.debug("Schwab GET %s skipped — no auth (%s)", path, exc)
             return None

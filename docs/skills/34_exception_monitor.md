@@ -1,7 +1,7 @@
 # Exception monitor — operator visibility for silenced failures
 
 > **One-line summary:** Every `except Exception` block in the agent's hot path calls `self._exception_monitor.record(...)`. The first occurrence per `(exc_class, source)` per UTC day pages the operator via the Telegram error channel; every subsequent occurrence is journalled but doesn't re-page. The EOD recap surfaces the count + top sources so an operator catching up at end of day sees what failed quietly during the session.
-> **Source of truth:** [`trading_agent/exception_monitor.py:ExceptionMonitor`](../../trading_agent/exception_monitor.py), [`trading_agent/agent.py`](../../trading_agent/agent.py) call sites, [`trading_agent/telegram_notifier.py:notify_silenced_exception`](../../trading_agent/telegram_notifier.py), [`trading_agent/journal_reader.py:silenced_exceptions_today`](../../trading_agent/journal_reader.py).
+> **Source of truth:** [`trading_agent/exception_monitor.py:ExceptionMonitor`](../../trading_agent/exception_monitor.py), [`trading_agent/agent.py`](../../trading_agent/agent.py) call sites, [`trading_agent/telegram_notifier.py:notify_silenced_exception`](../../trading_agent/telegram_notifier.py), [`trading_agent/journal_reader.py:silenced_exceptions_today`](../../trading_agent/journal_reader.py), [`trading_agent/market_data_schwab.py`](../../trading_agent/market_data_schwab.py) global-registry call site.
 > **Phase:** 2  •  **Group:** ops
 > **Depends on:** `19_journal_schema.md` (new `silenced_exception` / `silenced_exception_paged` action vocab), `32_telegram_operator_alerts.md` (error channel, dedup pattern).
 > **Consumed by:** the operator's phone (immediate paging), the EOD Telegram recap (catch-up), the dashboard (future surface).
@@ -112,6 +112,46 @@ def silenced_exceptions_today(self) -> List["SilencedException"]:
 ```
 
 Returns groups sorted by count desc. `_build_eod_summary` consumes the list; `notify_eod_summary` renders the top 5 groups with their counts + last message + source.
+
+### 3.6 Global monitor registry — for pre-agent-construction modules
+
+`market_data_schwab.SchwabMarketDataProvider`, the OAuth helper, the chain
+scanner, and other low-level modules are built by `agent_factory.py` BEFORE
+`TradingAgent.__init__` finishes, so they can't accept an
+`ExceptionMonitor` via the constructor. They still need to page the
+operator when a Schwab token expires or a chain fetch fails silently.
+
+The fix: a module-level registry. `TradingAgent.__init__` calls
+`set_global_monitor(self._exception_monitor)` right after constructing
+its monitor; any pre-existing module fetches it lazily inside the
+except block:
+
+```python
+# trading_agent/market_data_schwab.py
+except RuntimeError as exc:
+    if not self._auth_warned:
+        logger.warning("Schwab GET %s skipped — no auth (%s)", path, exc)
+        self._auth_warned = True
+        try:
+            from trading_agent.exception_monitor import get_global_monitor
+            mon = get_global_monitor()
+            if mon is not None:
+                mon.record(
+                    source="market_data_schwab.get",
+                    exc=exc,
+                    message=(
+                        f"Schwab auth failed on {path}: {exc}. "
+                        f"Run `python -m trading_agent.schwab_oauth login` "
+                        f"to re-auth."
+                    ),
+                )
+        except Exception:                              # noqa: BLE001
+            pass   # monitor is best-effort
+```
+
+Callers MUST tolerate `get_global_monitor()` returning `None` — CLI
+scripts and tests don't run `TradingAgent.__init__`, so no monitor is
+registered. The convention is `if mon is not None: mon.record(...)`.
 
 ## 4. Edge Cases / Guardrails
 

@@ -248,4 +248,47 @@ class ExceptionMonitor:
             )
 
 
-__all__ = ["ExceptionMonitor"]
+# ---------------------------------------------------------------------------
+# Module-level global registry — for modules constructed BEFORE TradingAgent
+# ---------------------------------------------------------------------------
+# market_data_schwab.py, the OAuth helper, the chain scanner, etc. all live
+# outside TradingAgent's __init__ scope. They can't be passed an
+# ExceptionMonitor at construction (the factory builds them first), but they
+# still want to page operators when they hit silent failures. The agent
+# registers its monitor here during __init__; any module can fetch it via
+# ``get_global_monitor()`` and call ``.record(...)`` defensively.
+
+_global_monitor: Optional["ExceptionMonitor"] = None
+
+
+def set_global_monitor(monitor: "ExceptionMonitor") -> None:
+    """Register the agent's monitor as the global default.
+
+    Called once from TradingAgent.__init__. Modules constructed before
+    the agent (factories, OAuth helpers) can fetch the registered
+    monitor via ``get_global_monitor()`` after agent construction
+    completes.
+    """
+    global _global_monitor
+    _global_monitor = monitor
+
+
+def get_global_monitor() -> Optional["ExceptionMonitor"]:
+    """Return the registered global ExceptionMonitor, or ``None``.
+
+    Callers MUST tolerate ``None``: when the agent isn't running
+    (CLI scripts, tests), no monitor is registered. The convention
+    is::
+
+        mon = get_global_monitor()
+        if mon is not None:
+            mon.record(source="...", exc=exc)
+    """
+    return _global_monitor
+
+
+__all__ = [
+    "ExceptionMonitor",
+    "set_global_monitor",
+    "get_global_monitor",
+]
