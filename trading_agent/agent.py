@@ -602,6 +602,22 @@ class TradingAgent:
             self.journal_kb.log_cycle_error(
                 str(exc), {"tickers": self.config.trading.tickers},
             )
+            # Skill 34: page operator on the error channel. A top-level
+            # cycle crash means NO trading happens this minute; if it's
+            # sticky, no trading happens at all. Dedup'd by (exc_class,
+            # source) per UTC day so a sustained outage still pages
+            # exactly once.
+            try:
+                self._exception_monitor.record(
+                    source="agent._run_cycle_impl",
+                    exc=exc,
+                    message=(
+                        f"Cycle crashed with {type(exc).__name__}: {exc}. "
+                        f"Tickers: {self.config.trading.tickers}"
+                    ),
+                )
+            except Exception:                                     # noqa: BLE001
+                pass
             result = {
                 "status": "error",
                 "reason": str(exc),
@@ -934,6 +950,23 @@ class TradingAgent:
                     error=str(exc),
                     price=self._cached_price(ticker),
                 )
+                # Skill 34: page operator on the error channel. A ticker
+                # that always crashes here silently drops out of the
+                # watchlist — operator needs to know which one + why.
+                # Dedup'd by (exc_class, source) per UTC day so 1
+                # broken ticker pages once, not every cycle.
+                try:
+                    self._exception_monitor.record(
+                        source="agent._process_ticker",
+                        exc=exc,
+                        ticker=ticker,
+                        message=(
+                            f"Per-ticker unhandled {type(exc).__name__} "
+                            f"on {ticker}: {exc}"
+                        ),
+                    )
+                except Exception:                                 # noqa: BLE001
+                    pass
                 new_trade_results.append({
                     "ticker": ticker,
                     "status": "error",
@@ -3059,6 +3092,21 @@ class TradingAgent:
             open_orders = self.order_tracker.fetch_open_orders()
         except Exception as exc:
             logger.warning("Could not fetch open orders for dedup: %s", exc)
+            # Skill 34: if the broker order tracker is down, our dedup
+            # gate fails open and we may re-submit on a ticker that
+            # already has a pending leg. Page the operator.
+            try:
+                self._exception_monitor.record(
+                    source="agent._tickers_with_open_orders",
+                    exc=exc,
+                    message=(
+                        f"Order-tracker fetch failed during dedup: "
+                        f"{exc}. Risk: duplicate submissions until "
+                        f"the broker recovers."
+                    ),
+                )
+            except Exception:                                     # noqa: BLE001
+                pass
             return out
 
         for o in open_orders:
@@ -3101,6 +3149,21 @@ class TradingAgent:
             open_orders = self.order_tracker.fetch_open_orders()
         except Exception as exc:
             logger.warning("Could not fetch open orders for stale check: %s", exc)
+            # Skill 34: if order tracker fetch keeps failing, stale
+            # limit orders accumulate and eventually the broker
+            # rejects new submissions. Operator should know.
+            try:
+                self._exception_monitor.record(
+                    source="agent._cancel_stale_orders",
+                    exc=exc,
+                    message=(
+                        f"Order-tracker fetch failed during stale-"
+                        f"order maintenance: {exc}. Risk: stale "
+                        f"limits accumulate at broker."
+                    ),
+                )
+            except Exception:                                     # noqa: BLE001
+                pass
             return
 
         if not open_orders:

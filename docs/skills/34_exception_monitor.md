@@ -1,7 +1,7 @@
 # Exception monitor — operator visibility for silenced failures
 
 > **One-line summary:** Every `except Exception` block in the agent's hot path calls `self._exception_monitor.record(...)`. The first occurrence per `(exc_class, source)` per UTC day pages the operator via the Telegram error channel; every subsequent occurrence is journalled but doesn't re-page. The EOD recap surfaces the count + top sources so an operator catching up at end of day sees what failed quietly during the session.
-> **Source of truth:** [`trading_agent/exception_monitor.py:ExceptionMonitor`](../../trading_agent/exception_monitor.py), [`trading_agent/agent.py`](../../trading_agent/agent.py) call sites, [`trading_agent/telegram_notifier.py:notify_silenced_exception`](../../trading_agent/telegram_notifier.py), [`trading_agent/journal_reader.py:silenced_exceptions_today`](../../trading_agent/journal_reader.py), [`trading_agent/market_data_schwab.py`](../../trading_agent/market_data_schwab.py) global-registry call site.
+> **Source of truth:** [`trading_agent/exception_monitor.py:ExceptionMonitor`](../../trading_agent/exception_monitor.py), [`trading_agent/agent.py`](../../trading_agent/agent.py) call sites, [`trading_agent/telegram_notifier.py:notify_silenced_exception`](../../trading_agent/telegram_notifier.py), [`trading_agent/journal_reader.py:silenced_exceptions_today`](../../trading_agent/journal_reader.py), [`trading_agent/market_data_schwab.py`](../../trading_agent/market_data_schwab.py), [`trading_agent/executor.py`](../../trading_agent/executor.py), [`trading_agent/strategy.py`](../../trading_agent/strategy.py) global-registry call sites.
 > **Phase:** 2  •  **Group:** ops
 > **Depends on:** `19_journal_schema.md` (new `silenced_exception` / `silenced_exception_paged` action vocab), `32_telegram_operator_alerts.md` (error channel, dedup pattern).
 > **Consumed by:** the operator's phone (immediate paging), the EOD Telegram recap (catch-up), the dashboard (future surface).
@@ -82,12 +82,21 @@ except Exception as exc:                                # noqa: BLE001
     return
 ```
 
-The four instrumented paths at launch (more can be added incrementally):
+The instrumented call sites (more can be added incrementally):
 
-  * `_send_telegram_alert/<alert_type>` — telegram send failures
-  * `_build_eod_summary` — journal read failures
-  * `_maybe_defensive_roll/plan` — planner crashes during roll
-  * `_maybe_defensive_roll/risk_check` — risk-manager crashes during roll
+  * `agent._send_telegram_alert/<alert_type>` — Telegram send failures
+  * `agent._build_eod_summary` — journal read failures inside EOD recap
+  * `agent._maybe_defensive_roll/plan` — planner crashes during roll
+  * `agent._maybe_defensive_roll/risk_check` — risk-manager crashes during roll
+  * `agent._run_cycle_impl` — top-level cycle crash (no trades this minute)
+  * `agent._process_ticker` — per-ticker unhandled error (silent dropout)
+  * `agent._tickers_with_open_orders` — order-tracker fetch failure (dedup risk)
+  * `agent._cancel_stale_orders` — order-tracker fetch failure (stale-order accrual)
+  * `executor.submit_order` — order POST exhausted retries / 4xx rejection
+  * `executor.close_position` — broker close API failure (position remains open)
+  * `executor.defensive_roll_open` — CLOSE FILLED but OPEN CRASHED (FLAT)
+  * `strategy.scan/<side>` — adaptive scanner crashed for one ticker
+  * `market_data_schwab.get` — Schwab token expiry / auth failure
 
 ### 3.4 Journal vocabulary
 

@@ -522,6 +522,24 @@ class StrategyPlanner:
             candidates = self._scanner.scan(ticker, side)
         except Exception as exc:
             logger.exception("[%s] Adaptive scan failed: %s", ticker, exc)
+            # Skill 34: page operator on the error channel. A ticker
+            # that always throws here silently drops out of the
+            # watchlist; the operator should know which one + why.
+            try:
+                from trading_agent.exception_monitor import get_global_monitor
+                mon = get_global_monitor()
+                if mon is not None:
+                    mon.record(
+                        source=f"strategy.scan/{side}",
+                        exc=exc,
+                        ticker=ticker,
+                        message=(
+                            f"Adaptive scan crashed on {ticker} "
+                            f"({side}): {exc}"
+                        ),
+                    )
+            except Exception:                                     # noqa: BLE001
+                pass
             return self._empty_plan(ticker, strategy_name, analysis,
                                      fallback_expiration,
                                      f"Adaptive scan crashed: {exc}")

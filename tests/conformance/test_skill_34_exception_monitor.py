@@ -168,18 +168,25 @@ def test_skill_34_agent_constructs_monitor() -> None:
         "self._exception_monitor. Without it, every record() call "
         "would AttributeError and the catch path would crash."
     )
-    # At least the four documented critical paths must call record
+    # All documented critical paths must call record. Expanding this
+    # list is fine; shrinking it means an instrumented site was
+    # silently reverted to a bare logger.warning — exactly the
+    # failure mode skill 34 is meant to prevent.
     critical_call_sites = [
         "agent._send_telegram_alert",
         "agent._build_eod_summary",
         "agent._maybe_defensive_roll/plan",
         "agent._maybe_defensive_roll/risk_check",
+        "agent._run_cycle_impl",
+        "agent._process_ticker",
+        "agent._tickers_with_open_orders",
+        "agent._cancel_stale_orders",
     ]
     for site in critical_call_sites:
         assert site in src, (
             f"Skill 34 §3.3: critical path {site} must call "
             f"self._exception_monitor.record. Documented in §3.3 "
-            f"as one of the four MVP-instrumented sites."
+            f"as one of the instrumented sites."
         )
 
 
@@ -295,4 +302,48 @@ def test_skill_34_market_data_schwab_calls_global_monitor() -> None:
         "Skill 34 §3.6: the .record(source=...) call in "
         "market_data_schwab.py must namespace the source so the EOD "
         "recap and dedup keys distinguish Schwab from other failures."
+    )
+
+
+def test_skill_34_executor_pages_on_silent_failures() -> None:
+    """Skill 34 §3.3: executor.py's three operationally-serious except
+    blocks (order submit exhausted retries, close-position broker
+    failure, defensive-roll FLAT-after-close) must call
+    get_global_monitor()."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "executor.py").read_text(
+        encoding="utf-8"
+    )
+    for site in (
+        'source="executor.submit_order"',
+        'source="executor.close_position"',
+        'source="executor.defensive_roll_open"',
+    ):
+        assert site in src, (
+            f"Skill 34 §3.3: executor.py must page via {site}. "
+            f"Without it, a broker order/close failure or a "
+            f"defensive-roll FLAT-after-close is silent until the "
+            f"operator notices missing positions / wrong P&L."
+        )
+
+
+def test_skill_34_strategy_pages_on_scanner_crash() -> None:
+    """Skill 34 §3.3: strategy.py's adaptive-scan except block must
+    call get_global_monitor(). A ticker that always throws here
+    silently drops out of the watchlist."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "strategy.py").read_text(
+        encoding="utf-8"
+    )
+    assert "get_global_monitor()" in src, (
+        "Skill 34 §3.3: strategy.py must fetch the global monitor "
+        "in the scanner-crash branch of _plan_via_scanner. Without "
+        "it, a ticker with a sticky scanner bug silently never trades."
+    )
+    assert 'source=f"strategy.scan' in src, (
+        "Skill 34 §3.3: the source string must be namespaced "
+        "'strategy.scan/<side>' so bull_put vs bear_call failures "
+        "are tracked separately in the EOD recap."
     )

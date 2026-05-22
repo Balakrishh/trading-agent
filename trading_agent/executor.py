@@ -647,6 +647,26 @@ class OrderExecutor:
             "attempt landed)",
             plan.ticker, ORDER_RETRY_ATTEMPTS, last_error, client_order_id,
         )
+        # Skill 34: page operator on the error channel. Order submission
+        # failures are state-divergence risk: a 4xx is permanent
+        # (buying-power, PDT, validation) and a 5xx after exhausting
+        # retries needs operator triage via the client_order_id.
+        try:
+            from trading_agent.exception_monitor import get_global_monitor
+            mon = get_global_monitor()
+            if mon is not None:
+                mon.record(
+                    source="executor.submit_order",
+                    ticker=plan.ticker,
+                    message=(
+                        f"Order FAILED after {ORDER_RETRY_ATTEMPTS} "
+                        f"attempt(s) on {plan.ticker}: {last_error}. "
+                        f"client_order_id={client_order_id} — search "
+                        f"Alpaca to confirm whether ANY attempt landed."
+                    ),
+                )
+        except Exception:                                         # noqa: BLE001
+            pass
         result = {
             "status": "error",
             "error": last_error or "unknown error",
@@ -810,6 +830,25 @@ class OrderExecutor:
                 "Investigate executor logs for the underlying cause: %s",
                 underlying, exc,
             )
+            # Skill 34: page operator on the error channel. FLAT-after-
+            # roll is operationally serious — they need to decide whether
+            # to re-open manually before the next session opens.
+            try:
+                from trading_agent.exception_monitor import get_global_monitor
+                mon = get_global_monitor()
+                if mon is not None:
+                    mon.record(
+                        source="executor.defensive_roll_open",
+                        exc=exc,
+                        ticker=underlying,
+                        message=(
+                            f"Defensive-roll: CLOSE FILLED but OPEN "
+                            f"CRASHED on {underlying} — position is FLAT, "
+                            f"no replacement entered. {exc}"
+                        ),
+                    )
+            except Exception:                                     # noqa: BLE001
+                pass
             return {
                 "status": "roll_open_failed",
                 "close_result": close_result,
@@ -860,6 +899,26 @@ class OrderExecutor:
                 logger.error("Close %s response: %s", symbol, resp_body)
                 error_msg += f" | Detail: {resp_body}"
             logger.error("Failed to close position %s: %s", symbol, error_msg)
+            # Skill 34: page operator on the error channel. A failed
+            # close can leave the position past profit-target / stop /
+            # expiration — operator needs to know within minutes, not
+            # at EOD.
+            try:
+                from trading_agent.exception_monitor import get_global_monitor
+                mon = get_global_monitor()
+                if mon is not None:
+                    mon.record(
+                        source="executor.close_position",
+                        exc=exc,
+                        ticker=symbol,
+                        message=(
+                            f"Close failed on {symbol}: {error_msg}. "
+                            f"Position remains open at broker — manual "
+                            f"intervention may be required."
+                        ),
+                    )
+            except Exception:                                     # noqa: BLE001
+                pass
             return {"status": "error", "symbol": symbol, "error": error_msg}
 
     # ------------------------------------------------------------------

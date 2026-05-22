@@ -174,4 +174,4 @@ def from_schwab_symbol(schwab: str) -> str:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-06.*
+*Last verified against repo HEAD on 2026-05-22.*
