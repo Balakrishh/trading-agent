@@ -2,7 +2,7 @@
 
 A concise, citation-backed handoff document for cross-LLM context transfer. Every claim below is grounded in `file:line` references so a new collaborator can verify against the source instead of trusting prose.
 
-Last verified: 2026-05-06 against repo state at HEAD.
+Last verified: 2026-05-22 against repo state at HEAD.
 
 ---
 
@@ -298,7 +298,13 @@ Six standalone harnesses at `/sessions/determined-eager-goodall/verify_*.py` (ru
 
 Plus the pytest suite at `tests/` (not run in the sandbox; requires CI).
 
-Plus the architectural invariant scan: `scripts/checks/scan_invariant_check.py`.
+Plus five CI gate scripts under `scripts/checks/`:
+
+- `scan_invariant_check.py` — the three architectural invariants (C/W floor, scoring source, decide() wiring)
+- `scan_skill_freshness.py` — every cited source file's mtime ≤ the citing skill's footer date
+- `scan_skill_quotes_match.py` — every `# file.py:LL-MM` code block in a skill still appears in source
+- `scan_dryrun_isolation.py` — production code reads only `signals_live.jsonl`; `signals_dryrun.jsonl` is touched only by allowlisted modules (`journal_kb.py`, `agent.py`, `journal_reader.py`, migration script)
+- `build_traceability.py` — regenerates `docs/traceability.md` from skill + source citations
 
 ---
 
@@ -317,10 +323,10 @@ Plus the architectural invariant scan: `scripts/checks/scan_invariant_check.py`.
 > - **Six `verify_*.py` harnesses** at `/sessions/determined-eager-goodall/verify_*.py` — these are the regression suite the sandbox runs (no pytest deps required). Run them after any change to `regime.py`, `multi_tf_regime.py`, or `streamlit/watchlist_ui.py`.
 > - **Market-data plane is hexagonal**: three providers (Alpaca / Schwab / Yahoo) sit behind the `MarketDataPort` Protocol, dispatched per-surface by `build_market_data_provider(surface=...)` in `trading_agent/market_data_factory.py`. Env-var resolution: `MARKET_DATA_PROVIDER_<SURFACE>` → `MARKET_DATA_PROVIDER` → `alpaca`. Alpaca is always the execution broker; only the data plane is swappable. Schwab uses OAuth 2.0 (30-min access tokens, 7-day refresh tokens, `python -m trading_agent.schwab_oauth login` to bootstrap). The OAuth `_refresh` retries 3× with exponential backoff on 5xx/429/network errors and short-circuits on 4xx (revoked refresh-token = re-auth required, no retries wasted). Snapshot + position fetches both retry 2× with 0.5s backoff. When changing market-data behavior, prefer extending an existing adapter over a new branch in agent code; the agent core only sees the port. Skill 16 is the canonical reference.
 > - **Broker-interaction safety story.** Three runtime invariants you must not break: (1) every `POST /v2/orders` carries a `client_order_id` UUID generated client-side and reused across retries (Alpaca dedupes server-side, so a network blip can never produce a doubled position — skill 18); (2) `position_monitor.fetch_open_positions()` returns `Optional[List]` and the dedup gate fails closed on `None` to prevent duplicate submissions during a transient broker outage; (3) partial-fill close zombies are tagged `action="close_failed"` (NOT `"closed"`), counted toward a per-ticker streak, and parked in a 60-min cooldown after 3 strikes — see skill 17. The dashboard's "Close Failures Today" panel auto-expands when any ticker is in active cooldown.
-> - **Journal action enumeration is closed.** Stable string keys live in `journal_kb._DEDUP_BYPASS_ACTIONS` plus the action-handling code in `agent.py` and `streamlit/live_monitor.py`. Adding a new value is a coordinated change — update the bypass set if material, add UI rendering for it, document in skill 19. Today's enum: `submitted | dry_run | rejected | error | warning | closed | dry_run_close | close_failed | skipped_existing | skipped_bias | skipped_rsi_gate | skipped_defense_first | skipped_by_llm | skipped_liquidation_mode | skipped | cycle_timeout | daily_drawdown_circuit_breaker`.
+> - **Journal action enumeration is closed.** Stable string keys live in `journal_kb._DEDUP_BYPASS_ACTIONS` plus the action-handling code in `agent.py` and `streamlit/live_monitor.py`. Adding a new value is a coordinated change — update the bypass set if material, add UI rendering for it, document in skill 19. Today's enum: `submitted | dry_run | rejected | error | warning | closed | dry_run_close | close_failed | skipped_existing | skipped_bias | skipped_rsi_gate | skipped_defense_first | skipped_by_llm | skipped_liquidation_mode | skipped | skipped_pdt_blocked | cycle_timeout | daily_drawdown_circuit_breaker | defensive_roll_evaluated | telegram_alert_sent | silenced_exception | silenced_exception_paged`. Skill-34 silenced-exception rows and skill-32 telegram-alert dedup rows bypass the per-ticker dedup gate so counters in the EOD recap stay accurate.
 >
 > Before proposing any change, grep the active invariant guards (`scan_invariant_check.py`, `run_journal_split_check.py`, `run_scan_diagnostics_check.py`) under `scripts/checks/` to understand what's protected. The two parity smoke scripts (`run_unified_backtest_check.py`, `run_live_vs_backtest_parity_check.py`) were retired 2026-05-04 with the backtest rewrite — parity is now structural via the `trading_agent/backtest/` package wiring through `decide()` directly, enforced by AST invariant #2/#3.
 
 ---
 
-*This manifest reflects repo state at 2026-05-06. If you're reading it more than a week later, re-verify the citations — strategy parameters and dataclass fields move quickly.*
+*This manifest reflects repo state at 2026-05-22. If you're reading it more than a week later, re-verify the citations — strategy parameters and dataclass fields move quickly. Recent additions (Phase-2 ops): live/dry-run journal file split, JournalReader single-source-of-truth, ExceptionMonitor paging, close-event collaborator extraction. See `docs/skills/README.md` Phase 2 table for the inventory.*

@@ -8,7 +8,7 @@ Atomic, reusable concepts extracted from the trading agent. Each file is self-co
 
 ---
 
-## Phase 1 (19 skills + meta + skill 28, dependency-ordered)
+## Phase 1 (21 skills + meta + skill 28, dependency-ordered)
 
 Read top-to-bottom on a first pass. Each row's "Depends on" column lists the prerequisite skills. **Skill 00 is mandatory first reading** — it's the meta-skill covering glossary, SDLC, and conventions that every other skill assumes you've internalised.
 
@@ -33,9 +33,22 @@ Read top-to-bottom on a first pass. Each row's "Depends on" column lists the pre
 | 16 | [Market-data provider routing](16_market_data_provider_routing.md) | architecture | `market_data_factory.py`, `market_data_schwab.py`, `market_data_yahoo.py`, `schwab_oauth.py` |
 | 17 | [Close-failure action + cooldown + PDT](17_close_failure_and_cooldown.md) | risk | `agent.py:124-200, 867-1265`, `streamlit/live_monitor.py:1095-1316` |
 | 18 | [Order-submission idempotency (`client_order_id` + retry)](18_order_submission_idempotency.md) | risk | `executor.py:60-76, 299-541` |
-| 19 | [Signal-journal schema (action enum + dedup bypass)](19_journal_schema.md) | architecture | `journal_kb.py:95-101, 155-432` |
+| 19 | [Signal-journal schema (action enum + dedup bypass)](19_journal_schema.md) | architecture | `journal_kb.py:95-101, 155-432`, `journal_reader.py` |
 | 28 | [Position-monitor spread grouping (plan-match-then-infer)](28_position_monitor_spread_grouping.md) | architecture | `position_monitor.py:294-373` |
 | 29 | [Per-leg liquidity gate](29_per_leg_liquidity_gate.md) | strategy | `chain_scanner.py:_leg_spread_too_wide`, `decision_engine.py` call-site |
+| 30 | [Profit-target management](30_profit_target_management.md) | risk | `strategy_presets.py:PresetConfig`, `position_monitor.py:601-609`, `backtest/runner.py:258-271` |
+| 31 | [Defensive roll](31_defensive_roll.md) | risk | `defensive_roll_evaluator.py`, `executor.py:roll_position_defensive`, `agent.py:_maybe_defensive_roll` |
+
+## Phase 2 (operational hardening — added 2026-05-13 → 2026-05-22)
+
+Skills 32–35 ship alongside the live-deployment hardening pass. Phase 1 covers "how the strategy decides"; Phase 2 covers "how the operator sees what's happening + how the code stays maintainable."
+
+| # | Skill | Group | Source of truth |
+|---|---|---|---|
+| 32 | [Telegram operator alerts + stuck-position banner](32_telegram_operator_alerts.md) | ops | `telegram_notifier.py`, `agent.py:_send_telegram_alert`, `streamlit/live_monitor.py:_render_stuck_position_banner` |
+| 33 | [PDT-aware DTE cap](33_pdt_dte_cap.md) | risk | `strategy_presets.py:PresetConfig`, `strategy.py:apply_pdt_dte_cap`, `agent.py` wiring |
+| 34 | [Exception monitor — operator visibility for silenced failures](34_exception_monitor.md) | ops | `exception_monitor.py:ExceptionMonitor`, `agent.py` + `executor.py` + `strategy.py` + `market_data_schwab.py` call sites, `telegram_notifier.py:notify_silenced_exception`, `journal_reader.py:silenced_exceptions_today` |
+| 35 | [Close-event collaborators (extracted from `_journal_close_event`)](35_close_event_collaborators.md) | architecture | `close_event_collaborators.py`, `agent.py` construction + delegation |
 
 ## Phase 2 (planned, not yet written)
 
@@ -79,8 +92,12 @@ If you only have 30 minutes:
 - **Minute 18–25:** Skills 11, 12 — the regime classifier and how it composes across timeframes.
 - **Minute 25–30:** Skill 13 — the preset system, which is the central control surface.
 
-If you have a full afternoon, read 00 first, then all 19 in order. Skill 28 (position-monitor spread grouping) is a late-Phase-1 addition documenting the rejected-plan leg-claim fix from 2026-05-15 — read it after 19.
+If you have a full afternoon, read 00 first, then all 21 in order. Skills 28, 29 are late-Phase-1 additions (position-monitor spread grouping; per-leg liquidity gate) — read them after 19. Skills 30–35 are Phase-2 operational hardening added 2026-05-13 → 2026-05-22:
+
+- 30 (profit-target management) and 31 (defensive roll) extend the close-side risk surface.
+- 32 (Telegram operator alerts), 33 (PDT-aware DTE cap), 34 (exception monitor) make the running system visible to the operator without log-scraping.
+- 35 (close-event collaborators) decouples the ~300-line `_journal_close_event` into four constructor-injected classes — read after 17 + 19 + 32 since it integrates all three.
 
 ---
 
-*Last updated: 2026-05-15 against repo HEAD.*
+*Last updated: 2026-05-22 against repo HEAD.*
