@@ -119,7 +119,7 @@ class ExceptionMonitor:
                 source=source, exc_class=exc_class,
                 message=msg, ticker=ticker,
             )
-        except Exception as monitor_exc:                # noqa: BLE001
+        except Exception as monitor_exc:                # noqa: BLE001, skill-34-exempt — monitor self-wrap (skill 34 §4: never propagate)
             # The monitor itself failed. Log it once and continue —
             # do not propagate, do not loop.
             logger.warning(
@@ -150,7 +150,7 @@ class ExceptionMonitor:
                 },
                 notes=f"silenced: {exc_class} @ {source}",
             )
-        except Exception as exc:                          # noqa: BLE001
+        except Exception as exc:                          # noqa: BLE001, skill-34-exempt — monitor self-wrap (skill 34 §4: never propagate)
             logger.warning(
                 "ExceptionMonitor: journal write failed "
                 "for source=%s exc_class=%s: %s",
@@ -180,7 +180,7 @@ class ExceptionMonitor:
                 message=message,
                 ticker=ticker,
             )
-        except Exception as exc:                          # noqa: BLE001
+        except Exception as exc:                          # noqa: BLE001, skill-34-exempt — monitor self-wrap (skill 34 §4: never propagate)
             logger.warning(
                 "ExceptionMonitor: Telegram notify_silenced_exception "
                 "raised: %s", exc,
@@ -217,7 +217,7 @@ class ExceptionMonitor:
                             and rs.get("exc_class") == exc_class
                             and rs.get("paged_date") == today_iso):
                         return True
-        except Exception as exc:                          # noqa: BLE001
+        except Exception as exc:                          # noqa: BLE001, skill-34-exempt — monitor self-wrap (skill 34 §4: never propagate)
             logger.warning(
                 "ExceptionMonitor: dedup scan failed: %s — "
                 "fail-open (will page extra rather than skip).", exc,
@@ -241,7 +241,7 @@ class ExceptionMonitor:
                 },
                 notes=f"silenced-paged: {exc_class} @ {source}",
             )
-        except Exception as exc:                          # noqa: BLE001
+        except Exception as exc:                          # noqa: BLE001, skill-34-exempt — monitor self-wrap (skill 34 §4: never propagate)
             logger.warning(
                 "ExceptionMonitor: paged-marker write failed: %s — "
                 "next process today may re-page this combo.", exc,

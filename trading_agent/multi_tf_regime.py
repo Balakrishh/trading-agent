@@ -204,7 +204,7 @@ def classify_multi_tf(
                     ticker, interval, data_provider
                 )
             out.by_interval[interval] = analysis
-        except Exception as exc:  # noqa: BLE001 — UI must stay alive
+        except Exception as exc:  # noqa: BLE001, skill-34-exempt — recoverable: missing-bar / RPC blip; caller falls through — UI must stay alive
             logger.debug("[%s] %s regime classification failed: %s",
                          ticker, interval, exc)
             out.errors[interval] = str(exc)
@@ -296,7 +296,7 @@ def _classify_intraday(
             if result is not None:
                 leadership_raw_diff, leadership_zscore = result
                 leadership_signal_available = True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001, skill-34-exempt — recoverable: missing-bar / RPC blip; caller falls through
             logger.debug("[%s] leadership_zscore @ %s failed: %s",
                          ticker, interval, exc)
 
@@ -308,7 +308,7 @@ def _classify_intraday(
             if vix_result is not None:
                 _, vix_zscore = vix_result
                 inter_market_inhibit_bullish = vix_zscore > VIX_INHIBIT_ZSCORE
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001, skill-34-exempt — recoverable: missing-bar / RPC blip; caller falls through
             logger.debug("[%s] vix_zscore @ %s failed: %s",
                          ticker, interval, exc)
 
@@ -318,7 +318,7 @@ def _classify_intraday(
     # the daily classifier uses.
     try:
         iv_rank, high_iv_warning = RegimeClassifier._compute_iv_rank(close)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001, skill-34-exempt — recoverable: missing-bar / RPC blip; caller falls through
         logger.debug("[%s] iv_rank @ %s failed: %s", ticker, interval, exc)
         iv_rank, high_iv_warning = 0.0, False
 
@@ -333,7 +333,7 @@ def _classify_intraday(
     try:
         ts = close.index[-1]
         last_bar_ts = pd.Timestamp(ts).to_pydatetime()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, skill-34-exempt — recoverable: missing-bar / RPC blip; caller falls through
         last_bar_ts = None
 
     return RegimeAnalysis(

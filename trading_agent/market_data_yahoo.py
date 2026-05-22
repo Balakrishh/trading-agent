@@ -112,7 +112,7 @@ class YahooMarketDataProvider(MarketDataProvider):
                 if price:
                     out[t] = float(price)
                     self._snapshot_cache[t] = (float(price), now)
-            except Exception as exc:                       # noqa: BLE001
+            except Exception as exc:                       # noqa: BLE001, skill-34-exempt — best-effort feed; caller treats None as missing
                 logger.debug("[%s] Yahoo snapshot failed: %s", t, exc)
         return out
 
@@ -168,7 +168,7 @@ class YahooMarketDataProvider(MarketDataProvider):
         try:
             from zoneinfo import ZoneInfo
             now_et = datetime.now(ZoneInfo("America/New_York"))
-        except Exception:                                  # noqa: BLE001
+        except Exception:                                  # noqa: BLE001, skill-34-exempt — best-effort feed; caller treats None as missing
             return False
         if now_et.weekday() >= 5:    # Sat/Sun
             return False

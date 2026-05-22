@@ -513,7 +513,7 @@ class JournalKB:
         try:
             with locked_append(self.jsonl_path) as fh:
                 fh.write(json.dumps(record, default=str) + "\n")
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — journal-write recursion guard
             logger.error("JournalKB JSONL write failed: %s", exc)
 
     def _write_md_row(
@@ -540,7 +540,7 @@ class JournalKB:
             )
             with locked_append(self.md_path) as fh:
                 fh.write(row)
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — journal-write recursion guard
             logger.error("JournalKB Markdown write failed: %s", exc)
 
     @staticmethod

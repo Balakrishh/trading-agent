@@ -219,7 +219,7 @@ class SchwabMarketDataProvider(MarketDataProvider):
                                 f"schwab_oauth login` to re-auth."
                             ),
                         )
-                except Exception:                              # noqa: BLE001
+                except Exception:                              # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                     # The monitor is best-effort. Schwab failure
                     # itself is already surfaced via logger.warning;
                     # we just couldn't page Telegram.
@@ -572,7 +572,7 @@ class SchwabMarketDataProvider(MarketDataProvider):
                             sample.get("openInterest"),
                             sample.get("symbol"), keys_present,
                         )
-            except Exception as exc:                       # noqa: BLE001
+            except Exception as exc:                       # noqa: BLE001, skill-34-exempt — chain-dump diagnostic is debug-only; data path unaffected
                 logger.debug("Chain dump skipped: %s", exc)
             self._chain_dump_done = True
 
@@ -759,7 +759,7 @@ class SchwabMarketDataProvider(MarketDataProvider):
                 for _product_key, hours in equity.items():
                     if isinstance(hours, dict) and "isOpen" in hours:
                         return bool(hours["isOpen"])
-            except Exception as exc:        # noqa: BLE001
+            except Exception as exc:        # noqa: BLE001, skill-34-exempt — Schwab /markets parse failure; falls back to Alpaca clock
                 logger.debug("Schwab /markets parse failed: %s", exc)
         # Fallback to Alpaca clock if Schwab path didn't resolve.
         try:

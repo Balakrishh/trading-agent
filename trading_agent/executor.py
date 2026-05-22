@@ -548,7 +548,7 @@ class OrderExecutor:
 
                 try:
                     resp_body = resp.json()
-                except Exception:
+                except Exception:  # noqa: skill-34-exempt — broker response body parse fallback; raw text already captured
                     resp_body = resp.text
 
                 # 4xx is permanent at the broker — don't retry.  The
@@ -601,7 +601,7 @@ class OrderExecutor:
                             plan.ticker, attempt, ORDER_RETRY_ATTEMPTS, detail,
                         )
                         last_error += f" | Alpaca detail: {detail}"
-                    except Exception:
+                    except Exception:  # noqa: skill-34-exempt — broker response body parse fallback; raw text already captured
                         raw = exc.response.text
                         logger.error(
                             "[%s] Alpaca raw response (attempt %d/%d): %s",
@@ -665,7 +665,7 @@ class OrderExecutor:
                         f"Alpaca to confirm whether ANY attempt landed."
                     ),
                 )
-        except Exception:                                         # noqa: BLE001
+        except Exception:                                         # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
             pass
         result = {
             "status": "error",
@@ -847,7 +847,7 @@ class OrderExecutor:
                             f"no replacement entered. {exc}"
                         ),
                     )
-            except Exception:                                     # noqa: BLE001
+            except Exception:                                     # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                 pass
             return {
                 "status": "roll_open_failed",
@@ -887,7 +887,7 @@ class OrderExecutor:
             resp = requests.delete(url, headers=self._headers(), timeout=ALPACA_TIMEOUT_LONG)
             try:
                 resp_body = resp.json()
-            except Exception:
+            except Exception:  # noqa: skill-34-exempt — broker close response body parse fallback; raw text already captured
                 resp_body = resp.text
             resp.raise_for_status()
             logger.info("Closed position: %s", symbol)
@@ -917,7 +917,7 @@ class OrderExecutor:
                             f"intervention may be required."
                         ),
                     )
-            except Exception:                                     # noqa: BLE001
+            except Exception:                                     # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                 pass
             return {"status": "error", "symbol": symbol, "error": error_msg}
 
@@ -987,7 +987,7 @@ class OrderExecutor:
             from trading_agent.trade_plan_report import generate_report
             html_path = generate_report(filepath)
             logger.debug("HTML report updated: %s", html_path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — trade-plan-report HTML generation is cosmetic; trade itself complete
             logger.debug("HTML report generation skipped: %s", exc)
 
         return filepath, run_id
@@ -1014,5 +1014,5 @@ class OrderExecutor:
             with open(filepath, "w") as fh:
                 json.dump(persistent, fh, indent=2)
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — plan file update is best-effort; trade outcome already journaled
             logger.error("Failed to update plan file %s: %s", filepath, exc)

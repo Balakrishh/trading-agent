@@ -538,7 +538,7 @@ class StrategyPlanner:
                             f"({side}): {exc}"
                         ),
                     )
-            except Exception:                                     # noqa: BLE001
+            except Exception:                                     # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                 pass
             return self._empty_plan(ticker, strategy_name, analysis,
                                      fallback_expiration,

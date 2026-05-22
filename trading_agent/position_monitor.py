@@ -675,7 +675,7 @@ class PositionMonitor:
                     f"trading day. Liquidating by 15:30 ET to avoid "
                     f"last-day gamma risk."
                 )
-        except Exception:
+        except Exception:  # noqa: skill-34-exempt — best-effort; returns empty list on broker outage
             pass
         return ""
 

@@ -166,7 +166,7 @@ class TelegramNotifier:
                 resp.status_code, channel, resp.text[:200],
             )
             return False
-        except Exception as exc:                                  # noqa: BLE001
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — Telegram cannot page about itself
             # Bare Exception: network, JSON, timeout, DNS, anything.
             # A flaky Telegram API must not cascade into a cycle abort.
             logger.warning(

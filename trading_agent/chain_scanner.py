@@ -419,7 +419,7 @@ class ChainScanner:
                     dte_min=max(1, int(target_dte) - self.dte_window_days),
                     dte_max=int(target_dte) + self.dte_window_days,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: skill-34-exempt — per-candidate retry; loop continues to next DTE
                 logger.warning("[%s] Expiration pick failed for DTE=%s: %s",
                                ticker, target_dte, exc)
                 continue

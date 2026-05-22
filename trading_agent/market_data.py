@@ -257,7 +257,7 @@ class MarketDataProvider:
                 try:
                     fut.result()
                     logger.debug("[%s] Historical pre-fetch done", ticker)
-                except Exception as exc:
+                except Exception as exc:  # noqa: skill-34-exempt — best-effort enrichment; caller treats None as missing
                     logger.warning("[%s] Historical pre-fetch failed: %s",
                                    ticker, exc)
 
@@ -395,7 +395,7 @@ class MarketDataProvider:
         if include_live_overlay and not df.empty:
             try:
                 live_price = self._fetch_alpaca_snapshot_price(ticker)
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover — defensive  # noqa: skill-34-exempt — best-effort enrichment; caller treats None as missing
                 logger.debug("[%s] Live-overlay snapshot failed: %s",
                              ticker, exc)
                 live_price = None
@@ -1257,7 +1257,7 @@ class MarketDataProvider:
             df = ticker.history(period="1d", interval="5m", auto_adjust=False)
             if df is None or df.empty or len(df) < self.OPEN_BAR_SKIP + 2:
                 return None
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — best-effort enrichment; caller treats None as missing
             logger.warning("VIX yfinance fetch failed (%s): %s", symbol, exc)
             return None
 

@@ -534,7 +534,7 @@ class TradingAgent:
             )
             return analyst
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — intelligence layer is optional; cycle falls back to rule-based
             logger.warning(
                 "Failed to initialize intelligence layer: %s — "
                 "continuing in rule-based mode",
@@ -646,7 +646,7 @@ class TradingAgent:
                         f"Tickers: {self.config.trading.tickers}"
                     ),
                 )
-            except Exception:                                     # noqa: BLE001
+            except Exception:                                     # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                 pass
             result = {
                 "status": "error",
@@ -701,7 +701,7 @@ class TradingAgent:
             # business-critical.
             try:
                 self._maybe_send_eod_summary()
-            except Exception as exc:                            # noqa: BLE001
+            except Exception as exc:                            # noqa: BLE001, skill-34-exempt — EOD recap is best-effort at shutdown; agent already exiting
                 logger.warning("EOD summary attempt failed: %s", exc)
             # graceful_exit: we decided to stop; logs + journal are healthy.
             _shutdown.graceful_exit(0, reason="after_hours_shutdown", context={
@@ -857,7 +857,7 @@ class TradingAgent:
         # unfilled one (root cause of the duplicate-GOOG issue).
         try:
             self._cancel_stale_orders(tickers)
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — stale-order maintenance is best-effort; next cycle retries
             logger.warning("Stale-order maintenance failed: %s", exc)
 
         try:
@@ -869,7 +869,7 @@ class TradingAgent:
                     sorted(tickers_with_open_orders),
                 )
                 tickers_with_positions |= tickers_with_open_orders
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — open-order dedup is best-effort; next cycle retries
             logger.warning("Open-order dedup failed: %s", exc)
 
         # ------------------------------------------------------------------
@@ -995,7 +995,7 @@ class TradingAgent:
                             f"on {ticker}: {exc}"
                         ),
                     )
-                except Exception:                                 # noqa: BLE001
+                except Exception:                                 # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                     pass
                 new_trade_results.append({
                     "ticker": ticker,
@@ -1068,7 +1068,7 @@ class TradingAgent:
                         "dedup gate is failing closed by design."
                     ),
                 )
-            except Exception as exc:                              # noqa: BLE001
+            except Exception as exc:                              # noqa: BLE001, skill-34-exempt — journal-warning write is best-effort; primary log path covers operator
                 logger.warning("Failed to journal position-fetch warning: %s", exc)
             return {"total_spreads": 0, "positions": [], "closed": [],
                     "fetch_failed": True}
@@ -1095,7 +1095,7 @@ class TradingAgent:
                     "[%s] Current regime: %s",
                     ticker, analysis.regime.value,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: skill-34-exempt — regime classify falls back to neutral inside the try
                 logger.warning("[%s] Could not classify regime: %s", ticker, exc)
             price = self._cached_price(ticker)
             if price > 0:
@@ -1135,7 +1135,7 @@ class TradingAgent:
                     "capped at %d days (was preset value).",
                     cap,
                 )
-        except Exception as exc:                                # noqa: BLE001
+        except Exception as exc:                                # noqa: BLE001, skill-34-exempt — PDT DTE cap is opportunistic; preset DTE used unchanged
             logger.warning(
                 "apply_pdt_dte_cap raised — preset DTE unchanged: %s", exc,
             )
@@ -1745,7 +1745,7 @@ class TradingAgent:
                     if tk:
                         tickers.add(tk)
             return tickers
-        except Exception as exc:                                # noqa: BLE001
+        except Exception as exc:                                # noqa: BLE001, skill-34-exempt — fail-open dedup: extra REGIME_SHIFT exit ≪ missing one
             logger.warning(
                 "Failed to read same-day-open tickers from journal: %s",
                 exc,
@@ -1792,7 +1792,7 @@ class TradingAgent:
                         continue
                     return True
             return False
-        except Exception as exc:                                # noqa: BLE001
+        except Exception as exc:                                # noqa: BLE001, skill-34-exempt — fail-open dedup: extra alert ≪ missed alert
             logger.warning(
                 "Failed to read telegram-alert dedup state: %s", exc,
             )
@@ -1869,7 +1869,7 @@ class TradingAgent:
                 },
                 notes=f"telegram_alert_sent: {alert_type}",
             )
-        except Exception as exc:                                # noqa: BLE001
+        except Exception as exc:                                # noqa: BLE001, skill-34-exempt — alert sent OK; dedup-row write loss is a non-event
             # Journal write failure here means dedup will be lossy for
             # this ticker today — but the alert DID go out, so the
             # operator isn't blind. Log + continue.
@@ -1985,7 +1985,7 @@ class TradingAgent:
             return
         try:
             now_et = datetime.now(EASTERN)
-        except Exception:                                       # noqa: BLE001
+        except Exception:                                       # noqa: BLE001, skill-34-exempt — timezone unavailable on weird systems; EOD skip is safe
             return
         is_weekday = now_et.weekday() < 5
         # Pre-market on weekdays: skip (the day hasn't happened yet).
@@ -2079,7 +2079,7 @@ class TradingAgent:
                     # Old timestamped format
                     plans.append(data)
 
-            except Exception as exc:
+            except Exception as exc:  # noqa: skill-34-exempt — plan-file load failure on one file does not block the others
                 logger.warning("Could not load plan %s: %s", path, exc)
 
         logger.info("Loaded %d trade plan(s) from %s", len(plans), plan_dir)
@@ -2286,7 +2286,7 @@ class TradingAgent:
             else:
                 try:
                     sentiment = fingpt_future.result(timeout=60)
-                except Exception as exc:
+                except Exception as exc:  # noqa: skill-34-exempt — fail-open PDT derivation: extra close attempt ≪ blocked legitimate close
                     logger.warning(
                         "[%s] Sentiment pipeline future failed: %s",
                         ticker, exc,
@@ -2359,7 +2359,7 @@ class TradingAgent:
                         "strategy": plan.strategy_name,
                     },
                 )
-            except Exception as exc:                              # noqa: BLE001
+            except Exception as exc:                              # noqa: BLE001, skill-34-exempt — executor-warning journal write is best-effort
                 logger.warning(
                     "[%s] Failed to journal executor warning: %s",
                     ticker, exc,
@@ -2375,7 +2375,7 @@ class TradingAgent:
                 entry.order_id = exec_result.get("order_id", "")
                 trade_id = self.llm_analyst.journal.open_trade(entry)
                 exec_result["trade_journal_id"] = trade_id
-            except Exception as exc:
+            except Exception as exc:  # noqa: skill-34-exempt — trade-journal open is best-effort; primary signals journal still covers
                 logger.warning("[%s] Failed to journal trade: %s", ticker, exc)
 
         # Always log to JournalKB
@@ -2566,7 +2566,7 @@ class TradingAgent:
                 raw_signal=raw,
                 exec_status=exec_status,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — JournalKB log is best-effort here; close itself already happened
             logger.warning("[%s] JournalKB log failed: %s", ticker, exc)
 
         # ── Position-opened alert (skill 32 §3.6) ────────────────────
@@ -2707,7 +2707,7 @@ class TradingAgent:
                         f"the broker recovers."
                     ),
                 )
-            except Exception:                                     # noqa: BLE001
+            except Exception:                                     # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                 pass
             return out
 
@@ -2764,7 +2764,7 @@ class TradingAgent:
                         f"limits accumulate at broker."
                     ),
                 )
-            except Exception:                                     # noqa: BLE001
+            except Exception:                                     # noqa: BLE001, skill-34-exempt — monitor wrap; skill 34 §4 never propagate
                 pass
             return
 
@@ -2845,7 +2845,7 @@ class TradingAgent:
                 "open_orders": open_summary,
                 "recent_fills": fill_summary,
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — order-status fetch is best-effort; returns error dict to caller
             logger.warning("Could not check order statuses: %s", exc)
             return {"error": str(exc)}
 
@@ -2910,7 +2910,7 @@ class TradingAgent:
                             updated_text=trade.to_embedding_text(),
                         )
                     break
-        except Exception as exc:
+        except Exception as exc:  # noqa: skill-34-exempt — post-trade LLM learning is non-critical; trade itself succeeded
             logger.warning(
                 "[%s] Post-trade learning failed: %s",
                 spread.underlying, exc,

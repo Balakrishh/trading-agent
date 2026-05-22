@@ -327,7 +327,7 @@ class RegimeClassifier:
             if len(close) > 0:
                 ts = close.index[-1]
                 last_bar_ts = pd.Timestamp(ts).to_pydatetime()
-        except Exception:  # noqa: BLE001 — never let staleness probe crash classify()
+        except Exception:  # noqa: BLE001, skill-34-exempt — recoverable: caller falls through to neutral regime — never let staleness probe crash classify()
             last_bar_ts = None
 
         analysis = RegimeAnalysis(

@@ -534,7 +534,7 @@ def _cli_login(oauth: SchwabOAuth) -> int:
         return 1
     try:
         ts = oauth.exchange_authorization_code(pasted)
-    except Exception as exc:
+    except Exception as exc:  # noqa: skill-34-exempt — CLI exchange-authorization-code path; prints failure to stderr
         print(f"Failed: {exc}", file=sys.stderr)
         return 2
     print()

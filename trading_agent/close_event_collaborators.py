@@ -106,7 +106,7 @@ class PartialFillCooldown:
                     if ts < cutoff:
                         continue
                     events.append((ts, rec.get("action", "")))
-        except Exception as exc:                                  # noqa: BLE001
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — collaborator wrap (skill 35: never propagate)
             logger.warning(
                 "Could not read journal for cooldown derivation: %s", exc,
             )
@@ -298,7 +298,7 @@ class PdtBlockDetector:
                     if tk:
                         blocked.add(tk)
             return blocked
-        except Exception as exc:                                  # noqa: BLE001
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — collaborator wrap (skill 35: never propagate)
             logger.warning(
                 "Failed to derive PDT-blocked tickers from journal: %s",
                 exc,
@@ -440,7 +440,7 @@ class CloseJournalWriter:
         try:
             self._write_impl(spread, ctx, leg_results=leg_results,
                              fill_status=fill_status, dry_run=dry_run)
-        except Exception as exc:                                  # noqa: BLE001
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — collaborator wrap (skill 35: never propagate)
             logger.warning(
                 "[%s] Failed to journal close event: %s",
                 getattr(spread, "underlying", "?"), exc,
