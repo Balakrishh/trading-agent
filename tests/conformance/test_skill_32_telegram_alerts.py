@@ -311,23 +311,24 @@ def test_skill_32_is_active_covers_either_channel() -> None:
     assert n2.is_active is False
 
 
-def test_skill_32_eod_builder_uses_et_date_and_skips_dry_run() -> None:
-    """Skill 32 §3.8 (2026-05-21 hotfix): _build_eod_summary must filter
-    rows by ET trading-session date AND skip rows where
-    fill_status='dry_run'.
+def test_skill_32_eod_builder_delegates_to_journal_reader() -> None:
+    """Skill 32 §3.8 + skill 19 §1.2 (decoupling #2, 2026-05-22):
+    ``_build_eod_summary`` must delegate to ``JournalReader`` instead
+    of opening the journal and applying its own filter logic.
 
-    Pi observation: Thursday afternoon's EOD recap showed 23 phantom
-    DIA closes summing to -$2,976 because:
+    History: this test originally pinned the in-line ET-date filter
+    + dry-run skip directly in ``_build_eod_summary``. After
+    decoupling #2 that logic moved into ``JournalReader`` and is
+    pinned by the dedicated reader tests
+    (``test_journal_reader_closes_today_uses_et_date_not_utc``,
+    ``test_journal_reader_closes_today_skips_dry_run_fill_status``).
 
-      1. The outer ``today_iso`` filter used UTC date, pulling in 22
-         dry-run pseudo-closes written at 20:14-22:49 ET Wed (= UTC
-         next-day 00:14-02:49) into Thursday's recap.
-      2. Even with the ET-date fix, the 1 row from Thursday morning
-         that's correctly tagged would be joined by any historical
-         mislabeled action="closed" + fill_status="dry_run" rows
-         that happen to fall on Thursday's ET date.
-
-    Pin the source-level guards so these regressions can't recur.
+    The EOD-builder-side test now pins the DELEGATION rather than
+    the inline logic. That's the whole point of the refactor —
+    one place owns the filter; many call sites consume it. A
+    refactor that re-inlines the filter in agent.py would
+    re-introduce the duplicate-readers bug pattern, so this test
+    forbids it.
     """
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[2]
@@ -338,24 +339,36 @@ def test_skill_32_eod_builder_uses_et_date_and_skips_dry_run() -> None:
     builder_end = src.find("\n    def ", builder_start + 1)
     body = src[builder_start:builder_end if builder_end > 0 else None]
 
-    # ET-date filter must be present
-    assert "today_et_iso" in body, (
-        "Skill 32 §3.8: _build_eod_summary must compute today_et_iso "
-        "(ET calendar date) and use it as the outer row filter. "
-        "Pure-UTC filter mistakenly includes Wed-evening rows in "
-        "Thursday's recap because UTC midnight is 4 hours after ET "
-        "trading-session boundary."
+    # The EOD builder MUST go through JournalReader.
+    assert "JournalReader" in body, (
+        "Skill 32 §3.8: _build_eod_summary must instantiate "
+        "JournalReader and call its named query methods. The "
+        "filter logic (ET-date boundary, dry-run skip) lives there "
+        "now — any local re-implementation would drift from the "
+        "dashboard tile and _render_closed_today."
     )
-    assert "datetime.now(EASTERN).date().isoformat()" in body, (
-        "Skill 32 §3.8: today_et_iso must come from "
-        "datetime.now(EASTERN).date().isoformat()."
-    )
-    # Skip dry-run mislabeled rows from realized-P&L sum
-    assert 'rs.get("fill_status") != "dry_run"' in body, (
-        "Skill 32 §3.8: the closes-list builder must skip rows "
-        "where fill_status='dry_run' (defense against pre-2026-05-21 "
-        "mislabeled action='closed' rows). Without this guard, "
-        "historical phantom rows still pollute the recap."
+    # Specific reader methods we expect the builder to consume:
+    for method in (".closes_today()",
+                   ".opens_today()",
+                   ".stuck_positions()",
+                   ".cycle_minute_count_today()",
+                   ".error_count_today()",
+                   ".account_balance_today_endpoints()"):
+        assert method in body, (
+            f"Skill 32 §3.8: _build_eod_summary must call {method}. "
+            f"Each query method is documented as one of the six "
+            f"questions the recap answers — re-implementing it "
+            f"in the builder drifts behavior."
+        )
+
+    # Defensive: ensure the old in-line journal walk hasn't been
+    # re-introduced. A fresh ``with open(jsonl_path)`` inside the
+    # builder body would be the regression to catch.
+    forbidden_indicator = "with open(jsonl_path"
+    assert forbidden_indicator not in body, (
+        "Skill 32 §3.8: _build_eod_summary must NOT open the "
+        "journal directly. Use JournalReader so all consumers "
+        "see the same view of today's activity."
     )
 
 

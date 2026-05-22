@@ -49,7 +49,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
 - `trading_agent/fingpt_analyser.py` (last modified 2026-04-19)
-- `trading_agent/journal_reader.py`
+- `trading_agent/journal_reader.py` (last modified 2026-05-22)
 - `trading_agent/knowledge_base.py` (last modified 2026-04-02)
 - `trading_agent/llm_analyst.py` (last modified 2026-04-19)
 - `trading_agent/llm_client.py` (last modified 2026-04-19)

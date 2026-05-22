@@ -209,28 +209,40 @@ def test_skill_19_valid_run_modes_includes_dryrun() -> None:
     )
 
 
-def test_skill_19_dashboard_filters_dry_run_from_realized_pl() -> None:
-    """Skill 19 §4 (2026-05-21 hotfix): the dashboard's realized-P&L
-    sum must defensively exclude rows where fill_status='dry_run',
-    even when action='closed' (handles historical journal rows
-    written by the pre-fix agent before deploy)."""
+def test_skill_19_dashboard_realized_pl_uses_journal_reader() -> None:
+    """Skill 19 §1.2 (decoupling #2, 2026-05-22): the dashboard's
+    realized-P&L tile must compute its value via
+    ``JournalReader.realized_pl_today()`` — NOT a local re-implementation
+    of the filter logic.
+
+    History: this test originally pinned the in-line filter
+    (``rs.get('fill_status') == 'dry_run'``) directly in
+    ``live_monitor.py``. After decoupling #2 that filter moved into
+    ``JournalReader.closes_today`` where it's pinned by the dedicated
+    reader test (``test_journal_reader_closes_today_skips_dry_run_fill_status``).
+    The dashboard-side test now pins the DELEGATION rather than the
+    inline logic. That's the whole point of the refactor — one place
+    owns the filter; many call sites consume it. A future refactor
+    that re-inlines the filter in the dashboard would re-introduce
+    the duplicate-readers bug pattern, so this test forbids it."""
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[2]
     src = (repo_root / "trading_agent" / "streamlit" /
            "live_monitor.py").read_text(encoding="utf-8")
-    # The realized-P&L iteration must contain a fill_status='dry_run'
-    # skip. We don't pin the exact line — only that the predicate is
-    # present near the realized_today computation.
-    realized_block_start = src.find("realized_today += float")
-    assert realized_block_start > 0, (
-        "Skill 19 §4: dashboard must compute realized_today from "
-        "journal rows. Removing this breaks the daily P&L tile."
+    # The dashboard MUST go through the reader for realized P&L.
+    assert ".realized_pl_today()" in src, (
+        "Skill 19 §1.2: dashboard realized-P&L tile must call "
+        "JournalReader(...).realized_pl_today(). The filter logic "
+        "(skip dry-run, ET-date boundary) lives there now — any "
+        "local re-implementation would drift from sibling readers."
     )
-    # Look backwards a few lines for the fill_status='dry_run' guard
-    block = src[max(0, realized_block_start - 500):realized_block_start]
-    assert 'fill_status' in block and 'dry_run' in block, (
-        "Skill 19 §4: realized-P&L sum must filter rows where "
-        "rs.get('fill_status') == 'dry_run'. Without the filter, "
-        "historical mislabeled rows count as real losses (-$2,860 "
-        "phantom loss observed on the Pi pre-fix)."
+    # Defensive: ensure the old in-line pattern hasn't been reintroduced.
+    # A fresh ``realized_today += float`` followed by a dataframe walk
+    # would be the regression to catch.
+    forbidden_indicator = "for _, row in closed_today.iterrows():"
+    assert forbidden_indicator not in src, (
+        "Skill 19 §1.2: dashboard must NOT iterate journal rows "
+        "directly to compute realized P&L. Use the JournalReader "
+        "delegation instead — re-introducing the inline walk "
+        "drifts filter semantics across consumers."
     )
