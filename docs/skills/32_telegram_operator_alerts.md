@@ -214,4 +214,4 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 
 ---
 
-*Last verified against repo HEAD on 2026-05-21 (two-channel routing: error bot + info bot with single-bot fallback).*
+*Last verified against repo HEAD on 2026-05-22 (two-channel routing: error bot + info bot with single-bot fallback).*

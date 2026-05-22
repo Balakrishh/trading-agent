@@ -85,6 +85,7 @@ from trading_agent.defensive_roll_evaluator import (
 )
 from trading_agent.executor import OrderExecutor
 from trading_agent.telegram_notifier import TelegramNotifier
+from trading_agent.journal_reader import JournalReader
 from trading_agent.position_monitor import (
     PositionMonitor, ExitSignal, SpreadPosition, IMMEDIATE_EXIT_SIGNALS,
 )
@@ -2017,19 +2018,17 @@ class TradingAgent:
     def _build_eod_summary(self) -> Dict:
         """Aggregate today's journal rows into the EOD recap payload.
 
-        Skill 32 §3.8 — pure read of signals_live.jsonl. Returns a dict
-        the notifier consumes directly. Never raises — partial data is
-        better than no alert.
+        Skill 19 §1.2 + skill 32 §3.8. Pre-2026-05-21 this method
+        opened the journal directly and applied its own filters,
+        which drifted from sibling readers (dashboard tile,
+        _render_closed_today) and produced the -$2,976 phantom
+        recap bug. Now delegates to ``JournalReader`` so all
+        three consumers see the same view of "today's activity".
+        Filter changes happen once, in the reader.
 
-        Aggregations:
-          * opens_today / closes_today: per-event mini-summaries
-          * realized_pl_today: sum of net_unrealized_pl on every closed row
-          * cycles_today: count of distinct cycle_start journal events
-          * errors_today: count of cycle_error / warning rows
-          * last_balance: most-recent account_balance value seen today
-          * starting_balance: earliest account_balance value seen today
-          * stuck_tickers: tickers with pdt_blocked_today=today OR
-                           future close_cooldown_until
+        Returns the existing dict shape so ``_maybe_send_eod_summary``
+        and the notify_eod_summary kwargs don't need to change.
+        Never raises — partial data is better than no alert.
         """
         result: Dict = {
             "opens_today": [],
@@ -2043,129 +2042,33 @@ class TradingAgent:
         }
         try:
             jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
-            if not jsonl_path or not os.path.isfile(jsonl_path):
+            if not jsonl_path:
                 return result
-            # Trading-session date filter (2026-05-21 hotfix). Earlier
-            # version used datetime.utcnow().date() for ``today_iso``,
-            # which pulled in Wed-evening journal writes (20:00 ET Wed
-            # = 00:00 UTC Thu) into Thursday's EOD recap — that's how
-            # 22 phantom -$130 dry-run rows showed up in the Telegram
-            # summary. The right boundary is the ET calendar date that
-            # matches the trading session this recap is summarising.
-            today_et_iso = datetime.now(EASTERN).date().isoformat()
-            # UTC today retained for fields whose markers are
-            # UTC-keyed (pdt_blocked_date specifically — written by
-            # _journal_close_event with UTC today).
-            today_utc_iso = datetime.now(timezone.utc).date().isoformat()
-            now_utc = datetime.now(timezone.utc)
-            seen_balances: List[float] = []
-            seen_stuck: Dict[str, str] = {}   # ticker → reason
-            # The journal has no explicit "cycle_start" row — count
-            # distinct ISO minutes instead. Each cycle takes ~30s, so
-            # one cycle ≈ one minute-bucket of journal writes. This is
-            # a proxy that works without changing every writer to emit
-            # a cycle marker.
-            seen_minutes: Set[str] = set()
-            with open(jsonl_path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    ts_str = rec.get("timestamp", "")
-                    if not ts_str:
-                        continue
-                    # Convert UTC timestamp to ET date for the filter.
-                    try:
-                        ts_dt = datetime.fromisoformat(ts_str)
-                        if ts_dt.tzinfo is None:
-                            ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-                        row_et_date = ts_dt.astimezone(EASTERN).date().isoformat()
-                    except ValueError:
-                        continue
-                    if row_et_date != today_et_iso:
-                        continue
-                    action = rec.get("action", "") or ""
-                    rs = rec.get("raw_signal") or {}
-                    if not isinstance(rs, dict):
-                        rs = {}
-                    ticker = rec.get("ticker", "") or ""
-
-                    # Cycle-bucket — distinct minutes of any journal write
-                    if len(ts_str) >= 16:
-                        seen_minutes.add(ts_str[:16])
-
-                    # Account-balance tracking
-                    bal = rs.get("account_balance")
-                    if isinstance(bal, (int, float)) and bal > 0:
-                        seen_balances.append(float(bal))
-
-                    # Opens
-                    if action == "submitted" and ticker:
-                        result["opens_today"].append({
-                            "ticker": ticker,
-                            "strategy": rs.get("strategy", "?"),
-                            "credit": rs.get("net_credit") or 0.0,
-                        })
-
-                    # Closes — defense against pre-2026-05-21 mislabeled
-                    # rows where action="closed" + fill_status="dry_run"
-                    # (synthetic dry-run closes that pre-date the
-                    # action-label split). Skip them so realised P&L
-                    # stays clean. New code writes action="dry_run_close"
-                    # so this filter is a no-op going forward.
-                    if (action == "closed" and ticker
-                            and rs.get("fill_status") != "dry_run"):
-                        pl = float(rs.get("net_unrealized_pl") or 0.0)
-                        result["closes_today"].append({
-                            "ticker": ticker,
-                            "strategy": rs.get("strategy", "?"),
-                            "exit_signal": rs.get("exit_signal", "?"),
-                            "realized_pl": pl,
-                        })
-                        result["realized_pl_today"] += pl
-
-                    # Error counts
-                    if action in ("error", "cycle_error", "warning"):
-                        result["errors_today"] += 1
-
-                    # Stuck positions — PDT-blocked. ``pdt_blocked_date``
-                    # is UTC-keyed (written by _journal_close_event using
-                    # UTC today); compare to UTC today for backward-
-                    # compat with that writer. The outer row filter is
-                    # ET-keyed but this internal comparison stays UTC.
-                    if (action == "close_failed"
-                            and rs.get("pdt_blocked_today")
-                            and rs.get("pdt_blocked_date") == today_utc_iso):
-                        seen_stuck[ticker] = (
-                            "PDT block (Alpaca 40310100) — close in "
-                            "Alpaca UI or wait for next session"
-                        )
-                    # Stuck positions — close cooldown still active
-                    elif action == "close_failed":
-                        cd = rs.get("close_cooldown_until")
-                        if cd:
-                            try:
-                                cd_dt = datetime.fromisoformat(cd)
-                                if cd_dt.tzinfo is None:
-                                    cd_dt = cd_dt.replace(tzinfo=timezone.utc)
-                                if cd_dt > now_utc and ticker not in seen_stuck:
-                                    seen_stuck[ticker] = (
-                                        "Close cooldown active — manual "
-                                        "close required to clear zombie state"
-                                    )
-                            except ValueError:
-                                pass
-
-            if seen_balances:
-                result["last_balance"] = seen_balances[-1]
-                result["starting_balance"] = seen_balances[0]
-            result["cycles_today"] = len(seen_minutes)
+            reader = JournalReader(jsonl_path)
+            # closes_today returns ClosedTrade dataclasses; convert
+            # to the dict shape notify_eod_summary expects.
+            for c in reader.closes_today():
+                result["closes_today"].append({
+                    "ticker": c.ticker,
+                    "strategy": c.strategy,
+                    "exit_signal": c.exit_signal,
+                    "realized_pl": c.realized_pl,
+                })
+                result["realized_pl_today"] += c.realized_pl
+            for o in reader.opens_today():
+                result["opens_today"].append({
+                    "ticker": o.ticker,
+                    "strategy": o.strategy,
+                    "credit": o.credit,
+                })
+            result["cycles_today"] = reader.cycle_minute_count_today()
+            result["errors_today"] = reader.error_count_today()
+            start_bal, last_bal = reader.account_balance_today_endpoints()
+            result["starting_balance"] = start_bal
+            result["last_balance"] = last_bal or 0.0
             result["stuck_tickers"] = [
-                {"ticker": t, "reason": r} for t, r in sorted(seen_stuck.items())
+                {"ticker": s.ticker, "reason": s.reason}
+                for s in reader.stuck_positions()
             ]
         except Exception as exc:                                # noqa: BLE001
             logger.warning("Failed to build EOD summary: %s", exc)

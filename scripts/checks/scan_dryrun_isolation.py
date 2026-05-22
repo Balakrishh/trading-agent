@@ -40,6 +40,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ALLOWED_PATHS = {
     "trading_agent/journal_kb.py",
     "trading_agent/agent.py",
+    # journal_reader.py is a read-only utility — its docstring mentions
+    # both filenames to document the design intent (single class can be
+    # pointed at either file), but no concrete production call site
+    # passes the dryrun path. Production code that USES this reader
+    # is the surface the isolation gate actually wants to constrain.
+    "trading_agent/journal_reader.py",
     "scripts/migrate_dryrun_journal_split.py",
     "scripts/checks/scan_dryrun_isolation.py",
 }

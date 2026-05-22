@@ -1229,76 +1229,42 @@ def _render_closed_today(journal_df: pd.DataFrame) -> None:
     """
     Render the "Closed Today" expander above Open Positions.
 
-    Source of truth: journal rows where ``action == "closed"`` and the
-    timestamp is today (UTC).  These are written by
-    ``agent.py:_journal_close_event`` after every COMPLETE close (all
-    legs cancelled by Alpaca) — strike_proximity / profit_target /
-    hard_stop / regime_shift / dte_safety / expired.
+    Skill 19 §1.2 decoupling pass #2 (2026-05-21). Source of truth is
+    ``JournalReader.closes_today()`` — the same call used by the
+    dashboard's realized-P&L tile and the EOD Telegram recap.
+    Pre-decoupling, each of those three consumers opened the journal
+    independently and applied its own filter; they drifted and the
+    -$2,976 EOD phantom recap was the canonical failure (dashboard
+    already had the dry-run filter, EOD did not). Now there's one
+    reader; filter changes happen once.
 
-    Pre-2026-05-06 the same row tag was used for partial fills too,
-    which made this tile lie when SPY hit a partial-fill loop and
-    produced 11 rows for ONE position.  Partial fills now go to
-    ``_render_close_failures_today`` under a separate
-    ``action="close_failed"`` tag.
-
-    Behavior
-    --------
-    * If no complete-close events today → hidden (no empty section).
-    * If ≥1 → collapsible expander with a per-row table:
-        Time · Ticker · Strategy · Exit Signal · P&L · Reason · Fill Status
-      Plus a footer with the running net P&L summed across closes.
+    ``journal_df`` is kept in the signature for backward compat but
+    is not used — the reader hits the journal file directly. This
+    keeps the contract narrow: the reader is the source of truth
+    for "what closed today", not the dashboard's possibly-stale
+    cached dataframe.
     """
-    if journal_df is None or journal_df.empty:
-        return
-    if "action" not in journal_df.columns:
-        return
-
-    closed = journal_df[journal_df["action"] == "closed"].copy()
-    if closed.empty:
+    del journal_df  # not used — reader hits the file directly
+    from trading_agent.journal_reader import JournalReader
+    closes = JournalReader(str(JOURNAL_PATH)).closes_today()
+    if not closes:
         return
 
-    # Filter to today (UTC) so a long-running agent doesn't stack
-    # weeks of closes into one panel.
-    today_utc = pd.Timestamp.utcnow().normalize()
-    closed = closed[pd.to_datetime(closed["timestamp"], utc=True)
-                    >= today_utc]
-    if closed.empty:
-        return
-
-    # Dry-run defense (skill 19, 2026-05-21 hotfix). Filter out rows
-    # mislabeled by the pre-fix agent (action="closed" but
-    # fill_status="dry_run"). Going forward the agent writes
-    # action="dry_run_close" so this filter is a no-op; the filter
-    # exists to clean up historical journal rows on already-deployed
-    # Pis. See the realized-P&L sum below for the same defense.
-    def _is_real_close(r) -> bool:
-        rs = r.get("raw_signal") or {}
-        if not isinstance(rs, dict):
-            return True
-        return rs.get("fill_status") != "dry_run"
-
-    closed = closed[closed.apply(_is_real_close, axis=1)]
-    if closed.empty:
-        return
-
-    closed = closed.sort_values("timestamp", ascending=False)
+    # Reverse-chronological so the latest close appears at the top.
+    closes = sorted(closes, key=lambda c: c.timestamp_utc, reverse=True)
 
     rows = []
     net_pl = 0.0
-    for _, r in closed.iterrows():
-        rs = r.get("raw_signal") or {}
-        if not isinstance(rs, dict):
-            rs = {}
-        pl = float(rs.get("net_unrealized_pl") or 0.0)
-        net_pl += pl
+    for c in closes:
+        net_pl += c.realized_pl
         rows.append({
-            "Closed (ET)":  format_ts(r["timestamp"], with_tz=False),
-            "Ticker":       r.get("ticker", ""),
-            "Strategy":     rs.get("strategy", ""),
-            "Exit Signal":  rs.get("exit_signal", ""),
-            "P&L ($)":      f"{'+' if pl >= 0 else ''}{pl:.2f}",
-            "Reason":       (rs.get("exit_reason") or "")[:80],
-            "Fill":         rs.get("fill_status", ""),
+            "Closed (ET)":  format_ts(c.timestamp_utc, with_tz=False),
+            "Ticker":       c.ticker,
+            "Strategy":     c.strategy,
+            "Exit Signal":  c.exit_signal,
+            "P&L ($)":      f"{'+' if c.realized_pl >= 0 else ''}{c.realized_pl:.2f}",
+            "Reason":       c.exit_reason[:80],
+            "Fill":         "complete",
         })
 
     label = (f"🚪 Closed Today ({len(rows)} exit"
@@ -3190,47 +3156,22 @@ def render_live_monitor() -> None:
         cycle_secs = None
 
     # ── Realized P&L from today's closes ───────────────────────────────────
-    # Sum action="closed" rows with timestamps in today UTC.  This is the
-    # operator's "money I locked in today" number; combined with
-    # total_pnl (currently-open) it produces the headline "Daily P&L"
-    # tile.  Pre-2026-05-06 the tile only showed unrealized — after the
-    # first close of the day, the headline number stopped reflecting
-    # the operator's true daily P&L.
+    # Skill 19 §1.2 decoupling pass #2 — delegated to JournalReader so
+    # the dashboard tile, the EOD Telegram recap, and _render_closed_today
+    # all see the same answer. Pre-2026-05-21 each had its own filter
+    # logic and they drifted; the -$2,976 EOD phantom recap was the
+    # canonical failure (dashboard tile already had the dry-run filter,
+    # EOD builder didn't).
     realized_today = 0.0
-    if not journal_df.empty and "action" in journal_df.columns:
-        try:
-            today_utc_ts = pd.Timestamp.utcnow().normalize()
-            closed_today = journal_df[
-                (journal_df["action"] == "closed")
-                & (pd.to_datetime(journal_df["timestamp"], utc=True)
-                   >= today_utc_ts)
-            ]
-            for _, row in closed_today.iterrows():
-                rs = row.get("raw_signal") or {}
-                if not isinstance(rs, dict):
-                    continue
-                # ── Dry-run defense (skill 19, 2026-05-21 hotfix) ──────
-                # Pre-fix, _journal_close_event wrote action="closed"
-                # for dry-run synthetic closes too — every cycle of a
-                # stuck-in-dry-run position re-emitted a -$130 row.
-                # 22 such rows on the Pi summed to -$2,860 of phantom
-                # realized loss. The agent now writes action=
-                # "dry_run_close" so this is structurally impossible
-                # going forward; but the journal still contains
-                # historical rows mislabeled with action="closed" +
-                # fill_status="dry_run". Skip them defensively so the
-                # realized total stays correct.
-                if rs.get("fill_status") == "dry_run":
-                    continue
-                # ``net_unrealized_pl`` at close time IS the realized
-                # P&L of that position — Alpaca freezes the value once
-                # the legs settle.
-                realized_today += float(rs.get("net_unrealized_pl") or 0)
-        except Exception as exc:                                 # noqa: BLE001
-            # Defensive: if the journal schema drifts, prefer to render
-            # the unrealized-only tile rather than crash the dashboard.
-            logger.warning("Realized-P&L compute failed: %s", exc)
-            realized_today = 0.0
+    try:
+        from trading_agent.journal_reader import JournalReader
+        realized_today = JournalReader(str(JOURNAL_PATH)).realized_pl_today()
+    except Exception as exc:                                 # noqa: BLE001
+        # Defensive: if the journal is unreadable or schema drifts,
+        # render the unrealized-only tile rather than crash the
+        # dashboard.
+        logger.warning("Realized-P&L compute failed: %s", exc)
+        realized_today = 0.0
 
     # ── Metrics row ────────────────────────────────────────────────────────
     metric_row(equity, total_pnl, regime, cycle_secs,

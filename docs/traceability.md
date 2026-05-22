@@ -28,7 +28,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 16 | market data provider routing | market_data_factory.py, market_data_schwab.py, market_data_yahoo.py, schwab_oauth.py | test_market_data_factory.py, test_market_data_schwab.py, test_production_readiness.py, test_schwab_oauth.py | conformance/test_skill_16_market_data_provider_routing.py | 02_zero_trades_diagnostic.md, 04_broker_api_errors.md |
 | 17 | close failure and cooldown | agent.py, streamlit/live_monitor.py, sector_map.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_sector_map.py, test_streamlit/test_live_monitor.py | conformance/test_skill_17_pdt_reactive_block.py, conformance/test_skill_17_position_cap.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md, 05_ghost_process_diagnostic.md |
 | 18 | order submission idempotency | executor.py | test_executor.py, test_production_readiness.py | conformance/test_skill_18_order_submission_idempotency.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md |
-| 19 | journal schema | journal_kb.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_dedup.py, test_journal_derived_cooldown.py, test_journal_kb.py, test_production_readiness.py | conformance/test_skill_19_journal_schema.py | 01_daily_close_review.md, 03_zombie_position_recovery.md |
+| 19 | journal schema | journal_kb.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_dedup.py, test_journal_derived_cooldown.py, test_journal_kb.py, test_production_readiness.py | conformance/test_skill_19_journal_reader.py, conformance/test_skill_19_journal_schema.py | 01_daily_close_review.md, 03_zombie_position_recovery.md |
 | 28 | position monitor spread grouping | position_monitor.py | test_backtest/test_sim_position.py, test_position_monitor.py, test_production_readiness.py | conformance/test_skill_28_position_monitor_spread_grouping.py | 06_ticker_dashboard_diagnostic.md |
 | 29 | per leg liquidity gate | chain_scanner.py, decision_engine.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py | conformance/test_skill_29_leg_liquidity_gate.py | — |
 | 30 | profit target management | strategy_presets.py, position_monitor.py, backtest/runner.py | test_backtest/test_sim_position.py, test_chain_scanner.py, test_position_monitor.py, test_production_readiness.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_30_profit_target_management.py | — |
@@ -49,6 +49,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
 - `trading_agent/fingpt_analyser.py` (last modified 2026-04-19)
+- `trading_agent/journal_reader.py`
 - `trading_agent/knowledge_base.py` (last modified 2026-04-02)
 - `trading_agent/llm_analyst.py` (last modified 2026-04-19)
 - `trading_agent/llm_client.py` (last modified 2026-04-19)
@@ -75,7 +76,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/trade_plan_report.py` (last modified 2026-04-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 32 / 64 files (50% uncovered)
+**Orphan source coverage:** 33 / 65 files (50% uncovered)
 
 ## Orphan skills (no conformance test)
 
