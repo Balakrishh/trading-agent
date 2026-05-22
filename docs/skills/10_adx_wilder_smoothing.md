@@ -127,4 +127,4 @@ def adx_strength(bars: pd.DataFrame, window: int = 14) -> Optional[float]:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-03.*
+*Last verified against repo HEAD on 2026-05-22.*

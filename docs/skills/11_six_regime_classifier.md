@@ -133,4 +133,4 @@ def _determine_regime(self, price: float, sma50: float, sma200: float,
 
 ---
 
-*Last verified against repo HEAD on 2026-05-03.*
+*Last verified against repo HEAD on 2026-05-22.*

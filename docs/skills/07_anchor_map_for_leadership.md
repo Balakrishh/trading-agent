@@ -125,4 +125,4 @@ def leadership_anchor_for(ticker: str) -> str:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-03.*
+*Last verified against repo HEAD on 2026-05-22.*

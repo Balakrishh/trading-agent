@@ -119,4 +119,4 @@ spreads.extend(inferred)
 
 ---
 
-*Last verified against repo HEAD on 2026-05-15 (incl. GLD envelope-unwrap follow-up shipped same day).*
+*Last verified against repo HEAD on 2026-05-22 (incl. GLD envelope-unwrap follow-up shipped same day).*

@@ -111,4 +111,4 @@ Both fields are appended at the end of `PresetConfig` (frozen dataclass, default
 
 ---
 
-*Last verified against repo HEAD on 2026-05-15.*
+*Last verified against repo HEAD on 2026-05-22.*

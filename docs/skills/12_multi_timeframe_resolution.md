@@ -190,4 +190,4 @@ def _classify_intraday(
 
 ---
 
-*Last verified against repo HEAD on 2026-05-03.*
+*Last verified against repo HEAD on 2026-05-22.*
