@@ -388,6 +388,81 @@ class JournalReader:
         out.sort(key=lambda s: (-s.count, s.source))
         return out
 
+    def tickers_opened_today_utc(self) -> Set[str]:
+        """Return underlyings that submitted a new spread today (UTC).
+
+        Skill 17 §4 — used to suppress same-day REGIME_SHIFT exits
+        on PDT-restricted accounts (< $25K equity).
+
+        UTC-keyed (not ET) because the FINRA same-day-open rule is
+        defined against the broker's UTC clock, not the operator's
+        local trading session. The action filter is ``submitted`` —
+        only successful order submissions count. Skipped rows from
+        a previous-cycle dedup or a rejected risk check do not.
+
+        Verbatim port of agent._tickers_opened_today.
+        """
+        today_utc = datetime.now(timezone.utc).date()
+        tickers: Set[str] = set()
+        for rec in self._iter_rows():
+            if rec.get("action") != "submitted":
+                continue
+            ts_str = rec.get("timestamp", "")
+            if not ts_str:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts.astimezone(timezone.utc).date() != today_utc:
+                continue
+            tk = rec.get("ticker")
+            if tk:
+                tickers.add(tk)
+        return tickers
+
+    def telegram_alert_sent_today_utc(
+        self, ticker: str, alert_type: str,
+    ) -> bool:
+        """True if a ``telegram_alert_sent`` journal row matching
+        ``(ticker, alert_type)`` was written earlier the same UTC day.
+
+        Skill 32 §3.4 — dedup gate. The first time the agent detects
+        a PDT block on a ticker, ``notify_pdt_block`` fires and a
+        ``telegram_alert_sent`` row gets written. Across the next ~78
+        cycles of the same trading day, the same DIA detection would
+        otherwise re-fire the alert — this helper short-circuits the
+        send so the operator sees ONE alert per ticker per day per
+        type.
+
+        Date-keyed (UTC) → self-clears at midnight, matching the
+        pdt_blocked_today marker's lifetime. The alert_type dimension
+        is intentional: PDT-block + close-cooldown + position-closed
+        each get separate dedup keys.
+
+        Fail-open: a journal-read failure returns False (prefer one
+        extra alert over a missed alert).
+        """
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        for rec in self._iter_rows():
+            if rec.get("action") != "telegram_alert_sent":
+                continue
+            if rec.get("ticker") != ticker:
+                continue
+            rs = rec.get("raw_signal") or {}
+            if not isinstance(rs, dict):
+                continue
+            if rs.get("alert_type") != alert_type:
+                continue
+            # Field is `alert_date` (matches what _send_telegram_alert
+            # writes, not the more-natural `sent_date`).
+            if rs.get("alert_date") != today_utc:
+                continue
+            return True
+        return False
+
     def account_balance_today_endpoints(
         self,
     ) -> tuple[Optional[float], Optional[float]]:

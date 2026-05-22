@@ -1698,108 +1698,30 @@ class TradingAgent:
     # PDT + partial-close cooldown helpers
     # ==================================================================
 
-    def _tickers_opened_today(self) -> Set[str]:
-        """
-        Return the set of underlyings that submitted a new spread today
-        (UTC).  Used to suppress same-day REGIME_SHIFT exits on PDT-
-        restricted accounts (< $25K equity).
+    # ── Skill 19 §1.2: journal queries delegate to JournalReader ─────────
+    # Pre-2026-05-22 both methods opened signals_live.jsonl directly with
+    # their own filter logic. Now they're one-line shims to JournalReader
+    # so the read path is consolidated and tested in one place.
 
-        Reads the journal directly so the answer survives a Streamlit
-        restart or agent-loop restart — the in-memory state is
-        deliberately *not* the source of truth here.  We tolerate ANY
-        parse error by returning an empty set, because the worst-case
-        consequence of a false-empty is "we attempted a close that
-        Alpaca might reject for PDT" — which is exactly the failure
-        mode that already had to be handled before this helper existed.
-        """
-        try:
-            jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
-            if not jsonl_path or not os.path.isfile(jsonl_path):
-                return set()
-            today_utc = datetime.now(timezone.utc).date()
-            tickers: Set[str] = set()
-            with open(jsonl_path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("action") != "submitted":
-                        continue
-                    ts_str = rec.get("timestamp", "")
-                    if not ts_str:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(ts_str)
-                    except ValueError:
-                        continue
-                    # Normalise to UTC for the date comparison.
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    if ts.astimezone(timezone.utc).date() != today_utc:
-                        continue
-                    tk = rec.get("ticker")
-                    if tk:
-                        tickers.add(tk)
-            return tickers
-        except Exception as exc:                                # noqa: BLE001, skill-34-exempt — fail-open dedup: extra REGIME_SHIFT exit ≪ missing one
-            logger.warning(
-                "Failed to read same-day-open tickers from journal: %s",
-                exc,
-            )
+    def _tickers_opened_today(self) -> Set[str]:
+        """Skill 17 §4: underlyings that submitted a new spread today (UTC)."""
+        from trading_agent.journal_reader import JournalReader
+        jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+        if not jsonl_path:
             return set()
+        return JournalReader(jsonl_path).tickers_opened_today_utc()
 
     def _telegram_alert_already_sent_today(self, ticker: str,
                                             alert_type: str) -> bool:
-        """True if a successful Telegram alert for this (ticker, alert_type)
-        was already journalled earlier the same UTC day.
-
-        Skill 32 §3.4 — dedup gate. The first time the agent detects a
-        PDT block on DIA, ``notify_pdt_block`` fires and a
-        ``telegram_alert_sent`` row gets written. Across the next ~78
-        cycles of the same trading day, the same DIA detection would
-        otherwise re-fire the alert — this helper short-circuits the
-        send so the operator sees ONE alert per ticker per day per type.
-
-        Date-keyed → self-clears at UTC midnight, matching the
-        pdt_blocked_today marker's lifetime.
-        """
-        try:
-            jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
-            if not jsonl_path or not os.path.isfile(jsonl_path):
-                return False
-            today_iso = datetime.now(timezone.utc).date().isoformat()
-            with open(jsonl_path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("action") != "telegram_alert_sent":
-                        continue
-                    if rec.get("ticker") != ticker:
-                        continue
-                    rs = rec.get("raw_signal") or {}
-                    if rs.get("alert_type") != alert_type:
-                        continue
-                    if rs.get("alert_date") != today_iso:
-                        continue
-                    return True
+        """Skill 32 §3.4: dedup gate — has this alert already fired today?"""
+        from trading_agent.journal_reader import JournalReader
+        jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+        if not jsonl_path:
+            # Fail-open: prefer one extra alert over a missed alert.
             return False
-        except Exception as exc:                                # noqa: BLE001, skill-34-exempt — fail-open dedup: extra alert ≪ missed alert
-            logger.warning(
-                "Failed to read telegram-alert dedup state: %s", exc,
-            )
-            # Fail-open: if we can't read dedup state, prefer one extra
-            # alert over no alert at all — duplicates are cheap, missing
-            # a stuck-position alert is not.
-            return False
+        return JournalReader(jsonl_path).telegram_alert_sent_today_utc(
+            ticker=ticker, alert_type=alert_type,
+        )
 
     def _send_telegram_alert(self, ticker: str, alert_type: str,
                               send_fn, **payload) -> None:

@@ -288,3 +288,116 @@ def test_journal_reader_eod_callers_match_dashboard_caller() -> None:
         "Skill 19 §1.2: the dashboard tile must call "
         ".realized_pl_today() — not re-implement the sum locally."
     )
+
+
+def test_tickers_opened_today_utc_counts_submitted_actions() -> None:
+    """Skill 17 §4: tickers_opened_today_utc returns underlyings with
+    a submitted row for today's UTC date. Used by the close loop to
+    suppress same-day REGIME_SHIFT exits on PDT-restricted accounts."""
+    from trading_agent.journal_reader import JournalReader
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "signals_live.jsonl"
+        now = datetime.now(timezone.utc)
+        rows = [
+            {"timestamp": now.isoformat(), "ticker": "SPY",
+             "action": "submitted", "raw_signal": {}},
+            {"timestamp": now.isoformat(), "ticker": "DIA",
+             "action": "submitted", "raw_signal": {}},
+            # Same ticker rejected — should NOT count
+            {"timestamp": now.isoformat(), "ticker": "XLF",
+             "action": "rejected", "raw_signal": {}},
+            # Yesterday's submission — should NOT count
+            {"timestamp": (now - timedelta(days=1)).isoformat(),
+             "ticker": "GLD", "action": "submitted", "raw_signal": {}},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        opened = JournalReader(str(path)).tickers_opened_today_utc()
+        assert "SPY" in opened
+        assert "DIA" in opened
+        assert "XLF" not in opened, (
+            "Skill 17 §4: only action='submitted' counts. A rejected "
+            "attempt does not establish a same-day-open position."
+        )
+        assert "GLD" not in opened, (
+            "Skill 17 §4: yesterday's submissions must not count — "
+            "FINRA day-trade is per-trading-day."
+        )
+
+
+def test_telegram_alert_sent_today_utc_dedup() -> None:
+    """Skill 32 §3.4: telegram_alert_sent_today_utc returns True if a
+    matching dedup row was written today; False otherwise. Date-keyed
+    (UTC), per-(ticker, alert_type)."""
+    from trading_agent.journal_reader import JournalReader
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "signals_live.jsonl"
+        now = datetime.now(timezone.utc)
+        rows = [
+            {"timestamp": now.isoformat(), "ticker": "DIA",
+             "action": "telegram_alert_sent",
+             "raw_signal": {"alert_type": "pdt_block",
+                            "alert_date": today_utc}},
+            # Different ticker — should not match for DIA query
+            {"timestamp": now.isoformat(), "ticker": "SPY",
+             "action": "telegram_alert_sent",
+             "raw_signal": {"alert_type": "close_cooldown",
+                            "alert_date": today_utc}},
+            # Yesterday's — should not match
+            {"timestamp": (now - timedelta(days=1)).isoformat(),
+             "ticker": "XLF",
+             "action": "telegram_alert_sent",
+             "raw_signal": {"alert_type": "pdt_block",
+                            "alert_date": "2024-01-01"}},
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        rdr = JournalReader(str(path))
+        # Matching pair
+        assert rdr.telegram_alert_sent_today_utc(
+            ticker="DIA", alert_type="pdt_block",
+        ) is True
+        # Wrong alert_type
+        assert rdr.telegram_alert_sent_today_utc(
+            ticker="DIA", alert_type="close_cooldown",
+        ) is False
+        # Wrong ticker
+        assert rdr.telegram_alert_sent_today_utc(
+            ticker="DIA", alert_type="position_closed",
+        ) is False
+        # Stale (different UTC date)
+        assert rdr.telegram_alert_sent_today_utc(
+            ticker="XLF", alert_type="pdt_block",
+        ) is False, (
+            "Skill 32 §3.4: alert_date must match today (UTC). "
+            "Yesterday's dedup row must NOT suppress today's alert."
+        )
+
+
+def test_agent_journal_helpers_delegate_to_journal_reader() -> None:
+    """Skill 19 §1.2: agent._tickers_opened_today and
+    agent._telegram_alert_already_sent_today must delegate to
+    JournalReader — agent.py should have ZERO open(jsonl_path) calls."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "trading_agent" / "agent.py").read_text(
+        encoding="utf-8"
+    )
+    # Zero raw journal opens in production code.
+    direct_opens = sum(
+        1 for line in src.splitlines()
+        if "open(jsonl_path" in line or "open(self.journal_kb" in line
+    )
+    assert direct_opens == 0, (
+        f"Skill 19 §1.2: agent.py has {direct_opens} direct "
+        f"open(jsonl_path, ...) call(s). All journal reads must go "
+        f"through JournalReader so filter semantics stay consolidated."
+    )
+    # Both helpers must reference JournalReader methods
+    assert "tickers_opened_today_utc()" in src, (
+        "Skill 19 §1.2: agent._tickers_opened_today must delegate to "
+        "JournalReader.tickers_opened_today_utc()."
+    )
+    assert "telegram_alert_sent_today_utc(" in src, (
+        "Skill 32 §3.4: agent._telegram_alert_already_sent_today "
+        "must delegate to JournalReader.telegram_alert_sent_today_utc()."
+    )
