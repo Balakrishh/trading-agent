@@ -32,21 +32,52 @@ def _write_journal(rows: List[dict]) -> str:
 
 
 def _stub_agent(journal_path: str):
-    """Minimal TradingAgent stub bound to a journal file."""
-    from trading_agent.agent import TradingAgent
+    """Minimal TradingAgent stub bound to a journal file.
+
+    Skill 35 (2026-05-22): the close-event logic moved out of
+    TradingAgent into PartialFillCooldown / PdtBlockDetector /
+    CloseAlertNotifier / CloseJournalWriter. The shim methods on
+    TradingAgent now delegate to those collaborators, so the stub
+    has to install the same collaborators it would get from
+    __init__.
+    """
+    from trading_agent.agent import (
+        TradingAgent,
+        PARTIAL_CLOSE_COOLDOWN_THRESHOLD, CLOSE_COOLDOWN_MINUTES,
+    )
+    from trading_agent.close_event_collaborators import (
+        PartialFillCooldown, PdtBlockDetector,
+        CloseAlertNotifier, CloseJournalWriter,
+    )
 
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = journal_path
     agent._cached_price = MagicMock(return_value=100.0)
-    # ``telegram`` is set in TradingAgent.__init__, not visible to
-    # MagicMock(spec=...). _journal_close_event dereferences
-    # self.telegram.notify_close_cooldown at the cooldown-engaged
-    # branch — install a permissive mock so the path stays crash-free.
     agent.telegram = MagicMock()
     agent.telegram.is_active = False
+    agent._send_telegram_alert = MagicMock()
 
-    # Bind the real methods we're testing.
+    # Construct the same four collaborators TradingAgent.__init__ does.
+    agent._cooldown = PartialFillCooldown(
+        journal_kb=agent.journal_kb,
+        threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+        window_min=CLOSE_COOLDOWN_MINUTES,
+    )
+    agent._pdt_detector = PdtBlockDetector(journal_kb=agent.journal_kb)
+    agent._close_alerts = CloseAlertNotifier(
+        send_alert=agent._send_telegram_alert,
+        telegram=agent.telegram,
+    )
+    agent._close_writer = CloseJournalWriter(
+        journal_kb=agent.journal_kb,
+        cooldown=agent._cooldown,
+        pdt_detector=agent._pdt_detector,
+        alerts=agent._close_alerts,
+        price_lookup=agent._cached_price,
+    )
+
+    # Bind the shim methods (one-line delegations to the collaborators).
     agent._close_failed_streak_within_window = types.MethodType(
         TradingAgent._close_failed_streak_within_window, agent
     )

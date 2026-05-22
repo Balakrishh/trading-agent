@@ -425,6 +425,36 @@ class TradingAgent:
                 "TELEGRAM_CHAT_ID to enable operator notifications"
             )
 
+        # ── Close-event collaborators (skill 35) ──────────────────────
+        # Skill 35 decoupling. Pre-2026-05-22 _journal_close_event was
+        # a ~300-line method that combined journal write, cooldown
+        # bookkeeping, PDT detection, and three Telegram dispatches.
+        # The four collaborators below isolate each concern; the
+        # writer orchestrates them and is the only object _journal_
+        # close_event delegates to. Tests can instantiate the writer
+        # with stub collaborators — no MagicMock(spec=TradingAgent).
+        from trading_agent.close_event_collaborators import (
+            PartialFillCooldown, PdtBlockDetector,
+            CloseAlertNotifier, CloseJournalWriter,
+        )
+        self._cooldown = PartialFillCooldown(
+            journal_kb=self.journal_kb,
+            threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+            window_min=CLOSE_COOLDOWN_MINUTES,
+        )
+        self._pdt_detector = PdtBlockDetector(journal_kb=self.journal_kb)
+        self._close_alerts = CloseAlertNotifier(
+            send_alert=self._send_telegram_alert,
+            telegram=self.telegram,
+        )
+        self._close_writer = CloseJournalWriter(
+            journal_kb=self.journal_kb,
+            cooldown=self._cooldown,
+            pdt_detector=self._pdt_detector,
+            alerts=self._close_alerts,
+            price_lookup=self._cached_price,
+        )
+
         # Daily state store (drawdown + exit debounce)
         self.daily_state = DailyStateStore(config.logging.trade_plan_dir)
 
@@ -1652,250 +1682,17 @@ class TradingAgent:
                fill_status: "complete" | "partial" | "failed" | "dry_run",
                mode: "live" | "dry_run"}
         """
-        try:
-            pl = ctx["net_unrealized_pl"]
-            sign = "+" if pl >= 0 else ""
-            # Action + notes branch on fill_status — see method docstring.
-            # SKILL 19 §2 — three distinct close actions:
-            #   * "closed"         → real broker close, all legs filled.
-            #                        P&L counts toward realized total.
-            #   * "dry_run_close"  → synthetic close in dry-run mode.
-            #                        Position is NOT actually closed at the
-            #                        broker; the row is informational only.
-            #                        Must NOT count toward realized P&L.
-            #                        Pre-2026-05-21 this used action="closed"
-            #                        which on a stuck-in-dry-run position
-            #                        accumulated 22 phantom -$130 closes
-            #                        on a single day → -$2,860 false loss.
-            #   * "close_failed"   → broker rejected one or more legs
-            #                        (partial fill). Position still open.
-            if fill_status == "complete":
-                action = "closed"
-                note = (
-                    f"closed: {ctx['strategy']}, P&L={sign}${pl:.2f}, "
-                    f"{ctx['exit_signal']}"
-                )
-                exec_status = f"closed_{ctx['exit_signal']}"
-            elif fill_status == "dry_run":
-                action = "dry_run_close"
-                note = (
-                    f"dry_run_close: {ctx['strategy']}, "
-                    f"would-be P&L={sign}${pl:.2f}, "
-                    f"{ctx['exit_signal']}"
-                )
-                exec_status = f"dry_run_close_{ctx['exit_signal']}"
-            else:
-                action = "close_failed"
-                # Surface the leg-level failure summary so an operator
-                # can immediately tell which leg(s) Alpaca rejected.
-                failed_legs = [
-                    leg.get("symbol", "?")
-                    for leg in (leg_results or [])
-                    if isinstance(leg, dict)
-                       and leg.get("status") != "closed"
-                ]
-                failed_str = (
-                    f" failed_legs={','.join(failed_legs)}"
-                    if failed_legs else ""
-                )
-                note = (
-                    f"close_failed: {ctx['strategy']}, "
-                    f"{ctx['exit_signal']}, fill_status={fill_status}"
-                    f"{failed_str}"
-                )
-                exec_status = f"close_failed_{ctx['exit_signal']}"
-
-            payload: Dict[str, Any] = dict(ctx)
-            payload["leg_close_results"] = [
-                {"symbol": leg.get("symbol", ""),
-                 "status": leg.get("status", "unknown")}
-                for leg in (leg_results or [])
-                if isinstance(leg, dict)
-            ]
-            payload["fill_status"] = fill_status
-            # Mode tag MUST match the value written by _log_signal so the
-            # dashboard's current_mode filter (case-sensitive equality) keeps
-            # close rows in the same view as their corresponding submitted
-            # rows.  Pre-2026-05-07 this wrote lowercase ("live") while
-            # _log_signal wrote uppercase ("LIVE"), which dropped close rows
-            # whenever the dashboard filtered by mode — and that hid them
-            # from the supersede-PENDING-on-close logic in the grid (the
-            # SPY 2026-05-07 PENDING bug).
-            payload["mode"] = "DRY-RUN" if dry_run else "LIVE"
-
-            # ── Cooldown surface ──────────────────────────────────────
-            # When a close_failed row is written AND the ticker has hit
-            # the partial-fill threshold, embed the cooldown deadline +
-            # a human-readable reason so the dashboard can render a
-            # "manual intervention required" banner without re-deriving
-            # the state.  Pre-cooldown rows still get the running
-            # streak count so the operator can see "we're at 2/3,
-            # one more partial fills the cooldown."
-            if action == "close_failed":
-                # Streak counts EXISTING close_failed rows in the
-                # cooldown window (since the most recent ``closed``).
-                # +1 represents the row we're about to write — so a
-                # fresh first failure produces "1/3", three in a row
-                # produces "3/3" and engages the cooldown.  This is
-                # the journal-derived replacement for the pre-2026-05-13
-                # in-memory counter that didn't survive process restarts.
-                existing_streak, _ = self._close_failed_streak_within_window(
-                    spread.underlying)
-                streak = existing_streak + 1
-                payload["partial_close_streak"] = streak
-                payload["partial_close_threshold"] = (
-                    PARTIAL_CLOSE_COOLDOWN_THRESHOLD
-                )
-                if streak >= PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
-                    deadline = (
-                        datetime.now(timezone.utc)
-                        + timedelta(minutes=CLOSE_COOLDOWN_MINUTES)
-                    )
-                    payload["close_cooldown_until"] = deadline.isoformat()
-                    payload["close_cooldown_reason"] = (
-                        f"{streak} consecutive partial fills "
-                        f"≥ threshold {PARTIAL_CLOSE_COOLDOWN_THRESHOLD}; "
-                        f"auto-close suppressed for "
-                        f"{CLOSE_COOLDOWN_MINUTES} min — manual broker "
-                        f"intervention required to clear zombie state."
-                    )
-                    # Operator alert (skill 32). Fires once when the
-                    # cooldown FIRST engages today — dedup helper
-                    # ensures subsequent cooldown re-engagements on
-                    # the same ticker the same day don't re-spam.
-                    failed_legs = (
-                        ",".join(
-                            (leg.get("symbol") or "?")
-                            for leg in (leg_results or [])
-                            if isinstance(leg, dict)
-                               and leg.get("status") != "closed"
-                        ) or "—"
-                    )
-                    self._send_telegram_alert(
-                        ticker=spread.underlying,
-                        alert_type="close_cooldown",
-                        send_fn=self.telegram.notify_close_cooldown,
-                        strategy=ctx.get("strategy", spread.strategy_name),
-                        streak=streak,
-                        threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
-                        cooldown_until_iso=deadline.isoformat(),
-                        failed_legs=failed_legs,
-                    )
-
-                # ── Reactive PDT-block detection (skill 17 §4) ──────────
-                # If ANY leg's error string contains Alpaca's PDT code
-                # (40310100) OR the literal "pattern day trading" phrase,
-                # mark this row so the next cycle's close loop can read
-                # the journal and short-circuit retries that are doomed
-                # for the rest of UTC-today. The flag is date-keyed so
-                # the marker self-expires at midnight UTC — when the
-                # next trading day begins, the position is no longer
-                # "same-day-open" from FINRA's perspective and the close
-                # will succeed normally. Reactive design: we only mark
-                # AFTER the broker has actually responded with PDT, so
-                # legitimate closes are never speculatively suppressed.
-                pdt_signals = ("40310100", "pattern day trading")
-                pdt_blocked = any(
-                    isinstance(leg, dict)
-                    and any(
-                        s in str(leg.get("error", "")).lower()
-                        for s in pdt_signals
-                    )
-                    for leg in (leg_results or [])
-                )
-                if pdt_blocked:
-                    today_utc = (
-                        datetime.now(timezone.utc).date().isoformat()
-                    )
-                    payload["pdt_blocked_today"] = True
-                    payload["pdt_blocked_date"] = today_utc
-                    payload["pdt_blocked_reason"] = (
-                        "Alpaca returned code 40310100 (pattern day "
-                        "trading protection) on one or more legs. "
-                        "Subsequent close attempts on this ticker will "
-                        "be suppressed until UTC midnight, when the "
-                        "position is no longer same-day-open."
-                    )
-                    logger.critical(
-                        "[%s] PDT block detected from Alpaca response — "
-                        "marking ticker pdt_blocked_today=%s. Further "
-                        "auto-closes will be suppressed for the rest of "
-                        "the trading day. Manual close via Alpaca UI is "
-                        "still possible if you accept the day-trade flag.",
-                        spread.underlying, today_utc,
-                    )
-                    # Operator alert (skill 32). Dedup helper short-circuits
-                    # re-sends so DIA's 18 daily detections collapse to 1
-                    # Telegram message.
-                    self._send_telegram_alert(
-                        ticker=spread.underlying,
-                        alert_type="pdt_block",
-                        send_fn=self.telegram.notify_pdt_block,
-                        strategy=ctx.get("strategy", spread.strategy_name),
-                        exit_signal=ctx.get("exit_signal",
-                                            spread.exit_signal.value),
-                        exit_reason=ctx.get("exit_reason",
-                                            spread.exit_reason),
-                        account_balance=float(
-                            getattr(spread, "account_balance", 0.0) or 0.0
-                        ),
-                    )
-
-            self.journal_kb.log_signal(
-                ticker=spread.underlying,
-                action=action,
-                price=self._cached_price(spread.underlying),
-                exec_status=exec_status,
-                notes=note,
-                raw_signal=payload,
-            )
-
-            # ── Position-closed alert (skill 32 §3.6) ────────────────
-            # Fire only when the close fully filled (action="closed",
-            # not "close_failed" — partial fills are surfaced via the
-            # stuck-position banner + cooldown alert instead).
-            #
-            # Dedup gate: same close event must not re-fire. Pi-deploy
-            # 2026-05-20 hotfix — operators in DRY-RUN mode received
-            # 3 identical "DIA closed" alerts every 5 minutes because
-            # the synthetic dry-run close path journals action="closed"
-            # every cycle without actually closing the position at the
-            # broker; STRIKE_PROXIMITY then re-fires next cycle and the
-            # alert repeats. Dedup key combines ticker + expiration +
-            # exit_signal + UTC date so a legitimate same-day re-trade
-            # (different expiration) still alerts, but the same stuck
-            # position can't spam.
-            if action == "closed" and self.telegram.is_active:
-                exit_sig_val = ctx.get("exit_signal",
-                                       spread.exit_signal.value)
-                exp_val = ctx.get("expiration", spread.expiration or "")
-                dedup_alert_type = (
-                    f"position_closed:{exp_val}:{exit_sig_val}"
-                )
-                self._send_telegram_alert(
-                    ticker=spread.underlying,
-                    alert_type=dedup_alert_type,
-                    send_fn=self.telegram.notify_position_closed,
-                    strategy=ctx.get("strategy",
-                                     spread.strategy_name),
-                    exit_signal=exit_sig_val,
-                    exit_reason=ctx.get("exit_reason",
-                                        spread.exit_reason or ""),
-                    realized_pl=float(
-                        ctx.get("net_unrealized_pl", 0.0) or 0.0
-                    ),
-                    original_credit=float(
-                        ctx.get("original_credit", 0.0) or 0.0
-                    ),
-                    max_loss=float(ctx.get("max_loss", 0.0) or 0.0),
-                )
-        except Exception as exc:                                # noqa: BLE001
-            # Never let a journaling failure break the cycle — the close
-            # itself already happened.  Log the error and move on.
-            logger.warning(
-                "[%s] Failed to journal close event: %s",
-                getattr(spread, "underlying", "?"), exc,
-            )
+        # Skill 35: delegate to CloseJournalWriter. Behavior identical
+        # to the pre-2026-05-22 ~300-line inline implementation; the
+        # extraction is mechanical, not semantic. The full row-
+        # construction + cooldown + PDT + alert logic lives in
+        # trading_agent/close_event_collaborators.py.
+        self._close_writer.write(
+            spread, ctx,
+            leg_results=leg_results,
+            fill_status=fill_status,
+            dry_run=dry_run,
+        )
 
     # ==================================================================
     # PDT + partial-close cooldown helpers
@@ -2229,226 +2026,31 @@ class TradingAgent:
             silenced_exceptions=summary.get("silenced_exceptions") or [],
         )
 
+    # ── Skill 35: shims delegating to extracted collaborators ────────────
+    # Body removed in 2026-05-22 refactor; behavior preserved via the
+    # PartialFillCooldown / PdtBlockDetector instances constructed in
+    # __init__. Public method names retained so call sites in this file +
+    # streamlit/components.py don't have to change.
+
     def _pdt_blocked_today_tickers(self) -> Set[str]:
-        """Return underlyings whose journal carries an unexpired
-        ``pdt_blocked_today=True`` marker from earlier this UTC day.
-
-        Skill 17 §4 — reactive PDT suppression. The marker is written
-        only after Alpaca *actually* responds with code 40310100
-        (pattern day trading protection) on a leg DELETE — see
-        ``_journal_close_event`` PDT detection block. So a ticker
-        only ends up in this set after a real broker response, never
-        speculatively.
-
-        State self-clears at UTC midnight because the marker is
-        date-keyed (``pdt_blocked_date`` field). When today's date
-        moves forward, yesterday's markers stop matching and the
-        ticker is once again eligible for close attempts.
-        """
-        try:
-            jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
-            if not jsonl_path or not os.path.isfile(jsonl_path):
-                return set()
-            today_iso = datetime.now(timezone.utc).date().isoformat()
-            blocked: Set[str] = set()
-            with open(jsonl_path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("action") != "close_failed":
-                        continue
-                    rs = rec.get("raw_signal") or {}
-                    if not rs.get("pdt_blocked_today"):
-                        continue
-                    if rs.get("pdt_blocked_date") != today_iso:
-                        continue
-                    tk = rec.get("ticker")
-                    if tk:
-                        blocked.add(tk)
-            return blocked
-        except Exception as exc:                                # noqa: BLE001
-            logger.warning(
-                "Failed to derive PDT-blocked tickers from journal: %s",
-                exc,
-            )
-            return set()
+        return self._pdt_detector.blocked_tickers_today()
 
     def _close_failed_streak_within_window(
         self, ticker: str, window_min: int = CLOSE_COOLDOWN_MINUTES,
     ) -> Tuple[int, Optional[datetime]]:
-        """
-        Count consecutive ``action="close_failed"`` rows for ``ticker``
-        within the last ``window_min`` minutes, since the most recent
-        ``action="closed"`` row (which resets the streak).
-
-        Journal-derived rather than in-memory because the trading-agent
-        process exits at the end of each cycle in subprocess-per-cycle
-        deployments.  Pre-2026-05-13 this state lived in an in-memory
-        dict on ``TradingAgent``, and every cycle restart blew it away
-        — the cooldown protection never engaged in production (see the
-        2026-05-13 XLF/GLD post-mortem).  Now we count rows in the
-        signals journal, which persists across cycles by construction.
-
-        Returns
-        -------
-        (streak, last_failure_timestamp)
-            ``streak`` — number of unsuperseded close_failed rows in
-                         the window.
-            ``last_failure_timestamp`` — UTC datetime of the most
-                         recent counted row, or None if streak == 0.
-        """
-        jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
-        if not jsonl_path or not os.path.isfile(jsonl_path):
-            return 0, None
-
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(minutes=window_min)
-        # (timestamp, action) tuples for this ticker, in window
-        events: List[Tuple[datetime, str]] = []
-        try:
-            with open(jsonl_path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("ticker") != ticker:
-                        continue
-                    if rec.get("action") not in ("close_failed", "closed"):
-                        continue
-                    ts_str = rec.get("timestamp", "")
-                    if not ts_str:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(ts_str)
-                    except ValueError:
-                        continue
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    if ts < cutoff:
-                        continue
-                    events.append((ts, rec.get("action", "")))
-        except Exception as exc:                                # noqa: BLE001
-            logger.warning(
-                "Could not read journal for cooldown derivation: %s", exc,
-            )
-            return 0, None
-
-        events.sort()  # chronological
-
-        # Find the most recent 'closed' row in window — anything before
-        # it doesn't count toward the current streak (the position was
-        # closed and the streak resets).
-        last_closed_ts: Optional[datetime] = None
-        for ts, action in events:
-            if action == "closed":
-                last_closed_ts = ts
-
-        streak = 0
-        last_fail_ts: Optional[datetime] = None
-        for ts, action in events:
-            if action != "close_failed":
-                continue
-            if last_closed_ts is not None and ts <= last_closed_ts:
-                continue
-            streak += 1
-            if last_fail_ts is None or ts > last_fail_ts:
-                last_fail_ts = ts
-        return streak, last_fail_ts
+        # window_min kwarg is preserved for API compatibility but the
+        # cooldown is constructed with CLOSE_COOLDOWN_MINUTES so callers
+        # that pass a different window should also be migrated.
+        return self._cooldown.streak_within_window(ticker)
 
     def _close_cooldown_minutes_remaining(self, ticker: str) -> int:
-        """
-        Minutes remaining in the cooldown window for ``ticker``, or 0
-        if no cooldown is active.
-
-        Derived from the journal: cooldown is engaged once the streak
-        reaches ``PARTIAL_CLOSE_COOLDOWN_THRESHOLD``, and lasts
-        ``CLOSE_COOLDOWN_MINUTES`` from the most recent partial-close
-        timestamp.  Rounds remaining time up to the nearest minute so
-        a 30-second remainder still surfaces as 1 (operator should
-        know the cooldown hasn't fully elapsed).
-        """
-        streak, last_fail_ts = self._close_failed_streak_within_window(ticker)
-        if streak < PARTIAL_CLOSE_COOLDOWN_THRESHOLD or last_fail_ts is None:
-            return 0
-        deadline = last_fail_ts + timedelta(minutes=CLOSE_COOLDOWN_MINUTES)
-        now = datetime.now(timezone.utc)
-        if now >= deadline:
-            return 0
-        delta = deadline - now
-        return max(
-            1,
-            int(delta.total_seconds() // 60)
-            + (1 if delta.total_seconds() % 60 else 0),
-        )
+        return self._cooldown.minutes_remaining(ticker)
 
     def _record_partial_close(self, ticker: str) -> None:
-        """
-        No-op since 2026-05-13 — kept for caller compatibility.
-
-        Pre-2026-05-13 this incremented an in-memory counter.  That
-        counter was reset every cycle in production (each cycle =
-        new process = empty dict), so the cooldown never engaged.
-        State is now derived from journal rows on every read; there
-        is nothing to "record" in-memory.  The actual partial-fill
-        information is journaled by ``_journal_close_event`` via
-        ``action="close_failed"``.
-
-        Method retained so existing call sites in ``_stage_monitor``
-        don't have to change shape.  Emits an info-level streak log
-        line for operator situational awareness.
-        """
-        streak, _ = self._close_failed_streak_within_window(ticker)
-        # +1 for the row about to be journaled by the caller's path.
-        upcoming = streak + 1
-        if upcoming >= PARTIAL_CLOSE_COOLDOWN_THRESHOLD:
-            logger.warning(
-                "[%s] %d consecutive partial closes — entering "
-                "%d-min cooldown.  Manually clean up the position on "
-                "Alpaca's UI to clear the zombie state; the cooldown "
-                "will expire automatically thereafter.",
-                ticker, upcoming, CLOSE_COOLDOWN_MINUTES,
-            )
-        else:
-            logger.info(
-                "[%s] Partial-close streak %d/%d.  Will park in "
-                "cooldown after %d.",
-                ticker, upcoming, PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
-                PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
-            )
+        self._cooldown.log_partial_close(ticker)
 
     def _clear_close_cooldown(self, ticker: str) -> None:
-        """
-        No-op since 2026-05-13 — kept for caller compatibility.
-
-        Pre-2026-05-13 this purged in-memory cooldown state on a
-        successful close.  Now the state is derived from journal
-        rows, and the ``action="closed"`` row written by the
-        caller's path is itself the supersede signal — the next call
-        to ``_close_failed_streak_within_window`` will see it and
-        reset the streak to 0.  Nothing to purge here.
-
-        Method retained so existing call sites don't have to change.
-        Emits an info log for traceability.
-        """
-        # Read current state to decide whether to log.  If there's no
-        # active streak, the close is just a normal close (no cooldown
-        # to clear); stay quiet.
-        streak, _ = self._close_failed_streak_within_window(ticker)
-        if streak > 0:
-            logger.info(
-                "[%s] Successful close clears journal-derived "
-                "cooldown streak (was %d/%d).",
-                ticker, streak, PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
-            )
+        self._cooldown.log_close_success(ticker)
 
     def _load_trade_plans(self) -> List[Dict]:
         """

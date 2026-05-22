@@ -374,15 +374,40 @@ def test_close_failed_row_carries_streak_pre_cooldown(tmp_path):
     jsonl_path = tmp_path / "signals_live.jsonl"
     jsonl_path.write_text("")
 
+    # Skill 35: install the same collaborators TradingAgent.__init__
+    # builds so the _journal_close_event delegation finds them.
+    from trading_agent.agent import (
+        PARTIAL_CLOSE_COOLDOWN_THRESHOLD, CLOSE_COOLDOWN_MINUTES,
+    )
+    from trading_agent.close_event_collaborators import (
+        PartialFillCooldown, PdtBlockDetector,
+        CloseAlertNotifier, CloseJournalWriter,
+    )
+
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
-    # ``telegram`` is an instance attribute that MagicMock(spec=...)
-    # doesn't expose. Provide a permissive mock so the cooldown-
-    # engaged branch in _journal_close_event can dereference it.
     agent.telegram = MagicMock()
     agent.telegram.is_active = False
+    agent._send_telegram_alert = MagicMock()
+    agent._cooldown = PartialFillCooldown(
+        journal_kb=agent.journal_kb,
+        threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+        window_min=CLOSE_COOLDOWN_MINUTES,
+    )
+    agent._pdt_detector = PdtBlockDetector(journal_kb=agent.journal_kb)
+    agent._close_alerts = CloseAlertNotifier(
+        send_alert=agent._send_telegram_alert,
+        telegram=agent.telegram,
+    )
+    agent._close_writer = CloseJournalWriter(
+        journal_kb=agent.journal_kb,
+        cooldown=agent._cooldown,
+        pdt_detector=agent._pdt_detector,
+        alerts=agent._close_alerts,
+        price_lookup=agent._cached_price,
+    )
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
     )
@@ -442,15 +467,40 @@ def test_close_failed_row_carries_cooldown_when_locked(tmp_path):
             "ticker": "SPY", "action": "close_failed", "raw_signal": {},
         }) + "\n")
 
+    # Skill 35: install the same collaborators TradingAgent.__init__
+    # builds so the _journal_close_event delegation finds them.
+    from trading_agent.agent import (
+        PARTIAL_CLOSE_COOLDOWN_THRESHOLD, CLOSE_COOLDOWN_MINUTES,
+    )
+    from trading_agent.close_event_collaborators import (
+        PartialFillCooldown, PdtBlockDetector,
+        CloseAlertNotifier, CloseJournalWriter,
+    )
+
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
-    # ``telegram`` is an instance attribute that MagicMock(spec=...)
-    # doesn't expose. Provide a permissive mock so the cooldown-
-    # engaged branch in _journal_close_event can dereference it.
     agent.telegram = MagicMock()
     agent.telegram.is_active = False
+    agent._send_telegram_alert = MagicMock()
+    agent._cooldown = PartialFillCooldown(
+        journal_kb=agent.journal_kb,
+        threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+        window_min=CLOSE_COOLDOWN_MINUTES,
+    )
+    agent._pdt_detector = PdtBlockDetector(journal_kb=agent.journal_kb)
+    agent._close_alerts = CloseAlertNotifier(
+        send_alert=agent._send_telegram_alert,
+        telegram=agent.telegram,
+    )
+    agent._close_writer = CloseJournalWriter(
+        journal_kb=agent.journal_kb,
+        cooldown=agent._cooldown,
+        pdt_detector=agent._pdt_detector,
+        alerts=agent._close_alerts,
+        price_lookup=agent._cached_price,
+    )
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
     )
@@ -494,15 +544,40 @@ def test_closed_row_does_not_carry_cooldown_fields(tmp_path):
     jsonl_path = tmp_path / "signals_live.jsonl"
     jsonl_path.write_text("")  # empty journal
 
+    # Skill 35: install the same collaborators TradingAgent.__init__
+    # builds so the _journal_close_event delegation finds them.
+    from trading_agent.agent import (
+        PARTIAL_CLOSE_COOLDOWN_THRESHOLD, CLOSE_COOLDOWN_MINUTES,
+    )
+    from trading_agent.close_event_collaborators import (
+        PartialFillCooldown, PdtBlockDetector,
+        CloseAlertNotifier, CloseJournalWriter,
+    )
+
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = str(jsonl_path)
     agent._cached_price = MagicMock(return_value=100.0)
-    # ``telegram`` is an instance attribute that MagicMock(spec=...)
-    # doesn't expose. Provide a permissive mock so the cooldown-
-    # engaged branch in _journal_close_event can dereference it.
     agent.telegram = MagicMock()
     agent.telegram.is_active = False
+    agent._send_telegram_alert = MagicMock()
+    agent._cooldown = PartialFillCooldown(
+        journal_kb=agent.journal_kb,
+        threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+        window_min=CLOSE_COOLDOWN_MINUTES,
+    )
+    agent._pdt_detector = PdtBlockDetector(journal_kb=agent.journal_kb)
+    agent._close_alerts = CloseAlertNotifier(
+        send_alert=agent._send_telegram_alert,
+        telegram=agent.telegram,
+    )
+    agent._close_writer = CloseJournalWriter(
+        journal_kb=agent.journal_kb,
+        cooldown=agent._cooldown,
+        pdt_detector=agent._pdt_detector,
+        alerts=agent._close_alerts,
+        price_lookup=agent._cached_price,
+    )
     agent._journal_close_event = types.MethodType(
         TradingAgent._journal_close_event, agent
     )

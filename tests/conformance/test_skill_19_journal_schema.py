@@ -94,18 +94,22 @@ def test_skill_19_dry_run_close_action_distinct_from_closed() -> None:
     dashboard because they were tagged action="closed" + summed.
 
     Pin the source-level branch shape so a refactor can't
-    accidentally re-collapse the two action labels."""
+    accidentally re-collapse the two action labels.
+
+    Skill 35 (2026-05-22) moved the close-event branching into
+    CloseJournalWriter._write_impl. Search the collaborators
+    module — that's where the action mapping now lives."""
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "trading_agent" / "agent.py").read_text(
-        encoding="utf-8"
-    )
-    # The _journal_close_event branch must distinguish complete vs
-    # dry_run. The pre-fix pattern was a single ``if fill_status in
-    # ("complete", "dry_run"): action="closed"`` collapsed branch.
+    src = (
+        repo_root / "trading_agent" / "close_event_collaborators.py"
+    ).read_text(encoding="utf-8")
+    # The branch must distinguish complete vs dry_run. The pre-fix
+    # pattern was a single ``if fill_status in ("complete", "dry_run"):
+    # action="closed"`` collapsed branch.
     forbidden = 'fill_status in ("complete", "dry_run")'
     assert forbidden not in src, (
-        f"Skill 19 §4: agent._journal_close_event must NOT collapse "
+        f"Skill 19 §4: CloseJournalWriter must NOT collapse "
         f"fill_status='complete' and fill_status='dry_run' into the "
         f"same action='closed' branch. Pre-fix this caused -$2,860 "
         f"of phantom realized P&L when a position was stuck in "

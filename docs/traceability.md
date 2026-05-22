@@ -36,8 +36,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 32 | telegram operator alerts | telegram_notifier.py, agent.py, streamlit/live_monitor.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_streamlit/test_live_monitor.py | conformance/test_skill_32_telegram_alerts.py | — |
 | 33 | pdt dte cap | strategy_presets.py, strategy.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_risk_manager.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_33_pdt_dte_cap.py | — |
 | 34 | exception monitor | exception_monitor.py, agent.py, telegram_notifier.py, journal_reader.py, market_data_schwab.py, executor.py, strategy.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_market_data_factory.py, test_market_data_schwab.py, test_production_readiness.py, test_risk_manager.py, test_strategy.py | conformance/test_skill_34_exception_monitor.py | — |
+| 35 | close event collaborators | close_event_collaborators.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_35_close_event_collaborators.py | — |
 
-**Skills with conformance tests:** 27 / 27 (100%)
+**Skills with conformance tests:** 28 / 28 (100%)
 
 ## Orphan source files
 
@@ -76,7 +77,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/trade_plan_report.py` (last modified 2026-04-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 32 / 66 files (48% uncovered)
+**Orphan source coverage:** 32 / 67 files (47% uncovered)
 
 ## Orphan skills (no conformance test)
 

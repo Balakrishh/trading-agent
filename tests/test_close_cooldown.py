@@ -46,23 +46,51 @@ def _write_journal(rows):
 
 
 def _stub_agent(journal_path: str = ""):
-    """Minimal TradingAgent stub bound to a (possibly empty) journal."""
-    from trading_agent.agent import TradingAgent
+    """Minimal TradingAgent stub bound to a (possibly empty) journal.
+
+    Skill 35 (2026-05-22): the close-event logic moved into
+    PartialFillCooldown / PdtBlockDetector / CloseAlertNotifier /
+    CloseJournalWriter. The TradingAgent shim methods now delegate to
+    those collaborators, so the stub has to construct them too.
+    """
+    from trading_agent.agent import (
+        TradingAgent,
+        PARTIAL_CLOSE_COOLDOWN_THRESHOLD, CLOSE_COOLDOWN_MINUTES,
+    )
+    from trading_agent.close_event_collaborators import (
+        PartialFillCooldown, PdtBlockDetector,
+        CloseAlertNotifier, CloseJournalWriter,
+    )
 
     agent = MagicMock(spec=TradingAgent)
     agent.journal_kb = MagicMock()
     agent.journal_kb.jsonl_path = journal_path
     agent._cached_price = MagicMock(return_value=100.0)
-    # ``telegram`` is an instance attribute (set in TradingAgent.__init__)
-    # and MagicMock(spec=TradingAgent) only mirrors class attributes —
-    # _journal_close_event dereferences self.telegram.notify_close_cooldown
-    # at the cooldown-engaged branch, so we install a permissive mock
-    # to keep that path crash-free. Added 2026-05-21 with the operator-
-    # alert hooks (skill 32 §3.4 wire-up inside _journal_close_event).
     agent.telegram = MagicMock()
     agent.telegram.is_active = False
+    agent._send_telegram_alert = MagicMock()
 
-    # Bind only the helpers we test here.
+    # Install the four collaborators (same shape TradingAgent.__init__
+    # builds them).
+    agent._cooldown = PartialFillCooldown(
+        journal_kb=agent.journal_kb,
+        threshold=PARTIAL_CLOSE_COOLDOWN_THRESHOLD,
+        window_min=CLOSE_COOLDOWN_MINUTES,
+    )
+    agent._pdt_detector = PdtBlockDetector(journal_kb=agent.journal_kb)
+    agent._close_alerts = CloseAlertNotifier(
+        send_alert=agent._send_telegram_alert,
+        telegram=agent.telegram,
+    )
+    agent._close_writer = CloseJournalWriter(
+        journal_kb=agent.journal_kb,
+        cooldown=agent._cooldown,
+        pdt_detector=agent._pdt_detector,
+        alerts=agent._close_alerts,
+        price_lookup=agent._cached_price,
+    )
+
+    # Bind the shim methods.
     agent._tickers_opened_today = types.MethodType(
         TradingAgent._tickers_opened_today, agent
     )

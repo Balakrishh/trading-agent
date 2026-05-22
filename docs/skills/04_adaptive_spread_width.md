@@ -144,4 +144,4 @@ Both filters work in concert with this skill's width-grid retune: the 0.5% width
 
 ---
 
-*Last verified against repo HEAD on 2026-05-20 (grid retune + IVRank UI + Goldilocks zone documentation + PDT DTE cap).*
+*Last verified against repo HEAD on 2026-05-22 (grid retune + IVRank UI + Goldilocks zone documentation + PDT DTE cap).*

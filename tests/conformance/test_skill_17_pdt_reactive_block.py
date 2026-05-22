@@ -43,32 +43,39 @@ def test_skill_17_pdt_helper_exists() -> None:
 
 
 def test_skill_17_pdt_detection_inspects_leg_results() -> None:
-    """Skill 17 §4: _journal_close_event must scan leg_results for the
-    PDT signal and tag the row before writing it."""
+    """Skill 17 §4: PDT detection must scan leg_results for both Alpaca
+    signal forms (numeric code + human phrase) and tag the row before
+    writing it. Skill 35 (2026-05-22) moved the detection from
+    agent._journal_close_event into close_event_collaborators.
+    PdtBlockDetector — assertions span both files."""
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "trading_agent" / "agent.py").read_text(encoding="utf-8")
-    # Both signals must be present — narrowing to one would silently
-    # miss real-world responses.
-    assert '"40310100"' in src, (
-        "Skill 17 §4: PDT detection must include literal Alpaca code "
-        "40310100. Without it, responses that carry only the phrase "
-        "would not be detected."
+    detector_src = (
+        repo_root / "trading_agent" / "close_event_collaborators.py"
+    ).read_text(encoding="utf-8")
+    agent_src = (
+        repo_root / "trading_agent" / "agent.py"
+    ).read_text(encoding="utf-8")
+    # Both signals must be present in the detector — narrowing to one
+    # would silently miss real-world responses.
+    assert '"40310100"' in detector_src, (
+        "Skill 17 §4: PdtBlockDetector.PDT_SIGNALS must include the "
+        "literal Alpaca code 40310100. Without it, responses that "
+        "carry only the phrase would not be detected."
     )
-    assert '"pattern day trading"' in src, (
-        "Skill 17 §4: PDT detection must include the phrase "
-        "'pattern day trading' (case-insensitive substring). Without "
-        "it, responses that carry only a different code/phrasing "
-        "would not be detected."
+    assert '"pattern day trading"' in detector_src, (
+        "Skill 17 §4: PdtBlockDetector.PDT_SIGNALS must include the "
+        "phrase 'pattern day trading'. Without it, responses that "
+        "carry only a different code/phrasing would not be detected."
     )
-    assert "pdt_blocked_today" in src, (
-        "Skill 17 §4: the close_failed payload must carry "
-        "pdt_blocked_today. Helper reads this field exactly."
+    # The marker field names appear in BOTH files: emitted by the
+    # detector + consumed by the close-loop reader on TradingAgent.
+    assert "pdt_blocked_today" in detector_src
+    assert "pdt_blocked_today" in agent_src, (
+        "Skill 17 §4: the close-loop must read pdt_blocked_today via "
+        "the journal scan. Renaming the field breaks self-clearing."
     )
-    assert "pdt_blocked_date" in src, (
-        "Skill 17 §4: the close_failed payload must carry "
-        "pdt_blocked_date for UTC-date self-clearing."
-    )
+    assert "pdt_blocked_date" in detector_src
 
 
 def test_skill_17_close_loop_uses_blocked_set() -> None:
@@ -93,18 +100,24 @@ def test_skill_17_close_loop_uses_blocked_set() -> None:
 def test_skill_17_helper_is_date_keyed_for_self_clear() -> None:
     """Skill 17 §4: the marker's date field must be compared to today's
     UTC date so it self-clears at midnight. A missing date check would
-    leave the marker active forever — bug worse than the original noise."""
+    leave the marker active forever — bug worse than the original noise.
+
+    Skill 35 (2026-05-22) moved the helper body into
+    PdtBlockDetector.blocked_tickers_today() in
+    close_event_collaborators.py. The agent.py method is now a
+    one-line shim, so the date-keyed comparison lives in the
+    collaborator module."""
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[2]
-    src = (repo_root / "trading_agent" / "agent.py").read_text(encoding="utf-8")
-    # Look for the specific helper's date comparison so a future
-    # refactor can't accidentally drop it.
-    helper_start = src.find("def _pdt_blocked_today_tickers")
+    src = (
+        repo_root / "trading_agent" / "close_event_collaborators.py"
+    ).read_text(encoding="utf-8")
+    helper_start = src.find("def blocked_tickers_today")
     assert helper_start > 0
     helper_end = src.find("\n    def ", helper_start + 1)
     helper_body = src[helper_start:helper_end if helper_end > 0 else None]
     assert "today_iso" in helper_body, (
-        "Skill 17 §4: _pdt_blocked_today_tickers must compare against "
+        "Skill 17 §4: blocked_tickers_today must compare against "
         "today's UTC date. Without the date filter the marker never "
         "expires — a position blocked once would be permanently "
         "untouchable until the agent restarts."

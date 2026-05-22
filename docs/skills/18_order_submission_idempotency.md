@@ -182,4 +182,4 @@ if isinstance(exec_result, dict) and exec_result.get("status") == "error":
 
 ---
 
-*Last verified against repo HEAD on 2026-05-20.*
+*Last verified against repo HEAD on 2026-05-22.*
