@@ -175,10 +175,22 @@ def run_backtest(
     skew_preset: str = "flat",
     slippage_ticks: int = 0,
     commission_per_leg: Optional[float] = None,
+    override_edge_buffer: Optional[float] = None,
 ) -> Tuple[List, float, float, List]:
     """Run the BacktestRunner against the active preset.
 
     Returns (closed_trades, starting_equity, ending_equity, cycle_outcomes).
+
+    override_edge_buffer (operator escape hatch, 2026-05-23):
+    The C/W floor formula is |Δshort| × (1 + edge_buffer). Live chains
+    have ~2-3× richer IV than VIX-proxy flat-vol BS produces, so the
+    synthetic chain often can't clear the floor — backtest opens zero
+    trades while live opens normally. Setting override_edge_buffer to
+    a NEGATIVE value (e.g. -0.5) halves the floor and lets backtest
+    see candidates. Absolute P&L is still under-stated (chain prices
+    are too cheap), but the test answers: 'would the strategy have
+    traded at all? on which days? in which direction?' Use with eyes
+    open.
     """
     # Imports here so the script can show its --help even if scipy is
     # missing on the host.
@@ -194,6 +206,12 @@ def run_backtest(
     if getattr(preset, "scan_mode", "adaptive") != "adaptive":
         from dataclasses import replace
         preset = replace(preset, scan_mode="adaptive")
+    # Operator escape hatch: relax the C/W floor so the synthetic
+    # chain's BS-mid credits (which are systematically below real-
+    # world chain credits) can clear and produce candidates.
+    if override_edge_buffer is not None:
+        from dataclasses import replace
+        preset = replace(preset, edge_buffer=float(override_edge_buffer))
 
     skew_map = {
         "flat": FLAT_SKEW,
@@ -477,6 +495,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--commission-per-leg", type=float, default=None,
                    help="Override commission per leg (default: $0.65). "
                         "Pass 0.0 for free brokers.")
+    p.add_argument("--override-edge-buffer", type=float, default=None,
+                   help="Override preset's edge_buffer (operator escape "
+                        "hatch). Backtest's synthetic chain undershoots "
+                        "live IV by ~2-3×, so the C/W floor blocks all "
+                        "candidates by default. Pass -0.3 to -0.7 to "
+                        "relax the floor so backtest can produce "
+                        "candidates. Absolute P&L is still understated; "
+                        "use the directional/timing signal only.")
     args = p.parse_args(argv)
 
     start = date.fromisoformat(args.start)
@@ -500,6 +526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         skew_preset=args.skew,
         slippage_ticks=args.slippage_ticks,
         commission_per_leg=args.commission_per_leg,
+        override_edge_buffer=args.override_edge_buffer,
     )
     print(f"  {len(bt_trades)} backtest closed trade(s) "
           f"across {len(bt_outcomes)} cycle outcomes")
