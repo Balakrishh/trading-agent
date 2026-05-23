@@ -45,12 +45,19 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+# When invoked from scripts/, the repo root isn't on sys.path. Add it
+# so `from trading_agent...` imports resolve regardless of CWD.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 # Suppress noisy library logs so the report is readable.
 logging.basicConfig(level=logging.WARNING)
