@@ -373,6 +373,46 @@ def test_telegram_alert_sent_today_utc_dedup() -> None:
         )
 
 
+def test_eod_dedup_uses_embedded_date_across_utc_midnight() -> None:
+    """Skill 32 §3.8 (2026-05-23 fix): the EOD alert_type embeds the
+    ET trading session date. The dedup lookup must use that embedded
+    date, NOT today's UTC date — otherwise an EOD that fires at 4 PM
+    ET (writes alert_date=UTC-today) is missed by a re-fire at 8 PM ET
+    (looks up alert_date=NEXT UTC day) and the operator gets paged
+    twice in one trading session.
+
+    This regression test pins the embedded-date lookup."""
+    from trading_agent.journal_reader import JournalReader
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "signals_live.jsonl"
+        # Pre-existing dedup row written at 4 PM ET on May 22 — UTC
+        # date was 2026-05-22.
+        rows = [{
+            "timestamp": "2026-05-22T20:00:00+00:00",
+            "ticker": "__eod__",
+            "action": "telegram_alert_sent",
+            "raw_signal": {
+                "alert_type": "eod_summary:2026-05-22",
+                "alert_date": "2026-05-22",  # UTC-keyed when written
+            },
+        }]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        rdr = JournalReader(str(path))
+        # Lookup for the same trading session even when today's UTC
+        # date has rolled over to 2026-05-23 (e.g. 8 PM ET cycle).
+        # The dedup must use the ET date embedded in alert_type so
+        # the row matches.
+        assert rdr.telegram_alert_sent_today_utc(
+            ticker="__eod__", alert_type="eod_summary:2026-05-22",
+        ) is True, (
+            "Skill 32 §3.8: EOD dedup must use the date embedded in "
+            "alert_type, not today's UTC date. Without this fix, a "
+            "4 PM ET fire and an 8 PM ET re-fire span UTC midnight "
+            "and the dedup lookup misses the existing row → double-send."
+        )
+
+
 def test_agent_journal_helpers_delegate_to_journal_reader() -> None:
     """Skill 19 §1.2: agent._tickers_opened_today and
     agent._telegram_alert_already_sent_today must delegate to

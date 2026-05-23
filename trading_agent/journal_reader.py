@@ -442,10 +442,21 @@ class JournalReader:
         is intentional: PDT-block + close-cooldown + position-closed
         each get separate dedup keys.
 
+        EOD-specific dedup (skill 32 §3.8, 2026-05-23 fix): when
+        ``alert_type`` starts with ``"eod_summary:"`` the embedded
+        ET trading session date is used as the dedup date instead of
+        today's UTC date. This closes the cross-UTC-midnight hole
+        that caused two EOD recaps to fire (4 PM ET + 8 PM ET) — the
+        4 PM write tagged the row with UTC-today, but the 8 PM lookup
+        used the next UTC day's date and missed the row.
+
         Fail-open: a journal-read failure returns False (prefer one
         extra alert over a missed alert).
         """
-        today_utc = datetime.now(timezone.utc).date().isoformat()
+        if alert_type.startswith("eod_summary:"):
+            dedup_date = alert_type.split(":", 1)[1]
+        else:
+            dedup_date = datetime.now(timezone.utc).date().isoformat()
         for rec in self._iter_rows():
             if rec.get("action") != "telegram_alert_sent":
                 continue
@@ -458,7 +469,7 @@ class JournalReader:
                 continue
             # Field is `alert_date` (matches what _send_telegram_alert
             # writes, not the more-natural `sent_date`).
-            if rs.get("alert_date") != today_utc:
+            if rs.get("alert_date") != dedup_date:
                 continue
             return True
         return False

@@ -1762,14 +1762,26 @@ class TradingAgent:
             # a fake-success row that would block legitimate retries.
             return
         try:
-            today_iso = datetime.now(timezone.utc).date().isoformat()
+            # EOD-specific dedup-date fix (skill 32 §3.8, 2026-05-23):
+            # the EOD alert_type embeds the ET trading session date
+            # ("eod_summary:YYYY-MM-DD"). Use that embedded date for
+            # alert_date so the dedup gate matches across the UTC
+            # midnight boundary. Without this, an EOD that fires at
+            # 4 PM ET (writes alert_date=UTC-today) and a re-fire at
+            # 8 PM ET (looks up alert_date=UTC-today, which is now
+            # NEXT day's UTC date) miss each other → double-send.
+            # All other alert types stay UTC-keyed.
+            if alert_type.startswith("eod_summary:"):
+                dedup_date = alert_type.split(":", 1)[1]
+            else:
+                dedup_date = datetime.now(timezone.utc).date().isoformat()
             self.journal_kb.log_signal(
                 ticker=ticker,
                 action="telegram_alert_sent",
                 price=self._cached_price(ticker),
                 raw_signal={
                     "alert_type": alert_type,
-                    "alert_date": today_iso,
+                    "alert_date": dedup_date,
                     **{k: v for k, v in payload.items()
                        if isinstance(v, (str, int, float, bool))},
                 },
