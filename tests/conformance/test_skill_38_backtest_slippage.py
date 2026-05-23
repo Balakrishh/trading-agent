@@ -51,26 +51,41 @@ def test_skill_38_apply_open_with_slippage_reduces_credit() -> None:
 
 
 def test_skill_38_apply_close_with_slippage_increases_debit() -> None:
-    """Skill 38 §3.1: slippage on close is ADDED to debit — we pay
-    MORE to exit than BS mid suggests, symmetric to open-side."""
+    """Skill 38 §3.1 + symmetry fix: slippage on close is ADDED to
+    debit AND symmetrically subtracted from the open's BS-mid credit
+    when computing realised P&L (so the round-trip drag is correctly
+    2 × slippage × qty × 100, not 1×).
+
+    This test exercises apply_close in isolation with the SAME
+    slippage value the runner would pass alongside an apply_open at
+    the same slippage. Real-world usage: runner threads
+    slippage_per_share to BOTH calls."""
     from trading_agent.backtest.account import SimAccount
     acc = SimAccount.fresh(starting_equity=10_000.0)
-    # Open at $0.50 credit (no slippage to keep math clean)
-    acc.apply_open(credit_per_share=0.50, qty=1, spread_width=1.0)
+    # Open at $0.50 BS-mid credit WITH the same slippage the close
+    # will use ($0.05). Effective booked credit = $0.45.
+    acc.apply_open(
+        credit_per_share=0.50, qty=1, spread_width=1.0,
+        slippage_per_share=0.05,
+    )
     cash_after_open = acc.cash
-    # Close at BS mid of $0.20 with $0.05 slippage → effective debit $0.25
+    # Close at BS-mid debit $0.20 with the same $0.05 slippage.
+    # effective_open_credit (mirror) = $0.45 → credit_dollars = $45
+    # effective_debit = $0.25 → debit_dollars = $25
+    # commission round-trip = $1.30 per side (charged at close)
+    # realised = (45 - 25) - 1.30 = $18.70
     realised = acc.apply_close(
         credit_per_share=0.50, qty=1,
         closing_debit_per_share=0.20,
         slippage_per_share=0.05,
     )
-    # Debit paid: $0.25 × 100 = $25. Commission $1.30.
-    # Realised: (50 - 25) - 1.30 = $23.70.
-    assert abs(realised - 23.70) < 0.01, (
-        f"Skill 38 §3.1: slippage on close must INCREASE debit. "
-        f"Got realised=${realised:.2f}, expected $23.70."
+    assert abs(realised - 18.70) < 0.01, (
+        f"Skill 38 §3.1: symmetric slippage accounting means apply_close "
+        f"mirrors the open's slippage on credit_per_share. Drag is "
+        f"2 × slip per round-trip. Got realised=${realised:.2f}, "
+        f"expected $18.70 = (45 - 25) - 1.30."
     )
-    # Cash after close: cash_after_open - 25 - 1.30
+    # Cash after close: cash_after_open - debit_dollars(25) - commission(1.30)
     expected_cash = cash_after_open - 26.30
     assert abs(acc.cash - expected_cash) < 0.01
 
