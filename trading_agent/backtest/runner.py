@@ -155,7 +155,8 @@ class BacktestRunner:
                  port: Optional[HistoricalPort] = None,
                  progress_callback: Optional[Callable[[float, str], None]] = None,
                  slippage_ticks_per_leg: int = 0,
-                 commission_per_leg: Optional[float] = None):
+                 commission_per_leg: Optional[float] = None,
+                 skew_model=None):
         self.tickers = tuple(tickers)
         self.start = start
         self.end = end
@@ -187,6 +188,11 @@ class BacktestRunner:
             COMMISSION_PER_LEG if commission_per_leg is None
             else float(commission_per_leg)
         )
+        # Skill 39 (backtester improvement #2): per-strike IV via skew
+        # model. None preserves flat-vol BS (legacy). Operators pass
+        # INDEX_ETF_SKEW or a custom SkewModel for realistic OTM-put
+        # pricing.
+        self.skew_model = skew_model
         self._open_positions: Dict[str, List[SimPosition]] = {
             t: [] for t in self.tickers
         }
@@ -229,6 +235,7 @@ class BacktestRunner:
                     risk_manager=self.risk_manager,
                     slippage_per_share=self.slippage_per_share,
                     commission_per_leg=self.commission_per_leg,
+                    skew_model=self.skew_model,
                 )
             except Exception as exc:                                  # noqa: skill-34-exempt — recoverable: caller falls through to neutral regime
                 logger.exception("[%s] cycle crashed at %s: %s", ticker, t, exc)

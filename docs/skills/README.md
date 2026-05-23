@@ -52,6 +52,7 @@ Skills 32–35 ship alongside the live-deployment hardening pass. Phase 1 covers
 | 36 | [Ticker filters — early-return pipeline](36_ticker_filters.md) | architecture | `ticker_filters.py`, `agent.py` construction + delegation |
 | 37 | [Position-cap dedup (per-ticker + per-sector)](37_position_caps.md) | risk | `position_caps.py`, `agent.py` Stage 2 call site |
 | 38 | [Backtester slippage + commissions](38_backtest_slippage.md) | backtest | `backtest/runner.py`, `backtest/account.py`, `backtest/cycle.py` |
+| 39 | [Backtester volatility skew](39_skew_model.md) | backtest | `backtest/skew_model.py`, `backtest/synthetic_chain.py` |
 
 ## Phase 2 (planned, not yet written)
 

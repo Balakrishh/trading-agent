@@ -110,4 +110,4 @@ signal, reason = pos.evaluate_exit(
 
 ---
 
-*Last verified against repo HEAD on 2026-05-22.*
+*Last verified against repo HEAD on 2026-05-23.*

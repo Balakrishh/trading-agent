@@ -129,16 +129,23 @@ def build_chain_slice(*,
                       now: date,
                       expiration: date,
                       cfg: ChainConfig,
-                      r: float = 0.0) -> ChainSlice:
+                      r: float = 0.0,
+                      skew_model=None) -> ChainSlice:
     """
     Build one ``ChainSlice`` (one expiration's worth) from spot, σ, and
     the synthetic-chain config. Every strike on the grid gets a row;
     ``decide()`` will then sweep its (Δ × width) grid against this.
 
-    ``sigma_annual`` is the *annualised* implied vol used for both
-    pricing and Δ — there is no separate σ_pricing vs σ_delta; matching
-    them by construction means the Δ the engine reads agrees with the
-    mid the engine prices.
+    ``sigma_annual`` is the ATM IV proxy. When ``skew_model`` is
+    supplied (skill 39, backtester improvement #2), each strike's IV
+    is lifted by the skew model's per-moneyness adjustment before
+    pricing + delta. When ``skew_model`` is None or the FLAT_SKEW
+    default, every strike uses ``sigma_annual`` unchanged — legacy
+    behavior.
+
+    Pricing and Δ share the per-strike IV — there is no separate
+    σ_pricing vs σ_delta; matching them by construction means the
+    Δ the engine reads agrees with the mid the engine prices.
     """
     dte = max(1, (expiration - now).days)
     t_years = dte / 365.0
@@ -146,9 +153,17 @@ def build_chain_slice(*,
     strikes = _strikes_on_grid(spot, cfg)
     contracts = []
     for k in strikes:
-        delta = bs_delta(spot, k, t_years, sigma_annual, r=r,
+        # Skill 39: per-strike IV via skew model. None or FLAT_SKEW
+        # returns sigma_annual unchanged → legacy flat-vol BS.
+        if skew_model is not None:
+            sigma_k = skew_model.sigma_for_strike(
+                strike=float(k), spot=spot, atm_sigma=sigma_annual,
+            )
+        else:
+            sigma_k = sigma_annual
+        delta = bs_delta(spot, k, t_years, sigma_k, r=r,
                          option_type=opt_type)
-        mid = bs_price(spot, k, t_years, sigma_annual, r=r,
+        mid = bs_price(spot, k, t_years, sigma_k, r=r,
                        option_type=opt_type)
         # Clip the bid floor at 0 so deep-OTM strikes don't go negative
         # after the half-spread subtraction. _quote_credit treats 0 as

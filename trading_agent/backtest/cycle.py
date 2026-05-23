@@ -244,6 +244,7 @@ def run_one_cycle(*,
                   risk_manager: RiskManager,
                   slippage_per_share: float = 0.0,
                   commission_per_leg: Optional[float] = None,
+                  skew_model=None,
                   ) -> CycleOutcome:
     """
     Run one PERCEIVE → CLASSIFY → PLAN → RISK → EXECUTE step.
@@ -296,6 +297,7 @@ def run_one_cycle(*,
             ticker=ticker, side=side, spot=spot,
             sigma_annual=sigma_proxy, now=t.date(), expiration=exp,
             cfg=cfg,
+            skew_model=skew_model,
         ))
     if not chain_slices:
         return CycleOutcome(ticker=ticker, t=t, spot=spot, regime=regime,
