@@ -39,8 +39,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 35 | close event collaborators | close_event_collaborators.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_35_close_event_collaborators.py | — |
 | 36 | ticker filters | ticker_filters.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_36_ticker_filters.py | — |
 | 37 | position caps | position_caps.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_37_position_caps.py | — |
+| 38 | backtest slippage | backtest/runner.py, backtest/account.py, backtest/cycle.py | test_backtest/test_account.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_38_backtest_slippage.py | — |
 
-**Skills with conformance tests:** 30 / 30 (100%)
+**Skills with conformance tests:** 31 / 31 (100%)
 
 ## Orphan source files
 

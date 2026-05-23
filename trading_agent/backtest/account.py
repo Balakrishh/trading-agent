@@ -105,7 +105,9 @@ class SimAccount:
     # ------------------------------------------------------------------
 
     def apply_open(self, *, credit_per_share: float, qty: int,
-                   spread_width: float) -> float:
+                   spread_width: float,
+                   slippage_per_share: float = 0.0,
+                   commission_per_leg: float = COMMISSION_PER_LEG) -> float:
         """
         Book an opening fill. Credit lands in cash; the position's
         initial mark-to-market is recorded via ``open_market_value``
@@ -115,20 +117,39 @@ class SimAccount:
 
         Returns the dollar credit received (for the caller's logs).
         Charges 2 legs of commission per contract on open.
+
+        Slippage (skill 38, backtester improvement #1)
+        ----------------------------------------------
+        ``slippage_per_share`` is subtracted from the BS-mid credit
+        before booking. Models the gap between BS-fair-value mid and
+        the actual fill price (typically 1-3 ticks per leg, i.e.
+        $0.10-$0.30 per share for a 2-leg spread). Default 0 keeps
+        legacy callers unaffected; the BacktestRunner threads its
+        configured value through.
+
+        ``commission_per_leg`` overrides the module-level default so
+        the operator can sweep commission models (Alpaca paper $0,
+        Alpaca live $0.65, Schwab $0.65, IB $0.50, etc.) without
+        editing the constant.
         """
         if qty <= 0:
             return 0.0
-        credit_dollars = credit_per_share * qty * 100.0
-        commission = COMMISSION_PER_LEG * 2 * qty
+        # Slippage reduces the credit we actually pocket. Two legs per
+        # credit spread → slippage_per_share applies to the net credit
+        # (already in per-spread units, not per-leg).
+        effective_credit = max(0.0, credit_per_share - slippage_per_share)
+        credit_dollars = effective_credit * qty * 100.0
+        commission = commission_per_leg * 2 * qty
         self.cash += credit_dollars - commission
         # The spread is *short* premium — its market value to us is
         # negative until we close it for less than we sold it.
         self.open_market_value -= credit_dollars
         self.open_spread_count += 1
         logger.debug(
-            "SimAccount.apply_open: qty=%d credit=$%.2f commission=$%.2f "
-            "→ cash=$%.2f equity=$%.2f",
-            qty, credit_dollars, commission, self.cash, self.equity,
+            "SimAccount.apply_open: qty=%d credit=$%.2f (slip=$%.2f) "
+            "commission=$%.2f → cash=$%.2f equity=$%.2f",
+            qty, credit_dollars, slippage_per_share * qty * 100.0,
+            commission, self.cash, self.equity,
         )
         return credit_dollars
 
@@ -143,34 +164,60 @@ class SimAccount:
         self.open_market_value = total_open_market_value
 
     def apply_close(self, *, credit_per_share: float, qty: int,
-                    closing_debit_per_share: float) -> float:
+                    closing_debit_per_share: float,
+                    slippage_per_share: float = 0.0,
+                    commission_per_leg: float = COMMISSION_PER_LEG) -> float:
         """
         Book a close. We pay back ``closing_debit × qty × 100`` and
         retire that leg of ``open_market_value``.
 
         Returns the realised P&L for the trade (positive = win),
         already net of commission.
+
+        Slippage (skill 38, backtester improvement #1)
+        ----------------------------------------------
+        ``slippage_per_share`` is ADDED to the BS-mid debit before
+        booking — i.e. we pay MORE to close than fair value suggests,
+        symmetric to the open-side slippage. Same default and same
+        threading from BacktestRunner as apply_open.
+
+        IMPORTANT — symmetric accounting (2026-05-23 fix):
+        ``credit_per_share`` here is the SAME value the caller passed
+        to ``apply_open`` (typically ``pos.credit_open``, the BS-mid
+        credit). But the open booked only the SLIPPED credit, so the
+        close must symmetrically subtract slippage from
+        ``credit_per_share`` before computing realised P&L and
+        reconciling ``open_market_value``. Otherwise the slippage
+        drag shows as half the expected value (only the close-side
+        slip is counted; the open-side slip leaks into equity).
         """
         if qty <= 0:
             return 0.0
-        credit_dollars = credit_per_share * qty * 100.0
-        debit_dollars = closing_debit_per_share * qty * 100.0
-        commission = COMMISSION_PER_LEG * 2 * qty
+        # Mirror apply_open's slippage handling so realised P&L
+        # accounts for slippage on BOTH legs of the round-trip.
+        effective_open_credit = max(0.0, credit_per_share - slippage_per_share)
+        credit_dollars = effective_open_credit * qty * 100.0
+        # Slippage on close: we pay more to exit than BS mid implies.
+        effective_debit = closing_debit_per_share + slippage_per_share
+        debit_dollars = effective_debit * qty * 100.0
+        commission = commission_per_leg * 2 * qty
         self.cash -= debit_dollars + commission
         # When we close, the position no longer contributes to
         # open_market_value — undo the negative mark we recorded on
-        # open. Caller is responsible for *also* re-running the
-        # aggregate apply_mark() on remaining positions; this method
-        # only retires this trade's slice.
+        # open. The reversal MUST use the same effective_open_credit
+        # the open booked, otherwise equity has a phantom drift equal
+        # to slippage × qty × 100.
         self.open_market_value += credit_dollars
         self.open_spread_count = max(0, self.open_spread_count - 1)
         realised = (credit_dollars - debit_dollars) - commission
         self.realised_pnl += realised
         logger.debug(
             "SimAccount.apply_close: qty=%d credit=$%.2f debit=$%.2f "
-            "commission=$%.2f → realised=$%.2f total_realised=$%.2f cash=$%.2f",
-            qty, credit_dollars, debit_dollars, commission,
-            realised, self.realised_pnl, self.cash,
+            "(slip=$%.2f) commission=$%.2f → realised=$%.2f "
+            "total_realised=$%.2f cash=$%.2f",
+            qty, credit_dollars, debit_dollars,
+            slippage_per_share * qty * 100.0,
+            commission, realised, self.realised_pnl, self.cash,
         )
         return realised
 

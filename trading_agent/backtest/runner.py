@@ -46,7 +46,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable, Dict, List, Optional, Sequence
 
-from trading_agent.backtest.account import EquityPoint, SimAccount
+from trading_agent.backtest.account import (
+    EquityPoint, SimAccount, COMMISSION_PER_LEG,
+)
 from trading_agent.backtest.clock import (
     INTRADAY_BAR_MINUTES,
     iter_events,
@@ -141,11 +143,19 @@ class BacktestRunner:
         that want to inject a stubbed yfinance loader.
     """
 
+    # Option tick size (post pennypilot rules; some sub-$3 options trade
+    # on $0.01 ticks but our credit spreads always price above that).
+    # Slippage params are expressed in ticks for readability; runner
+    # converts to dollars at apply-time.
+    TICK_SIZE: float = 0.05
+
     def __init__(self, *, tickers: Sequence[str], start: date, end: date,
                  preset, starting_equity: float = 100_000.0,
                  risk_manager: Optional[RiskManager] = None,
                  port: Optional[HistoricalPort] = None,
-                 progress_callback: Optional[Callable[[float, str], None]] = None):
+                 progress_callback: Optional[Callable[[float, str], None]] = None,
+                 slippage_ticks_per_leg: int = 0,
+                 commission_per_leg: Optional[float] = None):
         self.tickers = tuple(tickers)
         self.start = start
         self.end = end
@@ -161,6 +171,22 @@ class BacktestRunner:
             edge_buffer=getattr(preset, "edge_buffer", 0.10),
         )
         self.progress_callback = progress_callback
+        # Skill 38 (backtester improvement #1): slippage + commissions.
+        # slippage_ticks_per_leg=0 keeps the legacy "fill at BS mid"
+        # behavior; operators sweep 1-3 ticks to model realistic
+        # bid/ask slippage. Per-spread slippage = ticks × tick_size ×
+        # 2 legs (one short, one long per credit spread).
+        self.slippage_ticks_per_leg = int(slippage_ticks_per_leg)
+        self.slippage_per_share = (
+            self.slippage_ticks_per_leg * self.TICK_SIZE * 2
+        )
+        # commission_per_leg=None preserves the module default $0.65
+        # (the legacy backtest behavior); pass 0.0 to model commission-
+        # free brokers (paper Alpaca) or 1.00+ for active-trader tiers.
+        self.commission_per_leg = (
+            COMMISSION_PER_LEG if commission_per_leg is None
+            else float(commission_per_leg)
+        )
         self._open_positions: Dict[str, List[SimPosition]] = {
             t: [] for t in self.tickers
         }
@@ -201,8 +227,10 @@ class BacktestRunner:
                     preset=self.preset, account=account,
                     classifier=self._classifier,
                     risk_manager=self.risk_manager,
+                    slippage_per_share=self.slippage_per_share,
+                    commission_per_leg=self.commission_per_leg,
                 )
-            except Exception as exc:
+            except Exception as exc:                                  # noqa: skill-34-exempt — recoverable: caller falls through to neutral regime
                 logger.exception("[%s] cycle crashed at %s: %s", ticker, t, exc)
                 outcome = CycleOutcome(ticker=ticker, t=t, spot=0.0,
                                        regime=Regime.SIDEWAYS,
@@ -281,6 +309,8 @@ class BacktestRunner:
                         credit_per_share=pos.credit_open,
                         qty=pos.qty,
                         closing_debit_per_share=pos.current_mark,
+                        slippage_per_share=self.slippage_per_share,
+                        commission_per_leg=self.commission_per_leg,
                     )
                     closed_trades.append(closed)
             self._open_positions[ticker] = still_open
@@ -352,6 +382,8 @@ class BacktestRunner:
                 account.apply_close(
                     credit_per_share=pos.credit_open, qty=pos.qty,
                     closing_debit_per_share=pos.current_mark,
+                    slippage_per_share=self.slippage_per_share,
+                    commission_per_leg=self.commission_per_leg,
                 )
                 closed_trades.append(closed)
         account.apply_mark(total_open_market_value=0.0)

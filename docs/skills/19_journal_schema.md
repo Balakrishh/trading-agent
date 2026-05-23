@@ -183,4 +183,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-05-22 (mode-tag auto-injection + dry_run_close action label split + run_mode="dryrun" separate journal file with CI isolation gate).*
+*Last verified against repo HEAD on 2026-05-23 (mode-tag auto-injection + dry_run_close action label split + run_mode="dryrun" separate journal file with CI isolation gate).*

@@ -242,6 +242,8 @@ def run_one_cycle(*,
                   account: SimAccount,
                   classifier: RegimeClassifier,
                   risk_manager: RiskManager,
+                  slippage_per_share: float = 0.0,
+                  commission_per_leg: Optional[float] = None,
                   ) -> CycleOutcome:
     """
     Run one PERCEIVE → CLASSIFY → PLAN → RISK → EXECUTE step.
@@ -368,9 +370,17 @@ def run_one_cycle(*,
         sigma_current=sigma_entry,
         vix_current=vix_entry,
     )
-    account.apply_open(credit_per_share=float(candidate.credit),
-                       qty=qty,
-                       spread_width=float(candidate.width))
+    # Skill 38: thread slippage + commission overrides from the runner.
+    # commission_per_leg=None preserves the module default $0.65.
+    open_kwargs = {
+        "credit_per_share": float(candidate.credit),
+        "qty": qty,
+        "spread_width": float(candidate.width),
+        "slippage_per_share": float(slippage_per_share),
+    }
+    if commission_per_leg is not None:
+        open_kwargs["commission_per_leg"] = float(commission_per_leg)
+    account.apply_open(**open_kwargs)
 
     return CycleOutcome(
         ticker=ticker, t=t, spot=spot, regime=regime,
