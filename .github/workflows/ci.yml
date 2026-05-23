@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main, master]
 
+# Explicit token permissions. Without this, GitHub's default-restricted
+# token policy (enabled at the org level for many GitHub Cloud accounts
+# 2024+) gives the workflow a token with no contents:read, which causes
+# actions/checkout to fall back to interactive HTTPS auth and fail with
+# 'could not read Username for https://github.com'. Granting contents:
+# read explicitly resolves the 286ae450 fetch-failure class of bugs.
+permissions:
+  contents: read
+
 # Cancel in-progress runs of the same workflow on the same branch when a
 # new push lands — keeps the queue short on rapid iteration.
 concurrency:
