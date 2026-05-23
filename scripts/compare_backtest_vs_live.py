@@ -171,6 +171,10 @@ def load_live_trades(
 def run_backtest(
     start: date, end: date, tickers: Sequence[str],
     starting_equity: float,
+    *,
+    skew_preset: str = "flat",
+    slippage_ticks: int = 0,
+    commission_per_leg: Optional[float] = None,
 ) -> Tuple[List, float, float, List]:
     """Run the BacktestRunner against the active preset.
 
@@ -179,6 +183,9 @@ def run_backtest(
     # Imports here so the script can show its --help even if scipy is
     # missing on the host.
     from trading_agent.backtest.runner import BacktestRunner
+    from trading_agent.backtest.skew_model import (
+        FLAT_SKEW, INDEX_ETF_SKEW, SINGLE_STOCK_SKEW,
+    )
     from trading_agent.strategy_presets import load_active_preset
     preset = load_active_preset()
     # Force adaptive scan_mode so the backtester routes through decide()
@@ -187,9 +194,28 @@ def run_backtest(
     if getattr(preset, "scan_mode", "adaptive") != "adaptive":
         from dataclasses import replace
         preset = replace(preset, scan_mode="adaptive")
+
+    skew_map = {
+        "flat": FLAT_SKEW,
+        "etf": INDEX_ETF_SKEW,
+        "single": SINGLE_STOCK_SKEW,
+    }
+    chosen_skew = skew_map.get(skew_preset.lower(), FLAT_SKEW)
+    print(f"  preset.scan_mode={preset.scan_mode} "
+          f"edge_buffer={preset.edge_buffer} "
+          f"max_delta={preset.max_delta} "
+          f"min_credit_ratio={preset.min_credit_ratio}")
+    print(f"  skew={skew_preset} "
+          f"(put_skew={chosen_skew.put_skew}, "
+          f"call_skew={chosen_skew.call_skew})")
+    print(f"  slippage_ticks_per_leg={slippage_ticks} "
+          f"commission_per_leg={commission_per_leg}")
     runner = BacktestRunner(
         tickers=tuple(tickers), start=start, end=end,
         preset=preset, starting_equity=starting_equity,
+        slippage_ticks_per_leg=slippage_ticks,
+        commission_per_leg=commission_per_leg,
+        skew_model=chosen_skew,
     )
     result = runner.run()
     return (
@@ -440,6 +466,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="Path to live journal (default: trade_journal/signals_live.jsonl)")
     p.add_argument("--starting-equity", type=float, default=5000.0,
                    help="Seed for the backtest SimAccount (default: 5000)")
+    p.add_argument("--skew", default="flat",
+                   choices=["flat", "etf", "single"],
+                   help="Volatility skew preset (default: flat). 'etf' "
+                        "is calibrated for SPY/QQQ/XLF etc.; 'single' "
+                        "is steeper for single names.")
+    p.add_argument("--slippage-ticks", type=int, default=0,
+                   help="Slippage in ticks per leg per side (default: 0). "
+                        "$0.05/tick. Try 1-3 to model realistic fills.")
+    p.add_argument("--commission-per-leg", type=float, default=None,
+                   help="Override commission per leg (default: $0.65). "
+                        "Pass 0.0 for free brokers.")
     args = p.parse_args(argv)
 
     start = date.fromisoformat(args.start)
@@ -460,6 +497,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("(this may take 30-90s on yfinance cold cache)")
     bt_trades, bt_start, bt_end, bt_outcomes = run_backtest(
         start, end, tickers, args.starting_equity,
+        skew_preset=args.skew,
+        slippage_ticks=args.slippage_ticks,
+        commission_per_leg=args.commission_per_leg,
     )
     print(f"  {len(bt_trades)} backtest closed trade(s) "
           f"across {len(bt_outcomes)} cycle outcomes")
