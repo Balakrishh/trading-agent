@@ -171,10 +171,10 @@ def load_live_trades(
 def run_backtest(
     start: date, end: date, tickers: Sequence[str],
     starting_equity: float,
-) -> Tuple[List, float, float]:
+) -> Tuple[List, float, float, List]:
     """Run the BacktestRunner against the active preset.
 
-    Returns (closed_trades, starting_equity, ending_equity).
+    Returns (closed_trades, starting_equity, ending_equity, cycle_outcomes).
     """
     # Imports here so the script can show its --help even if scipy is
     # missing on the host.
@@ -196,6 +196,7 @@ def run_backtest(
         list(getattr(result, "closed_trades", []) or []),
         float(result.starting_equity),
         float(result.ending_equity),
+        list(getattr(result, "cycle_outcomes", []) or []),
     )
 
 
@@ -216,7 +217,8 @@ def _format_trade_table(rows: List[Tuple[str, ...]]) -> str:
 
 def report(start: date, end: date, tickers: Sequence[str],
            live: List[LiveTrade], live_start: float, live_end: float,
-           bt_trades: List, bt_start: float, bt_end: float) -> None:
+           bt_trades: List, bt_start: float, bt_end: float,
+           bt_outcomes: Optional[List] = None) -> None:
     print()
     print("=" * 76)
     print(f"BACKTEST vs LIVE — window {start} → {end}  ({(end - start).days + 1}d)")
@@ -354,12 +356,71 @@ def report(start: date, end: date, tickers: Sequence[str],
         print("    → Live may have been blocked by a PDT lockout, "
               "dedup gate, or chain-fetch failure that backtest doesn't model.")
 
-    print()
+    # ── Backtest cycle-outcome diagnostics ──────────────────────────
+    # If the backtest produced 0 closed trades, the most likely cause
+    # is that no cycles produced status="opened" — either no_data
+    # (insufficient yfinance bars), no_candidate (chain rejected
+    # everything), risk_rejected (RiskManager veto), or error
+    # (exception in cycle). Surface the breakdown so the operator
+    # can fix the root cause instead of guessing.
+    if bt_outcomes:
+        from collections import Counter
+        status_counts = Counter(getattr(o, "status", "?") for o in bt_outcomes)
+        print("BACKTEST CYCLE BREAKDOWN")
+        for status, n in status_counts.most_common():
+            print(f"  {status:18s}: {n}")
+        # Top reason per non-opened status
+        for status in ("no_data", "no_candidate", "risk_rejected", "error"):
+            reasons = [
+                str(getattr(o, "reason", ""))[:120]
+                for o in bt_outcomes if getattr(o, "status", "") == status
+            ]
+            if not reasons:
+                continue
+            top = Counter(reasons).most_common(3)
+            print(f"  Top '{status}' reasons:")
+            for r, c in top:
+                print(f"     × {c}  — {r}")
+        print()
+        # Per-ticker outcome rollup so the operator sees if it's a
+        # universal problem or ticker-specific.
+        ticker_status = Counter(
+            (getattr(o, "ticker", "?"), getattr(o, "status", "?"))
+            for o in bt_outcomes
+        )
+        all_tickers = sorted({getattr(o, "ticker", "?") for o in bt_outcomes})
+        all_statuses = sorted({getattr(o, "status", "?") for o in bt_outcomes})
+        print("BACKTEST OUTCOMES BY TICKER")
+        header = ["Ticker"] + all_statuses
+        rows = [tuple(header)]
+        for tk in all_tickers:
+            row = [tk] + [
+                str(ticker_status.get((tk, s), 0)) for s in all_statuses
+            ]
+            rows.append(tuple(row))
+        print(_format_trade_table(rows))
+        print()
+
     print("INTERPRETATION GUIDE")
-    print("  • Gap < 2pp:  parity holds. Strategy validation valid.")
-    print("  • Gap 2-5pp:  meaningful slippage / partial-fill drag in live.")
-    print("  • Gap > 5pp:  systemic problem — chain fetch, broker rejection, "
-          "or strategy regime classifier diverging.")
+    if not bt_trades:
+        print("  ⚠ BACKTEST OPENED ZERO TRADES — fix this BEFORE comparing.")
+        print("    Read the BACKTEST CYCLE BREAKDOWN above:")
+        print("    • all 'no_data'     → yfinance didn't return enough bars")
+        print("    • all 'no_candidate'→ chain/decision_engine rejecting all")
+        print("                          (often: max_delta too tight, or")
+        print("                          edge_buffer too high)")
+        print("    • all 'risk_rejected'→ RiskManager veto. Check the")
+        print("                           top reason printed above.")
+        print("    • mix of 'error'    → exception in cycle. Reason is the")
+        print("                          truncated exception message above.")
+        print("    The live agent uses Schwab option chains; backtest uses")
+        print("    yfinance + synthetic BS chains, so this is a common")
+        print("    setup gap.")
+    else:
+        print("  • Gap < 2pp:  parity holds. Strategy validation valid.")
+        print("  • Gap 2-5pp:  meaningful slippage / partial-fill drag in live.")
+        print("  • Gap > 5pp:  systemic problem — chain fetch, broker rejection, "
+              "or strategy regime classifier diverging.")
     print()
 
 
@@ -397,10 +458,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"\nRunning backtest {start} → {end} for {tickers}…")
     print("(this may take 30-90s on yfinance cold cache)")
-    bt_trades, bt_start, bt_end = run_backtest(
+    bt_trades, bt_start, bt_end, bt_outcomes = run_backtest(
         start, end, tickers, args.starting_equity,
     )
-    print(f"  {len(bt_trades)} backtest closed trade(s)")
+    print(f"  {len(bt_trades)} backtest closed trade(s) "
+          f"across {len(bt_outcomes)} cycle outcomes")
 
     # If live balance endpoints weren't found in the window, fall back
     # to the same starting equity so the report still computes.
@@ -413,6 +475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         start, end, tickers,
         live, live_start_bal, live_end_bal,
         bt_trades, bt_start, bt_end,
+        bt_outcomes=bt_outcomes,
     )
     return 0
 
