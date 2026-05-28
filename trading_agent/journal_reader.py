@@ -474,6 +474,51 @@ class JournalReader:
             return True
         return False
 
+    def reject_reasons_today(self, top_n: int = 5) -> List[tuple]:
+        """Return today's top rejection reasons sorted by count.
+
+        Skill 32 §3.8.1 (2026-05-28). When the agent runs many cycles
+        but opens zero positions, the operator needs to know WHY every
+        candidate was rejected. The journal carries each rejection's
+        reason in ``raw_signal.rejection_reason`` (free-form text,
+        e.g. "No positive-EV candidate", "C/W ratio 0.16 < min 0.25",
+        "RSI=72 ≥ 70 overbought", etc.).
+
+        Returns a list of (reason_text, count) tuples, top_n longest
+        first, for today's ET trading session. Empty list if no
+        rejections (which on a normal day would mean trades opened
+        cleanly — also useful information).
+
+        The EOD builder bubbles this into the Telegram alert body so
+        the operator gets "12 rejected: top reasons were..." instead
+        of silence on a no-trade day.
+        """
+        from collections import Counter
+        today_et = self._today_et()
+        c: Counter = Counter()
+        for rec in self._iter_rows():
+            if self._row_et_date(rec) != today_et:
+                continue
+            action = rec.get("action", "")
+            # Cover the rejection-shaped actions, including
+            # skipped_* variants that also explain why no trade.
+            if not (action == "rejected"
+                    or action.startswith("skipped_")):
+                continue
+            rs = rec.get("raw_signal") or {}
+            if not isinstance(rs, dict):
+                continue
+            reason = (
+                rs.get("rejection_reason")
+                or rs.get("reason")
+                or "(no reason recorded)"
+            )
+            # Truncate noisy long reasons but keep them grouping-stable
+            # (don't include unique numbers in the key).
+            reason_text = str(reason)[:120]
+            c[reason_text] += 1
+        return c.most_common(top_n)
+
     def account_balance_today_endpoints(
         self,
     ) -> tuple[Optional[float], Optional[float]]:

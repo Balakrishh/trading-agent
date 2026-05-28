@@ -321,7 +321,8 @@ class TelegramNotifier:
                            cycles_today: int,
                            errors_today: int,
                            stuck_tickers: list,
-                           silenced_exceptions: Optional[list] = None) -> bool:
+                           silenced_exceptions: Optional[list] = None,
+                           reject_reasons: Optional[list] = None) -> bool:
         """End-of-day recap (skill 32 §3.8).
 
         Fired once after market close. Aggregates today's trading
@@ -451,6 +452,28 @@ class TelegramNotifier:
                 lines.append(
                     f"<i>… and {len(silenced_exceptions) - 5} more "
                     f"groups in signals_live.jsonl</i>"
+                )
+
+        # ── Reject reasons (skill 32 §3.8.1) — why didn't trades fire? ─
+        # Operator-facing: on a zero-trade day the agent still pinged 10+
+        # tickers per cycle; this section attributes why every candidate
+        # got rejected. Without it, "no trades" reads identical to "system
+        # is broken."
+        if reject_reasons and not opens_today and not closes_today:
+            total_rejects = sum(n for _, n in reject_reasons)
+            lines.append("")
+            lines.append(
+                f"<b>🚫 Why no trades today ({total_rejects} rejections)</b>"
+            )
+            for reason, count in reject_reasons[:5]:
+                # Keep the message readable — long technical reasons are
+                # truncated; the journal has the full text if needed.
+                short = reason if len(reason) <= 80 else reason[:77] + "…"
+                lines.append(f"• <code>{count}×</code> {short}")
+            if len(reject_reasons) > 5:
+                lines.append(
+                    f"<i>… and {len(reject_reasons) - 5} more in "
+                    f"signals_live.jsonl</i>"
                 )
 
         return self._send("\n".join(lines), channel="info")

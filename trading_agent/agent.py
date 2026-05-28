@@ -1863,6 +1863,11 @@ class TradingAgent:
                 }
                 for s in reader.silenced_exceptions_today()
             ]
+            # Skill 32 §3.8.1 (2026-05-28) — reject-reason breakdown.
+            # On a no-trade day, the operator sees WHY every candidate
+            # got rejected (RSI gate, EV gate, high-IV block, etc.)
+            # instead of silence. List of (reason_text, count) tuples.
+            result["reject_reasons"] = reader.reject_reasons_today(top_n=10)
         except Exception as exc:                                # noqa: BLE001
             # Skill 34: a journal-read failure here means the EOD
             # recap silently degrades to "no closes today" — the
@@ -1922,9 +1927,22 @@ class TradingAgent:
             return
 
         summary = self._build_eod_summary()
-        if not summary["opens_today"] and not summary["closes_today"]:
-            # No trading activity → nothing to recap. Don't burn a
-            # message on an empty day.
+        # Send EOD recap UNCONDITIONALLY when the agent ran today
+        # (cycles_today > 0). Pre-2026-05-28 a "no opens AND no
+        # closes" day was treated as "nothing to recap" and silently
+        # skipped — but operators reported the silence reads identical
+        # to "the system is broken." On a zero-trade day the operator
+        # still needs to know: did the agent run? what blocked every
+        # candidate? was it RSI gate, EV gate, IV block, or something
+        # else?
+        #
+        # The notify_eod_summary builder includes a "Top reject
+        # reasons" section when opens+closes are empty so the operator
+        # gets attribution even on a quiet day.
+        if summary.get("cycles_today", 0) == 0:
+            # Agent didn't run today at all — no telemetry to report.
+            # This is the genuine "nothing happened" case (weekend,
+            # outage, etc). Skip the message.
             return
 
         # Item 6: typed wrapper — no send_fn=... indirection.
@@ -1941,6 +1959,7 @@ class TradingAgent:
             errors_today=summary["errors_today"],
             stuck_tickers=summary["stuck_tickers"],
             silenced_exceptions=summary.get("silenced_exceptions") or [],
+            reject_reasons=summary.get("reject_reasons") or [],
         )
 
     # ── Skill 35: shims delegating to extracted collaborators ────────────

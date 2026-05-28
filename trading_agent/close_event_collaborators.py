@@ -464,9 +464,15 @@ class CloseAlertNotifier:
                            realized_pl_today: float,
                            unrealized_pl_today: float,
                            cycles_today: int, errors_today: int,
-                           stuck_tickers, silenced_exceptions) -> None:
+                           stuck_tickers, silenced_exceptions,
+                           reject_reasons=None) -> None:
         """Fires the EOD recap Telegram alert. ``alert_type`` carries
-        the ET trading-session date for cross-day dedup."""
+        the ET trading-session date for cross-day dedup.
+
+        ``reject_reasons`` (skill 32 §3.8.1, 2026-05-28): top-N
+        rejection reasons surfaced on no-trade days so the operator
+        sees attribution instead of silence.
+        """
         self._send_alert(
             ticker="__eod__",
             alert_type=alert_type,
@@ -482,6 +488,7 @@ class CloseAlertNotifier:
             errors_today=errors_today,
             stuck_tickers=stuck_tickers,
             silenced_exceptions=silenced_exceptions,
+            reject_reasons=reject_reasons,
         )
 
 
