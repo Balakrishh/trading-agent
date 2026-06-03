@@ -155,7 +155,12 @@ class TestFullPipeline:
 
     def test_journal_kb_logs_signal_on_dry_run(self, tmp_path, bullish_prices,
                                                 sample_put_contracts):
-        """JournalKB signals_<run_mode>.jsonl is written after each cycle."""
+        """JournalKB signals_<run_mode>.jsonl is written after each cycle.
+
+        Skill 40 (2026-06-03): the VIX regime monitor writes a __vix__
+        observation row at the top of every cycle. Tests must find
+        the per-ticker SPY row specifically rather than assuming
+        ``lines[0]``."""
         agent = TradingAgent(_make_config(tmp_path))
         _mock_agent(agent, bullish_prices, sample_put_contracts)
 
@@ -167,21 +172,43 @@ class TestFullPipeline:
         assert os.path.exists(jsonl_path)
         lines = open(jsonl_path).readlines()
         assert len(lines) >= 1
-        record = json.loads(lines[0])
+        # Find the SPY signal row (skipping __vix__ observations and any
+        # other non-ticker rows the cycle writes).
+        spy_records = [
+            json.loads(ln) for ln in lines
+            if json.loads(ln).get("ticker") == "SPY"
+        ]
+        assert len(spy_records) >= 1, (
+            f"No SPY row found in journal; saw rows: "
+            f"{[json.loads(l).get('ticker') for l in lines]}"
+        )
+        record = spy_records[0]
         assert record["ticker"] == "SPY"
         assert "action" in record
         assert "raw_signal" in record
 
     def test_signal_contains_thesis(self, tmp_path, bullish_prices,
                                      sample_put_contracts):
-        """JournalKB record includes the trade thesis (why/why_now/exit_plan)."""
+        """JournalKB record includes the trade thesis (why/why_now/exit_plan).
+
+        Skill 40 (2026-06-03): find the SPY row specifically; the cycle
+        also writes __vix__ observations which don't carry a thesis."""
         agent = TradingAgent(_make_config(tmp_path))
         _mock_agent(agent, bullish_prices, sample_put_contracts)
 
         agent.run_cycle()
 
         jsonl_path = agent.journal_kb.jsonl_path
-        record = json.loads(open(jsonl_path).readline())
+        lines = open(jsonl_path).readlines()
+        spy_records = [
+            json.loads(ln) for ln in lines
+            if json.loads(ln).get("ticker") == "SPY"
+        ]
+        assert len(spy_records) >= 1, (
+            f"No SPY row found in journal; saw tickers "
+            f"{[json.loads(l).get('ticker') for l in lines]}"
+        )
+        record = spy_records[0]
         thesis = record["raw_signal"].get("thesis", {})
         assert "why" in thesis
         assert "why_now" in thesis
