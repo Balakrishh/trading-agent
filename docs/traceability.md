@@ -79,9 +79,10 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/thesis_builder.py` (last modified 2026-04-25)
 - `trading_agent/trade_journal.py` (last modified 2026-04-02)
 - `trading_agent/trade_plan_report.py` (last modified 2026-04-02)
+- `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 32 / 70 files (45% uncovered)
+**Orphan source coverage:** 33 / 71 files (46% uncovered)
 
 ## Orphan skills (no conformance test)
 
