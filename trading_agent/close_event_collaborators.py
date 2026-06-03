@@ -465,7 +465,8 @@ class CloseAlertNotifier:
                            unrealized_pl_today: float,
                            cycles_today: int, errors_today: int,
                            stuck_tickers, silenced_exceptions,
-                           reject_reasons=None) -> None:
+                           reject_reasons=None,
+                           vix_snapshot=None) -> None:
         """Fires the EOD recap Telegram alert. ``alert_type`` carries
         the ET trading-session date for cross-day dedup.
 
@@ -489,6 +490,7 @@ class CloseAlertNotifier:
             stuck_tickers=stuck_tickers,
             silenced_exceptions=silenced_exceptions,
             reject_reasons=reject_reasons,
+            vix_snapshot=vix_snapshot,
         )
 
 

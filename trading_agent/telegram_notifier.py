@@ -322,7 +322,8 @@ class TelegramNotifier:
                            errors_today: int,
                            stuck_tickers: list,
                            silenced_exceptions: Optional[list] = None,
-                           reject_reasons: Optional[list] = None) -> bool:
+                           reject_reasons: Optional[list] = None,
+                           vix_snapshot: Optional[tuple] = None) -> bool:
         """End-of-day recap (skill 32 §3.8).
 
         Fired once after market close. Aggregates today's trading
@@ -414,6 +415,13 @@ class TelegramNotifier:
             f"{errors_today} error(s) today"
         )
 
+        # ── VIX snapshot (skill 40) — vol regime context ────────────
+        if vix_snapshot:
+            vix_level, zone_name = vix_snapshot
+            lines.append(
+                f"<b>📈 VIX:</b> {vix_level:.2f} (<code>{zone_name}</code>)"
+            )
+
         # ── Stuck positions (surface so operator can act overnight) ─
         if stuck_tickers:
             lines.append("")
@@ -476,6 +484,41 @@ class TelegramNotifier:
                     f"signals_live.jsonl</i>"
                 )
 
+        return self._send("\n".join(lines), channel="info")
+
+    def notify_vix_regime_change(self, *, from_zone: str, to_zone: str,
+                                  vix_level: float, hint: str) -> bool:
+        """Skill 40 (2026-06-03) — VIX regime transition alert.
+
+        Fires when the volatility environment shifts from one zone to
+        another (Compressed → Low → Normal → Elevated → High →
+        Crisis). The operator uses this to know when conditions
+        favor — or against — credit spreads, without having to
+        check the dashboard manually.
+
+        Routes to the info channel (same as EOD recap, position
+        opens/closes). Per-day dedup happens upstream in
+        VixRegimeMonitor via the journal — this method just fires.
+        """
+        # Pick an emoji that reflects the transition direction. Going
+        # to a higher-vol zone = 🚀 (premium increasing — good for
+        # credit spreads). Going to a lower-vol zone = 🪙
+        # (premium decreasing — sit out).
+        order = ["Compressed", "Low", "Normal", "Elevated", "High", "Crisis"]
+        try:
+            up = order.index(to_zone) > order.index(from_zone)
+        except ValueError:
+            up = False
+        arrow_emoji = "🚀" if up else "🪙"
+        direction = "rising" if up else "falling"
+        lines = [
+            f"{arrow_emoji} <b>VIX regime change — {direction}</b>",
+            "",
+            (f"<code>{from_zone}</code> → <code>{to_zone}</code>  "
+             f"(VIX = <b>{vix_level:.2f}</b>)"),
+            "",
+            f"<i>{hint}</i>",
+        ]
         return self._send("\n".join(lines), channel="info")
 
     def notify_position_closed(self, ticker: str, strategy: str,

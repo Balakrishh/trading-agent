@@ -112,6 +112,10 @@ _DEDUP_BYPASS_ACTIONS = frozenset({
     # Skill 32 — telegram alert ack rows must always write so dedup
     # state survives a process restart mid-day.
     "telegram_alert_sent",
+    # Skill 40 — VIX regime observations. Every cycle writes one so
+    # zone-transition detection works across process restarts; per-
+    # zone-transition Telegram dedup happens in VixRegimeMonitor.
+    "vix_observation",
 })
 
 _MD_HEADER = (

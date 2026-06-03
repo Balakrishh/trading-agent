@@ -465,6 +465,19 @@ class TradingAgent:
             preset=self.preset,
         )
 
+        # ── VIX regime monitor (skill 40, 2026-06-03) ─────────────────
+        # Pages the operator when the volatility environment changes
+        # (Normal → Elevated, Low → Compressed, etc.). Critical
+        # operator-facing signal in quiet markets: lets the operator
+        # know WHEN to expect the agent to start trading again, instead
+        # of staring at silence on no-trade days.
+        from trading_agent.vix_regime_monitor import VixRegimeMonitor
+        self._vix_monitor = VixRegimeMonitor(
+            data_provider=self.data_provider,
+            journal_kb=self.journal_kb,
+            telegram=self.telegram,
+        )
+
         # Daily state store (drawdown + exit debounce)
         self.daily_state = DailyStateStore(config.logging.trade_plan_dir)
 
@@ -793,6 +806,13 @@ class TradingAgent:
         logger.info("Pre-fetching market data for %d ticker(s)…", len(tickers))
         self.data_provider.prefetch_historical_parallel(tickers)
         self.data_provider.fetch_batch_snapshots(tickers)
+
+        # Skill 40 — VIX regime check. Best-effort; never blocks cycle.
+        # Fires a Telegram alert on zone transitions so the operator
+        # knows when conditions become favorable (or unfavorable) for
+        # credit spreads. The monitor self-dedupes to once-per-zone-
+        # transition per UTC day.
+        self._vix_monitor.check_and_alert()
 
         # ------------------------------------------------------------------
         # Stage 1: MONITOR existing positions
@@ -1945,6 +1965,17 @@ class TradingAgent:
             # outage, etc). Skip the message.
             return
 
+        # Skill 40 — surface current VIX + zone in the EOD recap. Best-
+        # effort; None if VIX unavailable. Renders as "VIX 14.32 (Low)".
+        vix_snapshot = None
+        try:
+            cur = self._vix_monitor.current()
+            if cur is not None:
+                vix_level, zone = cur
+                vix_snapshot = (float(vix_level), zone.name)
+        except Exception:  # noqa: skill-34-exempt — EOD recap is best-effort at shutdown; agent already exiting
+            pass
+
         # Item 6: typed wrapper — no send_fn=... indirection.
         self._close_alerts.notify_eod_summary(
             alert_type=eod_alert_type,
@@ -1960,6 +1991,7 @@ class TradingAgent:
             stuck_tickers=summary["stuck_tickers"],
             silenced_exceptions=summary.get("silenced_exceptions") or [],
             reject_reasons=summary.get("reject_reasons") or [],
+            vix_snapshot=vix_snapshot,
         )
 
     # ── Skill 35: shims delegating to extracted collaborators ────────────
