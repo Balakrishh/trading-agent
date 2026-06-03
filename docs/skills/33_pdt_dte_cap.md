@@ -75,4 +75,4 @@ try:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-23.*
+*Last verified against repo HEAD on 2026-06-03.*
