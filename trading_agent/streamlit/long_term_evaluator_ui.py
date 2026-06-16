@@ -78,6 +78,32 @@ def render_long_term_evaluator() -> None:
         "(next session). See `docs/skills/40_long_term_options_evaluator.md`."
     )
 
+    # Diagnostic dict the section renderers will populate as they run.
+    # Surfaced via a "🔍 Diagnostics" expander at the bottom of the tab
+    # so the operator can see exactly where the pipeline dropped data
+    # without having to scroll the streamlit terminal log.
+    diag: Dict[str, Any] = {
+        "stage": "init",
+        "activation": st.session_state.get("lt_evaluator_activated", False),
+        "holdings_file_path": "knowledge_base/holdings.json",
+        "holdings_file_exists": False,
+        "holdings_textarea_chars": 0,
+        "parsed_positions": 0,
+        "watchlist_size": 0,
+        "intersection_held_and_watched": [],
+        "cc_eligible_qty_100_plus": [],
+        "chain_fetches": {},
+        "recommendation_count": 0,
+        "errors": [],
+    }
+    try:
+        from pathlib import Path as _Path
+        diag["holdings_file_exists"] = _Path(
+            "knowledge_base/holdings.json"
+        ).exists()
+    except Exception:
+        pass
+
     # Gate the heavy work behind an explicit activation — same pattern as
     # the Watchlist tab. Streamlit reruns every tab body on every event;
     # without the gate this tab would chain-fetch on every keystroke.
@@ -95,41 +121,76 @@ def render_long_term_evaluator() -> None:
         return
 
     # ── Holdings input ────────────────────────────────────────────────
+    diag["stage"] = "holdings_input"
     positions = _render_holdings_input()
+    diag["holdings_textarea_chars"] = len(
+        st.session_state.get("lt_holdings_textarea", "") or ""
+    )
+    diag["parsed_positions"] = len(positions) if positions else 0
     if positions is None:
         # Operator hasn't pasted holdings yet — render a stub snapshot
         # and bail before chain-fetching.
         st.warning("Paste your current holdings above to see recommendations.")
+        _render_diagnostics_expander(diag)
         return
 
     provider = ManualPositionsProvider(positions=positions)
+    diag["stage"] = "portfolio_snapshot"
 
     # ── Portfolio snapshot ────────────────────────────────────────────
     _render_portfolio_snapshot(provider)
 
     # ── Recommendations ───────────────────────────────────────────────
     watchlist_symbols = load_watchlist().symbols()
+    diag["watchlist_size"] = len(watchlist_symbols)
+    held_qty = {p.ticker: p.qty for p in positions if p.kind == "stock"}
+    diag["intersection_held_and_watched"] = sorted(
+        set(watchlist_symbols) & set(held_qty.keys())
+    )
+    diag["cc_eligible_qty_100_plus"] = sorted(
+        t for t in diag["intersection_held_and_watched"]
+        if held_qty.get(t, 0) >= 100
+    )
+
     if not watchlist_symbols:
         st.info(
             "Your watchlist is empty. Add tickers in the **Watchlist** "
             "tab to see recommendations here."
         )
+        _render_diagnostics_expander(diag)
         return
 
-    chain_fetcher = _make_chain_fetcher()
+    # Wrap the chain fetcher so we can capture per-ticker outcomes for
+    # the diagnostics panel without changing the fetcher's interface.
+    raw_fetcher = _make_chain_fetcher()
+
+    def _instrumented_fetcher(ticker: str):
+        try:
+            result = raw_fetcher(ticker)
+        except Exception as exc:  # noqa: BLE001
+            diag["chain_fetches"][ticker] = f"ERROR: {exc!s}"
+            diag["errors"].append(f"chain {ticker}: {exc!s}")
+            return []
+        diag["chain_fetches"][ticker] = f"{len(result)} contracts"
+        return result
+
+    diag["stage"] = "scoring"
     evaluator = LongTermEvaluator(
         positions_provider=provider,
-        call_chain_fetcher=chain_fetcher,
+        call_chain_fetcher=_instrumented_fetcher,
         preset=_active_preset_or_none(),
         config=EvaluatorConfig(),
     )
 
     with st.spinner("Scoring covered-call candidates…"):
         recommendations = evaluator.recommend(watchlist_symbols)
+    diag["recommendation_count"] = len(recommendations)
+    diag["stage"] = "render"
 
     _render_manage_existing(provider, recommendations)
-    _render_income_overlay(recommendations)
+    _render_income_overlay(recommendations, diag=diag)
     _render_reserved_sections()
+    _render_diagnostics_expander(diag)
 
 
 # ---------------------------------------------------------------------------
@@ -155,31 +216,42 @@ def _render_holdings_input() -> Optional[List[Position]]:
     Persistence (skill 41 §3.4):
       * On first render after activation, load any saved paste from
         ``knowledge_base/holdings.json`` and pre-populate the textarea +
-        st.session_state so the operator's last book is restored across
-        Streamlit restarts.
+        st.session_state[<widget-key>] so the operator's last book is
+        restored across Streamlit restarts.
       * On a successful parse, atomically save the raw paste + parsed
         count back to the file. Next restart loads the same book.
       * The "Reset saved holdings" button clears both the on-disk file
         and the session-state cache, leaving a blank textarea.
+
+    Streamlit state pattern note: when ``st.text_area`` is given both a
+    ``value=`` and a ``key=``, the WIDGET KEY wins on subsequent reruns
+    (the ``value`` is only the initial fallback). To pre-populate, we
+    set ``st.session_state[<widget-key>]`` BEFORE the widget renders and
+    omit ``value=`` so the widget reads its own key. This is the only
+    way the Schwab paste survives a Streamlit hot-reload.
     """
     st.markdown("### Your holdings")
 
+    _TEXTAREA_KEY = "lt_holdings_textarea"
+    _HYDRATED_FLAG = "lt_holdings_hydrated"
+
     # ── First-render hydration from persistent store ─────────────────
-    if "lt_holdings_blob" not in st.session_state:
+    # Hydration runs once per session — guard with a flag so re-runs
+    # don't clobber the operator's in-flight edits with the on-disk blob.
+    if not st.session_state.get(_HYDRATED_FLAG):
         saved = load_holdings()
         if not saved.is_empty:
-            st.session_state.lt_holdings_blob = saved.raw_paste
+            st.session_state[_TEXTAREA_KEY] = saved.raw_paste
             st.session_state.lt_holdings_saved_at = saved.saved_at
             st.session_state.lt_holdings_saved_count = saved.parsed_count
-        else:
-            st.session_state.lt_holdings_blob = ""
+        st.session_state[_HYDRATED_FLAG] = True
 
     saved_at = st.session_state.get("lt_holdings_saved_at", "")
     saved_count = st.session_state.get("lt_holdings_saved_count", 0)
     if saved_at:
         st.caption(
             f"📁 Last saved {saved_count} positions at **{saved_at}**. "
-            "Edit + click _Parse_ to update; _Reset_ clears the saved file."
+            "Edit + click _Parse & save_ to update; _Reset_ clears the file."
         )
     else:
         st.caption(
@@ -192,10 +264,9 @@ def _render_holdings_input() -> Optional[List[Position]]:
 
     raw = st.text_area(
         "Holdings (JSON)",
-        value=st.session_state.get("lt_holdings_blob", ""),
         height=240,
         placeholder=_HOLDINGS_PLACEHOLDER,
-        key="lt_holdings_textarea",
+        key=_TEXTAREA_KEY,
     )
 
     col_parse, col_reset, col_status = st.columns([1, 1, 3])
@@ -214,14 +285,15 @@ def _render_holdings_input() -> Optional[List[Position]]:
     if reset_clicked:
         clear_holdings()
         for k in (
-            "lt_holdings_blob",
+            _TEXTAREA_KEY,
+            _HYDRATED_FLAG,
             "lt_holdings_saved_at",
             "lt_holdings_saved_count",
         ):
             st.session_state.pop(k, None)
         st.rerun()
 
-    if not raw.strip():
+    if not (raw or "").strip():
         return None
 
     try:
@@ -239,7 +311,6 @@ def _render_holdings_input() -> Optional[List[Position]]:
     # last operator-confirmed-working blob, never an in-flight edit. ─
     if parse_clicked:
         saved = update_paste(raw_paste=raw, parsed_count=len(snapshot))
-        st.session_state.lt_holdings_blob = raw
         st.session_state.lt_holdings_saved_at = saved.saved_at
         st.session_state.lt_holdings_saved_count = saved.parsed_count
         with col_status:
@@ -305,16 +376,63 @@ def _render_manage_existing(
 # § Income overlay (covered calls)
 # ---------------------------------------------------------------------------
 
-def _render_income_overlay(recommendations: List[Recommendation]) -> None:
+def _render_income_overlay(
+    recommendations: List[Recommendation],
+    *,
+    diag: Optional[Dict[str, Any]] = None,
+) -> None:
     st.markdown("### Income overlay — covered calls")
     cc = [r for r in recommendations if r.strategy == "covered_call"]
     if not cc:
-        st.info(
-            "No covered-call candidates today. Reasons might include: "
-            "no holdings ≥ 100 shares on the watchlist; or the active "
-            "preset's `cc_*` gates filtered every chain candidate. "
-            "See **skill 40 §4** for the gate ordering."
-        )
+        # Explain *why* this section is empty using the diagnostic dict
+        # the orchestrator passes in. Skill 40 §4 gate ordering reproduced
+        # here in operator-readable form.
+        d = diag or {}
+        intersect = d.get("intersection_held_and_watched", []) or []
+        eligible = d.get("cc_eligible_qty_100_plus", []) or []
+        chain_attempts = d.get("chain_fetches", {}) or {}
+        with st.expander(
+            "🛈 Why no covered-call suggestions?", expanded=True,
+        ):
+            st.markdown(
+                f"- **Held ∩ Watchlist:** {len(intersect)} tickers "
+                f"({', '.join(intersect) if intersect else '_none_'})"
+            )
+            st.markdown(
+                f"- **Of those, ≥ 100 shares:** {len(eligible)} tickers "
+                f"({', '.join(eligible) if eligible else '_none_'})"
+            )
+            if not eligible:
+                st.warning(
+                    "Covered calls require **100 shares per contract**. "
+                    "None of your watchlist-held positions clear that "
+                    "floor. Options: (a) add a ticker you already own "
+                    "100+ shares of to the watchlist, (b) wait for the "
+                    "LEAPS-overlay and debit-spread evaluators landing "
+                    "next session — they work on smaller lots."
+                )
+            elif chain_attempts:
+                st.markdown("- **Chain fetch outcomes per eligible ticker:**")
+                for tk in eligible:
+                    outcome = chain_attempts.get(
+                        tk, "_chain not fetched_",
+                    )
+                    st.markdown(f"  - `{tk}`: {outcome}")
+                st.info(
+                    "If chains returned 0 contracts, your Alpaca data feed "
+                    "(`ALPACA_OPTIONS_FEED` env var) may not include "
+                    "options for those tickers. The default `indicative` "
+                    "feed has gaps; the `opra` feed (paid) covers more. "
+                    "If chains returned N>0 but no recommendations, the "
+                    "preset's `cc_*` gates filtered everything — see "
+                    "skill 40 §2.1 for the gate values."
+                )
+            else:
+                st.info(
+                    "Eligible tickers exist but no chains were fetched. "
+                    "Check the Streamlit terminal log for "
+                    "`Chain fetch for ... failed:` lines."
+                )
         return
 
     for rec in cc:
@@ -352,6 +470,77 @@ def _render_income_overlay(recommendations: List[Recommendation]) -> None:
                     for leg in rec.legs
                 ],
             })
+
+
+# ---------------------------------------------------------------------------
+# § Diagnostics expander — operator self-debug
+# ---------------------------------------------------------------------------
+
+def _render_diagnostics_expander(diag: Dict[str, Any]) -> None:
+    """Always-on bottom-of-tab expander revealing pipeline state.
+
+    Reveals: activation flag, holdings file existence + saved-at, parse
+    state, watchlist size, held∩watched intersection, ≥100-share
+    eligibility, per-ticker chain fetch outcomes, total recommendation
+    count, error trail.
+
+    The expander defaults to *collapsed* so it doesn't clutter the
+    healthy path, but stays visible at every render so the operator
+    can self-debug an empty panel without scrolling the streamlit log.
+    """
+    expanded_default = (
+        diag.get("recommendation_count", 0) == 0
+        and bool(diag.get("parsed_positions"))
+    )
+    with st.expander(
+        "🔍 Diagnostics (pipeline state)", expanded=expanded_default,
+    ):
+        st.markdown(f"**Stage reached:** `{diag.get('stage', 'unknown')}`")
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Holdings file?", "yes" if diag.get(
+            "holdings_file_exists") else "no")
+        col_a.metric("Activated", "yes" if diag.get("activation") else "no")
+        col_b.metric("Textarea chars", diag.get("holdings_textarea_chars", 0))
+        col_b.metric("Parsed positions", diag.get("parsed_positions", 0))
+        col_c.metric("Watchlist size", diag.get("watchlist_size", 0))
+        col_c.metric(
+            "Recommendations", diag.get("recommendation_count", 0),
+        )
+
+        intersect = diag.get("intersection_held_and_watched", []) or []
+        eligible = diag.get("cc_eligible_qty_100_plus", []) or []
+        st.markdown(
+            f"- **Held ∩ Watchlist** ({len(intersect)}): "
+            f"`{', '.join(intersect) if intersect else 'none'}`"
+        )
+        st.markdown(
+            f"- **CC-eligible (≥100 shares)** ({len(eligible)}): "
+            f"`{', '.join(eligible) if eligible else 'none'}`"
+        )
+
+        chain_fetches = diag.get("chain_fetches", {}) or {}
+        if chain_fetches:
+            st.markdown("- **Per-ticker chain fetch outcomes:**")
+            for tk, outcome in sorted(chain_fetches.items()):
+                st.markdown(f"  - `{tk}` → {outcome}")
+        else:
+            st.markdown(
+                "- **Chain fetches:** _none attempted_ "
+                "(usually means no CC-eligible tickers to fetch for)."
+            )
+
+        errors = diag.get("errors", []) or []
+        if errors:
+            st.markdown("- **Errors observed:**")
+            for err in errors:
+                st.markdown(f"  - {err}")
+
+        st.caption(
+            "If this expander is open by default, the pipeline ran but "
+            "produced no recommendations — the breakdown above shows "
+            "where the data dropped. Send me a screenshot of this "
+            "expander and I'll know what's wrong."
+        )
 
 
 # ---------------------------------------------------------------------------
