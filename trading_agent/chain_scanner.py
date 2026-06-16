@@ -169,6 +169,37 @@ def _cw_floor(short_delta: float, edge_buffer: float) -> float:
     return abs(short_delta) * (1.0 + edge_buffer)
 
 
+def _quote_credit_single(
+    bid: float, ask: float,
+    *,
+    fill_haircut: float = DEFAULT_FILL_HAIRCUT,
+) -> float:
+    """Single-leg sibling of :func:`_quote_credit` — for skill 40's
+    long-term evaluator (covered call, cash-secured put).
+
+    Uses the same NBBO-mid-minus-fill-haircut formula as the spread
+    helper, so the long-term evaluator's credit estimate composes
+    cleanly with the executor's per-leg slippage budget. Falls back to
+    the conservative side (``bid``) when either quote is missing or
+    zero — never manufactures credit out of thin air.
+
+    Returns a ``round(credit, 2)`` value clipped at zero. Caller still
+    rejects ``credit == 0`` upstream.
+
+    >>> _quote_credit_single(1.20, 1.30)
+    1.23
+    >>> _quote_credit_single(0.0, 1.30)
+    0.0
+    >>> _quote_credit_single(1.20, 0.0)
+    1.18
+    """
+    mid = ((bid + ask) / 2.0
+           if bid > 0 and ask > 0
+           else bid)
+    credit = mid - max(0.0, fill_haircut)
+    return round(max(0.0, credit), 2)
+
+
 def _leg_spread_too_wide(bid: float, ask: float,
                          max_cents: float, max_pct_mid: float) -> bool:
     """True iff a single option leg's bid-ask spread fails BOTH liquidity gates.
@@ -580,6 +611,7 @@ __all__ = [
     "_score_candidate",
     "_score_candidate_with_reason",
     "_quote_credit",
+    "_quote_credit_single",
     "_leg_spread_too_wide",
     "DEFAULT_FILL_HAIRCUT",
     # Reject-reason taxonomy (stable journal keys).

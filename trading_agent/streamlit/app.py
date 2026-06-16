@@ -217,9 +217,19 @@ from trading_agent.streamlit._busy import (  # noqa: E402
 inject_overlay_css()
 register_top_level_slot()
 
-tab_live, tab_backtest, tab_llm, tab_watchlist = st.tabs(
-    ["📡 Live Monitoring", "📊 Backtesting", "🤖 LLM Extension", "📊 Watchlist"]
-)
+(
+    tab_live,
+    tab_backtest,
+    tab_llm,
+    tab_watchlist,
+    tab_long_term,
+) = st.tabs([
+    "📡 Live Monitoring",
+    "📊 Backtesting",
+    "🤖 LLM Extension",
+    "📊 Watchlist",
+    "📈 Long-Term Evaluator",
+])
 
 with tab_live:
     from trading_agent.streamlit.live_monitor import render_live_monitor
@@ -239,3 +249,13 @@ with tab_watchlist:
     # docstring for the architectural-safety rationale.
     from trading_agent.streamlit.watchlist_ui import render_watchlist
     render_watchlist()
+
+with tab_long_term:
+    # Long-term options evaluator — skill 40.
+    # Read-only by design; the order-placement layer lives elsewhere
+    # (Phase 5, dedicated session). See long_term_evaluator_ui.py
+    # docstring for the architectural-safety rationale.
+    from trading_agent.streamlit.long_term_evaluator_ui import (
+        render_long_term_evaluator,
+    )
+    render_long_term_evaluator()

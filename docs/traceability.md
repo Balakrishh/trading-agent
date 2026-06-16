@@ -41,8 +41,10 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 37 | position caps | position_caps.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_37_position_caps.py | — |
 | 38 | backtest slippage | backtest/runner.py, backtest/account.py, backtest/cycle.py | test_backtest/test_account.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_38_backtest_slippage.py | — |
 | 39 | skew model | backtest/skew_model.py, backtest/synthetic_chain.py, backtest/cycle.py, backtest/runner.py | test_backtest/test_synthetic_chain.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_39_skew_model.py | — |
+| 40 | long term options evaluator | long_term_evaluator.py, decision_engine.py, streamlit/long_term_evaluator_ui.py | test_agent_integration.py, test_backtest/test_synthetic_chain.py | conformance/test_skill_40_long_term_evaluator.py | — |
+| 41 | positions provider | positions_provider.py | — | conformance/test_skill_41_positions_provider.py | — |
 
-**Skills with conformance tests:** 32 / 32 (100%)
+**Skills with conformance tests:** 34 / 34 (100%)
 
 ## Orphan source files
 
@@ -82,7 +84,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 33 / 71 files (46% uncovered)
+**Orphan source coverage:** 33 / 74 files (44% uncovered)
 
 ## Orphan skills (no conformance test)
 

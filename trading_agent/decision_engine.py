@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from trading_agent.chain_scanner import (
     REJECT_CW_BELOW_FLOOR,
@@ -61,7 +61,9 @@ from trading_agent.chain_scanner import (
     ScanDiagnostics,
     SpreadCandidate,
     _leg_spread_too_wide,
+    _pop_from_delta,
     _quote_credit,
+    _quote_credit_single,
     _score_candidate_with_reason,
 )
 
@@ -286,9 +288,165 @@ def decide(inp: DecisionInput, *, max_candidates: int = 10) -> DecisionOutput:
     )
 
 
+# ---------------------------------------------------------------------------
+# Long-term covered-call scoring — skill 40.
+# ---------------------------------------------------------------------------
+# The CI invariant scanner (scripts/checks/scan_invariant_check.py) blocks
+# any module other than chain_scanner.py / decision_engine.py from defining
+# a function whose name starts with _score_. The long-term evaluator
+# (trading_agent/long_term_evaluator.py) is a pure orchestrator that
+# *consumes* the helpers below, never defining its own. This is the same
+# discipline that keeps the credit-spread scorer from being shadowed by
+# the backtester.
+
+# Conservative defaults; PresetConfig will override via cc_max_short_delta /
+# cc_dte_band / cc_min_iv_rank when the preset wiring lands next session.
+_CC_DEFAULT_MAX_SHORT_DELTA: float = 0.30
+_CC_DEFAULT_DTE_BAND:        Tuple[int, int] = (30, 60)
+_CC_DEFAULT_MIN_IV_RANK:     float = 0.25
+# Strike must clear cost basis by this multiplier so a wash-sale + locked-in-loss
+# is structurally impossible (covered call writer never writes below cost basis).
+_CC_COST_BASIS_BUFFER:       float = 1.01
+
+# Stable reject-reason taxonomy for the long-term evaluator. Same pattern as
+# the credit-spread side (REJECT_*) so the journal histogram stays grep-able.
+LT_REJECT_STRIKE_BELOW_COST_BASIS    = "strike_below_cost_basis"
+LT_REJECT_SHORT_DELTA_TOO_HIGH       = "short_delta_too_high"
+LT_REJECT_DTE_OUT_OF_BAND            = "dte_out_of_band"
+LT_REJECT_CREDIT_NON_POSITIVE_LT     = "credit_non_positive_lt"
+LT_REJECT_IV_RANK_TOO_LOW            = "iv_rank_too_low"
+LT_REJECT_QTY_BELOW_100              = "qty_below_100"
+
+
+def _score_covered_call(
+    *,
+    short_call: Dict[str, Any],
+    cost_basis: float,
+    preset: Any = None,
+) -> Optional[Tuple[float, Dict[str, float], str]]:
+    """Score one covered-call candidate. Skill 40 §2.1, §3.2.
+
+    Inputs
+    ------
+    short_call:
+        Normalised contract dict with keys ``strike`` (float),
+        ``delta`` (signed float), ``bid`` (float ≥ 0), ``ask`` (float ≥ 0),
+        ``dte`` (int > 0), and optionally ``iv_rank`` (float ∈ [0, 1]).
+    cost_basis:
+        Operator's per-share cost basis for the underlying stock.
+    preset:
+        Duck-typed PresetConfig. Reads ``cc_max_short_delta``,
+        ``cc_dte_band``, ``cc_min_iv_rank``. Missing attrs fall back to the
+        ``_CC_DEFAULT_*`` constants above so the function is callable from
+        early-wiring sites that haven't yet plumbed the preset.
+
+    Returns
+    -------
+    ``(score, metrics, "")`` on accept, ``None`` on hard reject. The
+    metrics dict mirrors the math in skill 40 §2.1 — credit (dollars per
+    contract), capital_at_risk, static_return, annualised_return, pop,
+    dte, short_delta_abs. The third tuple element is the reject_reason
+    string when the candidate was on the borderline but accepted; empty
+    string for clean accepts. Callers that want the reject reason should
+    use :func:`_score_covered_call_with_reason` instead.
+
+    Hard reject reasons (returns None):
+      * strike below ``cost_basis × 1.01``  — skill 40 §4
+      * |Δ_short| > ``preset.cc_max_short_delta``
+      * ``dte`` outside ``preset.cc_dte_band``
+      * ``credit ≤ 0`` from the single-leg quote helper
+      * ``iv_rank < preset.cc_min_iv_rank`` (only when iv_rank is supplied;
+        missing iv_rank is treated as fail-open per skill 40 §4)
+    """
+    result = _score_covered_call_with_reason(
+        short_call=short_call, cost_basis=cost_basis, preset=preset,
+    )
+    if result["status"] != "accepted":
+        return None
+    return (
+        float(result["score"]),
+        {k: float(v) for k, v in result["metrics"].items()},
+        "",
+    )
+
+
+def _score_covered_call_with_reason(
+    *,
+    short_call: Dict[str, Any],
+    cost_basis: float,
+    preset: Any = None,
+) -> Dict[str, Any]:
+    """Verbose sibling of :func:`_score_covered_call`. Always returns a
+    ``{"status": "accepted"|"rejected", ...}`` dict so the caller can log
+    a reject taxonomy histogram (same shape as
+    ``_score_candidate_with_reason`` for credit spreads).
+    """
+    # ── Preset reads with safe fallbacks ──────────────────────────────
+    max_delta = float(getattr(preset, "cc_max_short_delta", _CC_DEFAULT_MAX_SHORT_DELTA))
+    dte_band = tuple(getattr(preset, "cc_dte_band", _CC_DEFAULT_DTE_BAND))
+    min_iv_rank = float(getattr(preset, "cc_min_iv_rank", _CC_DEFAULT_MIN_IV_RANK))
+
+    strike = float(short_call["strike"])
+    if strike < cost_basis * _CC_COST_BASIS_BUFFER:
+        return {"status": "rejected", "reason": LT_REJECT_STRIKE_BELOW_COST_BASIS}
+
+    delta_abs = abs(float(short_call["delta"]))
+    if delta_abs > max_delta:
+        return {"status": "rejected", "reason": LT_REJECT_SHORT_DELTA_TOO_HIGH}
+
+    dte = int(short_call["dte"])
+    if not (int(dte_band[0]) <= dte <= int(dte_band[1])):
+        return {"status": "rejected", "reason": LT_REJECT_DTE_OUT_OF_BAND}
+
+    credit = _quote_credit_single(
+        bid=float(short_call.get("bid", 0.0)),
+        ask=float(short_call.get("ask", 0.0)),
+    ) * 100.0
+    if credit <= 0:
+        return {"status": "rejected", "reason": LT_REJECT_CREDIT_NON_POSITIVE_LT}
+
+    iv_rank = short_call.get("iv_rank")
+    if iv_rank is not None and float(iv_rank) < min_iv_rank:
+        return {"status": "rejected", "reason": LT_REJECT_IV_RANK_TOO_LOW}
+
+    capital_at_risk = max(0.01, cost_basis * 100.0 - credit)
+    static_return = credit / capital_at_risk
+    annualised_return = (1.0 + static_return) ** (365.0 / max(1, dte)) - 1.0
+    pop = _pop_from_delta(float(short_call["delta"]))   # skill 01
+    score = annualised_return * pop
+
+    if_assigned_return = (
+        ((strike - cost_basis) * 100.0 + credit) / capital_at_risk
+    )
+
+    return {
+        "status": "accepted",
+        "score": score,
+        "metrics": {
+            "credit": credit,
+            "capital_at_risk": capital_at_risk,
+            "static_return": static_return,
+            "annualised_return": annualised_return,
+            "if_assigned_return": if_assigned_return,
+            "pop": pop,
+            "dte": float(dte),
+            "short_delta_abs": delta_abs,
+        },
+    }
+
+
 __all__ = [
     "ChainSlice",
     "DecisionInput",
     "DecisionOutput",
     "decide",
+    # Long-term evaluator helpers (skill 40)
+    "_score_covered_call",
+    "_score_covered_call_with_reason",
+    "LT_REJECT_STRIKE_BELOW_COST_BASIS",
+    "LT_REJECT_SHORT_DELTA_TOO_HIGH",
+    "LT_REJECT_DTE_OUT_OF_BAND",
+    "LT_REJECT_CREDIT_NON_POSITIVE_LT",
+    "LT_REJECT_IV_RANK_TOO_LOW",
+    "LT_REJECT_QTY_BELOW_100",
 ]
