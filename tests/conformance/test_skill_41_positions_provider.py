@@ -350,6 +350,60 @@ def test_canonical_and_schwab_formats_coexist_in_one_paste():
     assert snap[1].kind == "option"
 
 
+def test_schwab_export_tolerates_trailing_commas():
+    """JS-style trailing commas are common in hand-edited pastes."""
+    body = """[
+        {"Symbol": "AMZN", "Qty (Quantity)": "9", "Cost Basis": "$1,968.47",
+         "Asset Type": "Equity"},
+        {"Symbol": "NOK", "Qty (Quantity)": "100", "Cost Basis": "$475.76",
+         "Asset Type": "Equity"},
+    ]"""    # trailing comma after the last object — invalid strict JSON
+    prov = ManualPositionsProvider.from_json_text(body)
+    assert {p.ticker for p in prov.snapshot()} == {"AMZN", "NOK"}
+
+
+def test_schwab_export_tolerates_half_bracketed_paste():
+    """Operator pasted with leading [ but missing trailing ]."""
+    body = """[
+        {"Symbol": "AMZN", "Qty (Quantity)": "9", "Cost Basis": "$1,968.47",
+         "Asset Type": "Equity"},
+        {"Symbol": "NOK", "Qty (Quantity)": "100", "Cost Basis": "$475.76",
+         "Asset Type": "Equity"}"""    # no trailing ]
+    prov = ManualPositionsProvider.from_json_text(body)
+    assert {p.ticker for p in prov.snapshot()} == {"AMZN", "NOK"}
+
+
+def test_schwab_export_indented_paste_with_only_rows():
+    """Reproduces the user's actual paste shape — indented rows, no
+    outer brackets, line-wrapped pretty-print."""
+    body = """    {
+      "Symbol": "AMZN",
+      "Qty (Quantity)": "9",
+      "Cost Basis": "$1,968.47",
+      "Asset Type": "Equity"
+    },
+    {
+      "Symbol": "NOK",
+      "Qty (Quantity)": "100",
+      "Cost Basis": "$475.76",
+      "Asset Type": "Equity"
+    }"""
+    prov = ManualPositionsProvider.from_json_text(body)
+    assert {p.ticker for p in prov.snapshot()} == {"AMZN", "NOK"}
+
+
+def test_unparseable_error_includes_input_preview():
+    """When all fallbacks fail, the error includes the first chars so
+    the operator can see what hit the parser."""
+    try:
+        ManualPositionsProvider.from_json_text("this is not json at all")
+    except ValueError as exc:
+        assert "Received" in str(exc)
+        assert "starts with" in str(exc)
+        return
+    raise AssertionError("expected ValueError")
+
+
 def test_schwab_export_skips_non_equity_asset_types():
     """Money market, bonds, etc. are skipped silently (next session may add cases)."""
     payload = """[{

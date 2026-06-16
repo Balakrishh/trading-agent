@@ -208,22 +208,25 @@ class ManualPositionsProvider(PositionsProvider):
         if not text:
             return cls(positions=[])
 
-        # Tolerate pastes that are a bare comma-separated list of objects
-        # (Schwab's portfolio export sometimes ships without the outer
-        # ``[ ... ]`` brackets when the operator copies only the rows).
-        # We only auto-wrap when the text clearly contains MULTIPLE
-        # objects — a single ``{...}`` paste keeps the original
-        # "expected array at root" error so the operator notices.
-        if not text.startswith("[") and _looks_like_object_list(text):
-            text = "[" + text + "]"
-
-        try:
-            raw = json.loads(text)
-        except json.JSONDecodeError as exc:
+        # Try several normalisations in order — the operator's clipboard
+        # often drops the outer ``[ ... ]`` brackets, leaves trailing
+        # commas, or includes only half of the brackets. Belt-and-suspenders.
+        raw, json_exc = _parse_with_fallbacks(text)
+        if raw is None:
+            # All attempts failed. Show the operator the first piece of
+            # what we received so they can see what hit the parser.
+            head = text[:120].replace("\n", "\\n")
+            tail = text[-80:].replace("\n", "\\n") if len(text) > 120 else ""
+            tail_msg = f" … ends with: {tail!r}" if tail else ""
             raise ValueError(
-                f"Holdings JSON is not parseable: {exc.msg} "
-                f"(line {exc.lineno}, col {exc.colno})."
-            ) from exc
+                f"Holdings JSON is not parseable: {json_exc.msg} "
+                f"(line {json_exc.lineno}, col {json_exc.colno}). "
+                f"Received {len(text)} chars, starts with: {head!r}"
+                f"{tail_msg}. "
+                f"Tip: paste must be a JSON array of position objects, "
+                f"e.g. [{{...}}, {{...}}] — the outer [ ] are added "
+                f"automatically when missing."
+            ) from json_exc
 
         if not isinstance(raw, list):
             raise ValueError(
@@ -322,19 +325,70 @@ def _position_from_dict(row: Dict[str, Any]) -> Position:
 # (e.g., "$1,968.47") so we strip both before computing per-share avg_cost
 # as cost_basis_dollars / qty.
 
-_OBJECT_LIST_SEPARATOR_RE = __import__("re").compile(r"\}\s*,\s*\{")
+import re as _re
+
+_OBJECT_LIST_SEPARATOR_RE = _re.compile(r"\}\s*,\s*\{")
+_TRAILING_COMMA_BEFORE_CLOSE_RE = _re.compile(r",\s*([\]}])")
 
 
 def _looks_like_object_list(text: str) -> bool:
-    """Heuristic: text starts with ``{``, ends with ``}``, and contains at
-    least one ``},{`` separator — i.e., it's a list-of-objects paste with
-    the outer brackets stripped. Avoids auto-wrapping a single-object
-    paste (which the operator should fix explicitly).
+    """Heuristic: text contains at least one ``},{`` separator and starts
+    with ``{`` — i.e., it's a list-of-objects paste with the outer
+    brackets stripped. We do NOT require the text to end with ``}`` so we
+    still trigger when the operator pasted only the leading rows but the
+    final row's closing brace is intact.
     """
     t = text.strip()
-    if not t.startswith("{") or not t.endswith("}"):
+    if not t.startswith("{"):
         return False
     return bool(_OBJECT_LIST_SEPARATOR_RE.search(t))
+
+
+def _parse_with_fallbacks(text: str):
+    """Try several normalisations of ``text``. Returns ``(raw_or_None, last_exc)``.
+
+    Variants attempted, in order:
+
+    1. Text as-is — handles canonical-shape pastes that already have the
+       outer ``[ ... ]`` brackets.
+    2. Strip trailing commas (``,`` immediately before ``]`` or ``}``)
+       and retry. JS-style trailing commas are common in hand-edited
+       pastes but break Python's strict JSON parser.
+    3. Wrap in ``[ ... ]`` if the body looks like a comma-separated
+       list of objects. Catches Schwab pastes that dropped the outer
+       brackets.
+    4. Combo: wrap AND strip trailing commas.
+    5. Strip a stray leading ``[`` or trailing ``]`` (operator selected
+       only one bracket), then wrap.
+
+    The first variant that parses wins. If none succeed, we return the
+    LAST exception so the operator sees the most informative error.
+    """
+    import json
+    candidates = []
+    candidates.append(text)
+    if "," in text:
+        candidates.append(_TRAILING_COMMA_BEFORE_CLOSE_RE.sub(r"\1", text))
+    if _looks_like_object_list(text):
+        wrapped = "[" + text + "]"
+        candidates.append(wrapped)
+        candidates.append(_TRAILING_COMMA_BEFORE_CLOSE_RE.sub(r"\1", wrapped))
+    # Half-bracketed pastes — strip the stray bracket then wrap fresh.
+    if text.startswith("[") and not text.rstrip().endswith("]"):
+        stripped = text[1:]
+        candidates.append("[" + stripped + "]")
+    if text.rstrip().endswith("]") and not text.startswith("["):
+        stripped = text.rstrip()[:-1]
+        candidates.append("[" + stripped + "]")
+
+    last_exc = None
+    for variant in candidates:
+        try:
+            return json.loads(variant), None
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            continue
+    return None, last_exc
 
 
 _SCHWAB_FINGERPRINT_KEYS = frozenset({"Symbol", "Asset Type", "Cost Basis"})
