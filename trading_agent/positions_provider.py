@@ -208,6 +208,15 @@ class ManualPositionsProvider(PositionsProvider):
         if not text:
             return cls(positions=[])
 
+        # Tolerate pastes that are a bare comma-separated list of objects
+        # (Schwab's portfolio export sometimes ships without the outer
+        # ``[ ... ]`` brackets when the operator copies only the rows).
+        # We only auto-wrap when the text clearly contains MULTIPLE
+        # objects — a single ``{...}`` paste keeps the original
+        # "expected array at root" error so the operator notices.
+        if not text.startswith("[") and _looks_like_object_list(text):
+            text = "[" + text + "]"
+
         try:
             raw = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -227,6 +236,13 @@ class ManualPositionsProvider(PositionsProvider):
                 raise ValueError(
                     f"Row {idx}: expected an object, got {type(row).__name__}."
                 )
+            # Auto-detect Schwab portfolio-export shape and translate.
+            if _is_schwab_export_row(row):
+                translated = _schwab_row_to_canonical(row)
+                if translated is None:
+                    # Cash / summary row — skip silently, not an error.
+                    continue
+                row = translated
             try:
                 positions.append(_position_from_dict(row))
             except (KeyError, TypeError, ValueError) as exc:
@@ -280,6 +296,142 @@ def _position_from_dict(row: Dict[str, Any]) -> Position:
         account=str(row.get("account", "manual")),
         notes=str(row.get("notes", "")),
     )
+
+
+# ---------------------------------------------------------------------------
+# Schwab portfolio-export auto-detect (skill 41 §4)
+# ---------------------------------------------------------------------------
+# Schwab's "Export Positions" download in the brokerage UI emits rows shaped:
+#
+#   {
+#     "Symbol": "AMZN",
+#     "Description": "AMAZON.COM INC",
+#     "Qty (Quantity)": "9",
+#     "Price": "248.07",
+#     "Cost Basis": "$1,968.47",
+#     "Asset Type": "Equity",
+#     ...
+#   }
+#
+# Plus two synthetic summary rows at the bottom — "Cash & Cash Investments"
+# and "Positions Total" — which carry "--" placeholders for most fields and
+# are NOT real positions. We filter both out silently rather than make the
+# operator hand-edit before paste.
+#
+# Cost basis arrives as a dollar string with `$` and thousands separators
+# (e.g., "$1,968.47") so we strip both before computing per-share avg_cost
+# as cost_basis_dollars / qty.
+
+_OBJECT_LIST_SEPARATOR_RE = __import__("re").compile(r"\}\s*,\s*\{")
+
+
+def _looks_like_object_list(text: str) -> bool:
+    """Heuristic: text starts with ``{``, ends with ``}``, and contains at
+    least one ``},{`` separator — i.e., it's a list-of-objects paste with
+    the outer brackets stripped. Avoids auto-wrapping a single-object
+    paste (which the operator should fix explicitly).
+    """
+    t = text.strip()
+    if not t.startswith("{") or not t.endswith("}"):
+        return False
+    return bool(_OBJECT_LIST_SEPARATOR_RE.search(t))
+
+
+_SCHWAB_FINGERPRINT_KEYS = frozenset({"Symbol", "Asset Type", "Cost Basis"})
+_SCHWAB_SKIPPABLE_SYMBOLS = frozenset({
+    "Cash & Cash Investments",
+    "Positions Total",
+})
+_SCHWAB_EQUITY_TYPES = frozenset({
+    "Equity",
+    "ETFs & Closed End Funds",
+})
+
+
+def _is_schwab_export_row(row: Dict[str, Any]) -> bool:
+    """Cheap fingerprint: the row carries Schwab's portfolio-export key set."""
+    return _SCHWAB_FINGERPRINT_KEYS.issubset(set(row.keys()))
+
+
+def _schwab_row_to_canonical(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Translate one Schwab-export row into the canonical position dict.
+
+    Returns ``None`` for rows that should be silently skipped (the two
+    summary rows + any row whose Asset Type isn't a supported equity
+    instrument). Raises ``ValueError`` only when a row LOOKS LIKE a
+    real position but its fields can't be parsed — in that case the
+    operator wants to know about the malformed input.
+    """
+    symbol = str(row.get("Symbol", "")).strip()
+    if not symbol or symbol in _SCHWAB_SKIPPABLE_SYMBOLS:
+        return None
+
+    asset_type = str(row.get("Asset Type", "")).strip()
+    if asset_type not in _SCHWAB_EQUITY_TYPES:
+        # Cash, money-market, options-not-yet-supported, etc. → skip.
+        # When options support lands next session this branch grows a case.
+        return None
+
+    qty_raw = str(row.get("Qty (Quantity)", "")).strip()
+    qty = _schwab_parse_int(qty_raw)
+    if qty is None or qty <= 0:
+        raise ValueError(
+            f"Schwab row {symbol!r}: unparseable Qty (Quantity) {qty_raw!r}."
+        )
+
+    cost_raw = str(row.get("Cost Basis", "")).strip()
+    total_cost = _schwab_parse_dollars(cost_raw)
+    if total_cost is None or total_cost < 0:
+        raise ValueError(
+            f"Schwab row {symbol!r}: unparseable Cost Basis {cost_raw!r}."
+        )
+
+    avg_cost = total_cost / qty
+    description = str(row.get("Description", "")).strip()
+
+    return {
+        "ticker": symbol,
+        "qty": qty,
+        "avg_cost": round(avg_cost, 4),
+        "kind": "stock",
+        "side": "long",
+        "account": "schwab_export",
+        "notes": description,
+    }
+
+
+def _schwab_parse_int(value: str) -> Optional[int]:
+    """Parse Schwab's quoted integer string. Returns None for ``"--"``."""
+    if not value or value == "--":
+        return None
+    try:
+        cleaned = value.replace(",", "").strip()
+        if "." in cleaned:
+            # Schwab sometimes emits "9.0" for whole-share lots.
+            fval = float(cleaned)
+            if fval != int(fval):
+                return None
+            return int(fval)
+        return int(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def _schwab_parse_dollars(value: str) -> Optional[float]:
+    """Parse Schwab's quoted dollar string (e.g., ``"$1,968.47"``)."""
+    if not value or value == "--":
+        return None
+    try:
+        cleaned = (
+            value.replace("$", "")
+                 .replace(",", "")
+                 .replace("(", "-")  # negatives sometimes appear as (123.45)
+                 .replace(")", "")
+                 .strip()
+        )
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -136,7 +136,12 @@ _HOLDINGS_PLACEHOLDER = """[
   {"ticker": "NVDA", "qty": 200, "avg_cost": 132.10, "kind": "stock"},
   {"ticker": "MSFT", "qty": 1,   "avg_cost": 18.50,  "kind": "option",
    "occ_symbol": "MSFT  270115C00400000", "side": "long"}
-]"""
+]
+
+— OR paste your Schwab portfolio export directly. The parser
+auto-detects the {Symbol, Qty (Quantity), Cost Basis, Asset Type}
+shape, strips $/commas from Cost Basis, computes per-share avg_cost,
+and skips the Cash & Positions Total summary rows."""
 
 
 def _render_holdings_input() -> Optional[List[Position]]:

@@ -225,3 +225,137 @@ def test_schwab_stub_raises_not_implemented():
 def test_abc_cannot_be_instantiated_directly():
     with pytest.raises(TypeError):
         PositionsProvider()  # type: ignore[abstract]
+
+
+# ---------------------------------------------------------------------------
+# §4 — Schwab portfolio-export auto-detect
+# ---------------------------------------------------------------------------
+
+_SCHWAB_SAMPLE = """
+[
+  {
+    "Symbol": "AMZN",
+    "Description": "AMAZON.COM INC",
+    "Qty (Quantity)": "9",
+    "Price": "248.07",
+    "Mkt Val (Market Value)": "$2,232.63",
+    "Cost Basis": "$1,968.47",
+    "Asset Type": "Equity"
+  },
+  {
+    "Symbol": "NOK",
+    "Description": "NOKIA CORP FSPONSORED ADR",
+    "Qty (Quantity)": "100",
+    "Price": "13.87",
+    "Mkt Val (Market Value)": "$1,387.00",
+    "Cost Basis": "$475.76",
+    "Asset Type": "Equity"
+  },
+  {
+    "Symbol": "NASA",
+    "Description": "TEMA SPACE INNOVATORS ETF",
+    "Qty (Quantity)": "15",
+    "Price": "31.885",
+    "Mkt Val (Market Value)": "$478.28",
+    "Cost Basis": "$581.40",
+    "Asset Type": "ETFs & Closed End Funds"
+  },
+  {
+    "Symbol": "Cash & Cash Investments",
+    "Description": "--",
+    "Qty (Quantity)": "--",
+    "Mkt Val (Market Value)": "$7,640.27",
+    "Cost Basis": "--",
+    "Asset Type": "Cash and Money Market"
+  },
+  {
+    "Symbol": "Positions Total",
+    "Description": "",
+    "Qty (Quantity)": "--",
+    "Mkt Val (Market Value)": "$43,475.88",
+    "Cost Basis": "$30,821.35",
+    "Asset Type": "--"
+  }
+]
+"""
+
+
+def test_schwab_export_auto_detects_and_translates():
+    """§4 — Schwab portfolio-export rows parse without hand-editing."""
+    prov = ManualPositionsProvider.from_json_text(_SCHWAB_SAMPLE)
+    snap = prov.snapshot()
+    # Cash & Positions Total summary rows are skipped silently.
+    tickers = [p.ticker for p in snap]
+    assert tickers == ["AMZN", "NOK", "NASA"]
+
+
+def test_schwab_export_computes_per_share_avg_cost():
+    """Cost Basis in Schwab is TOTAL; avg_cost = cost / qty per skill 41 §4."""
+    prov = ManualPositionsProvider.from_json_text(_SCHWAB_SAMPLE)
+    snap = {p.ticker: p for p in prov.snapshot()}
+    # AMZN: $1,968.47 / 9 = $218.7189
+    assert snap["AMZN"].avg_cost == pytest.approx(218.7189, abs=1e-3)
+    # NOK: $475.76 / 100 = $4.7576
+    assert snap["NOK"].avg_cost == pytest.approx(4.7576, abs=1e-3)
+
+
+def test_schwab_export_etf_classified_as_stock():
+    """ETFs & Closed End Funds map to kind=stock for covered-call eligibility."""
+    prov = ManualPositionsProvider.from_json_text(_SCHWAB_SAMPLE)
+    snap = {p.ticker: p for p in prov.snapshot()}
+    assert snap["NASA"].kind == "stock"
+
+
+def test_schwab_export_tags_account():
+    """Account tag is preserved end-to-end for the Streamlit panel."""
+    prov = ManualPositionsProvider.from_json_text(_SCHWAB_SAMPLE)
+    for p in prov.snapshot():
+        assert p.account == "schwab_export"
+
+
+def test_schwab_export_tolerates_missing_outer_brackets():
+    """Operator pastes only rows (no `[ ]` wrapper) — we wrap for them."""
+    # Strip the outer brackets from the fixture.
+    body = _SCHWAB_SAMPLE.strip().lstrip("[").rstrip("]")
+    prov = ManualPositionsProvider.from_json_text(body)
+    assert {p.ticker for p in prov.snapshot()} == {"AMZN", "NOK", "NASA"}
+
+
+def test_schwab_export_malformed_qty_raises_with_symbol():
+    """When a row LOOKS LIKE a Schwab position but Qty can't be parsed,
+    the error message names the symbol so the operator can fix it.
+    """
+    bad = """[{
+        "Symbol": "BAD",
+        "Qty (Quantity)": "banana",
+        "Cost Basis": "$100.00",
+        "Asset Type": "Equity"
+    }]"""
+    with pytest.raises(ValueError, match="BAD.*Qty"):
+        ManualPositionsProvider.from_json_text(bad)
+
+
+def test_canonical_and_schwab_formats_coexist_in_one_paste():
+    """Mixed-format paste works — operator can hand-add option positions
+    to a Schwab export without converting the equities."""
+    mixed = """[
+        {"Symbol": "AMZN", "Qty (Quantity)": "9", "Cost Basis": "$1,968.47",
+         "Asset Type": "Equity"},
+        {"ticker": "MSFT", "qty": 1, "avg_cost": 18.50, "kind": "option",
+         "occ_symbol": "MSFT  270115C00400000", "side": "long"}
+    ]"""
+    snap = ManualPositionsProvider.from_json_text(mixed).snapshot()
+    assert [p.ticker for p in snap] == ["AMZN", "MSFT"]
+    assert snap[0].kind == "stock"
+    assert snap[1].kind == "option"
+
+
+def test_schwab_export_skips_non_equity_asset_types():
+    """Money market, bonds, etc. are skipped silently (next session may add cases)."""
+    payload = """[{
+        "Symbol": "VMFXX",
+        "Qty (Quantity)": "1000",
+        "Cost Basis": "$1,000.00",
+        "Asset Type": "Money Market Mutual Fund"
+    }]"""
+    assert ManualPositionsProvider.from_json_text(payload).snapshot() == []

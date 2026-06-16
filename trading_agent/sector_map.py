@@ -93,6 +93,36 @@ TICKER_SECTOR_MAP: Dict[str, str] = {
     "GLD":  "Gold",
     "SLV":  "Silver",
     "USO":  "Energy Commodity",
+
+    # ── Single-name equities — long-term evaluator (skill 40) ────────
+    # Added 2026-06-16 so the long-term evaluator's portfolio snapshot
+    # can break a single-name book down by sector. Same Select Sector
+    # SPDR taxonomy as the ETFs above. Add new tickers alphabetically
+    # within their sector block for diff-friendliness.
+    #
+    # The per-sector cap (MAX_POSITIONS_PER_SECTOR) does NOT apply to
+    # single-name long-term positions — it gates the credit-spread
+    # agent's per-cycle ETF picks only. The classification is purely
+    # for display + diversification analysis.
+    "AAPL":  "Technology",
+    "AMZN":  "Consumer Discretionary",   # AMZN sits in XLY per S&P GICS
+    "AVGO":  "Technology",
+    "GOOG":  "Communications",            # GOOG/GOOGL in XLC per S&P GICS
+    "GOOGL": "Communications",
+    "INTC":  "Technology",
+    "JPM":   "Financials",
+    "META":  "Communications",
+    "MSFT":  "Technology",
+    "NFLX":  "Communications",
+    "NOK":   "Technology",                # Nokia: telecom equipment
+    "NVDA":  "Technology",
+    "PLTR":  "Technology",
+    "SOFI":  "Financials",
+    "TSLA":  "Consumer Discretionary",
+    "ZS":    "Technology",
+
+    # Themed equity ETFs landed alongside single-names.
+    "NASA":  "Industrials",               # TEMA Space Innovators: aerospace + defense lean
 }
 
 
