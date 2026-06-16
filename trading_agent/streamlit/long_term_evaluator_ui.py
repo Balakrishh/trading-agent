@@ -39,6 +39,11 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
+from trading_agent.holdings_store import (
+    clear_holdings,
+    load_holdings,
+    update_paste,
+)
 from trading_agent.long_term_evaluator import (
     EvaluatorConfig,
     LongTermEvaluator,
@@ -145,32 +150,79 @@ and skips the Cash & Positions Total summary rows."""
 
 
 def _render_holdings_input() -> Optional[List[Position]]:
-    """Holdings textarea + parse. Returns None until a valid paste lands."""
+    """Holdings textarea + parse. Returns None until a valid paste lands.
+
+    Persistence (skill 41 §3.4):
+      * On first render after activation, load any saved paste from
+        ``knowledge_base/holdings.json`` and pre-populate the textarea +
+        st.session_state so the operator's last book is restored across
+        Streamlit restarts.
+      * On a successful parse, atomically save the raw paste + parsed
+        count back to the file. Next restart loads the same book.
+      * The "Reset saved holdings" button clears both the on-disk file
+        and the session-state cache, leaving a blank textarea.
+    """
     st.markdown("### Your holdings")
-    st.caption(
-        "Paste your current positions as a JSON array. One object per "
-        "lot. The evaluator never writes to your brokerage — this is "
-        "read-only input. Next session will add live pulls from Alpaca "
-        "paper and Schwab brokerage."
-    )
+
+    # ── First-render hydration from persistent store ─────────────────
+    if "lt_holdings_blob" not in st.session_state:
+        saved = load_holdings()
+        if not saved.is_empty:
+            st.session_state.lt_holdings_blob = saved.raw_paste
+            st.session_state.lt_holdings_saved_at = saved.saved_at
+            st.session_state.lt_holdings_saved_count = saved.parsed_count
+        else:
+            st.session_state.lt_holdings_blob = ""
+
+    saved_at = st.session_state.get("lt_holdings_saved_at", "")
+    saved_count = st.session_state.get("lt_holdings_saved_count", 0)
+    if saved_at:
+        st.caption(
+            f"📁 Last saved {saved_count} positions at **{saved_at}**. "
+            "Edit + click _Parse_ to update; _Reset_ clears the saved file."
+        )
+    else:
+        st.caption(
+            "Paste your current positions as a JSON array (canonical or "
+            "Schwab portfolio-export format). Parsed pastes are saved to "
+            "`knowledge_base/holdings.json` so they survive Streamlit "
+            "restarts. The evaluator never writes to your brokerage — "
+            "this is read-only input."
+        )
 
     raw = st.text_area(
         "Holdings (JSON)",
         value=st.session_state.get("lt_holdings_blob", ""),
-        height=200,
+        height=240,
         placeholder=_HOLDINGS_PLACEHOLDER,
         key="lt_holdings_textarea",
     )
 
-    col_a, col_b = st.columns([1, 4])
-    with col_a:
-        parse_clicked = st.button("Parse holdings", key="lt_parse_btn")
+    col_parse, col_reset, col_status = st.columns([1, 1, 3])
+    with col_parse:
+        parse_clicked = st.button(
+            "💾 Parse & save", key="lt_parse_btn",
+            help="Validate the JSON and persist it to disk.",
+        )
+    with col_reset:
+        reset_clicked = st.button(
+            "🗑 Reset saved", key="lt_reset_btn",
+            help="Delete the saved holdings file and clear the textarea.",
+        )
+
+    # ── Reset path — wipes disk + session state, then reruns clean ──
+    if reset_clicked:
+        clear_holdings()
+        for k in (
+            "lt_holdings_blob",
+            "lt_holdings_saved_at",
+            "lt_holdings_saved_count",
+        ):
+            st.session_state.pop(k, None)
+        st.rerun()
 
     if not raw.strip():
         return None
-
-    if parse_clicked:
-        st.session_state.lt_holdings_blob = raw
 
     try:
         provider = ManualPositionsProvider.from_json_text(raw)
@@ -183,8 +235,21 @@ def _render_holdings_input() -> Optional[List[Position]]:
         st.warning("Holdings JSON parsed, but no positions were found.")
         return None
 
-    with col_b:
-        st.success(f"Parsed {len(snapshot)} positions.")
+    # ── Persist on every successful parse so the file reflects the
+    # last operator-confirmed-working blob, never an in-flight edit. ─
+    if parse_clicked:
+        saved = update_paste(raw_paste=raw, parsed_count=len(snapshot))
+        st.session_state.lt_holdings_blob = raw
+        st.session_state.lt_holdings_saved_at = saved.saved_at
+        st.session_state.lt_holdings_saved_count = saved.parsed_count
+        with col_status:
+            st.success(
+                f"Saved {len(snapshot)} positions to "
+                "`knowledge_base/holdings.json`."
+            )
+    else:
+        with col_status:
+            st.info(f"Parsed {len(snapshot)} positions (not saved yet).")
     return snapshot
 
 

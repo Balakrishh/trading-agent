@@ -83,7 +83,30 @@ The constructor accepts an already-built list of `Position` objects; `snapshot()
 
 `_position_from_dict` (module-level helper) validates the shape (`ticker`, `qty`, `avg_cost`, `kind` required) and raises `ValueError` with a useful message on malformed rows. The Streamlit panel catches the exception and shows the operator the offending row.
 
-### 3.4 `AlpacaPositionsProvider` (next session — stub here for design completeness)
+### 3.4 Holdings persistence — `holdings_store`
+
+The Streamlit panel persists the operator's pasted blob to `knowledge_base/holdings.json` so a Streamlit restart (or a `streamlit rerun` triggered by hot-reload) doesn't lose the book.
+
+```python
+# trading_agent/holdings_store.py
+def update_paste(
+    raw_paste: str,
+    parsed_count: int,
+    notes: Optional[str] = None,
+    path: Path = DEFAULT_HOLDINGS_PATH,
+) -> HoldingsSnapshot:
+    """Atomic save with the just-pasted blob + parse count."""
+```
+
+The store mirrors `watchlist_store.py` exactly — atomic temp+rename writes, RLock-guarded mutations, schema-versioned JSON, gitignored location. We persist the **raw paste** (not pre-parsed `Position` dataclasses) so a future parser improvement automatically applies to historical pastes — the alternative would freeze whatever shape the parser produced on the day of the save.
+
+Three operator-facing affordances on the panel:
+
+- **First-render hydration** — if `holdings.json` exists, the textarea is pre-populated with the saved paste; the panel shows "📁 Last saved N positions at …" so the operator knows the load worked.
+- **Parse & save** — clicking the button validates the JSON, runs it through `ManualPositionsProvider.from_json_text`, and (on success) atomically writes the raw paste back to disk with a fresh `saved_at` timestamp.
+- **Reset saved** — calls `clear_holdings()` to delete the file, clears the session-state cache, and reruns so the textarea returns to the placeholder text.
+
+### 3.5 `AlpacaPositionsProvider` (next session — stub here for design completeness)
 
 ```python
 # trading_agent/positions_provider.py — next session
@@ -102,7 +125,7 @@ class AlpacaPositionsProvider(PositionsProvider):
         return [_position_from_alpaca(p) for p in raw]
 ```
 
-### 3.5 `SchwabPositionsProvider` (next session — stub here for design completeness)
+### 3.6 `SchwabPositionsProvider` (next session — stub here for design completeness)
 
 ```python
 # trading_agent/positions_provider.py — next session

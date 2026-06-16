@@ -57,6 +57,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
 - `trading_agent/fingpt_analyser.py` (last modified 2026-04-19)
+- `trading_agent/holdings_store.py`
 - `trading_agent/knowledge_base.py` (last modified 2026-04-02)
 - `trading_agent/llm_analyst.py` (last modified 2026-04-19)
 - `trading_agent/llm_client.py` (last modified 2026-04-19)
@@ -84,7 +85,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 33 / 74 files (44% uncovered)
+**Orphan source coverage:** 34 / 75 files (45% uncovered)
 
 ## Orphan skills (no conformance test)
 
