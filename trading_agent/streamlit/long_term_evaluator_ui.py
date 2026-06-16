@@ -318,15 +318,34 @@ def _make_chain_fetcher():
     importable AND a recent-DTE call chain is fetchable, use it.
     Otherwise return an empty-chain stub so the panel renders without
     crashing and the operator sees an informative empty state.
+
+    Uses ``market_data_factory.build_market_data_provider`` (the
+    canonical factory) and threads the operator's Alpaca creds in from
+    the active ``AppConfig`` — same plumbing the credit-spread agent
+    and the existing Watchlist tab use.
     """
     try:
-        from trading_agent.config import load_config
-        from trading_agent.market_data_factory import get_market_data_provider
+        from datetime import date
+
         from trading_agent.calendar_utils import next_weekly_expiration
-        from datetime import date, datetime
+        from trading_agent.config import load_config
+        from trading_agent.market_data_factory import (
+            build_market_data_provider,
+        )
 
         config = load_config()
-        provider = get_market_data_provider(config)
+        provider = build_market_data_provider(
+            alpaca_api_key=config.alpaca.api_key,
+            alpaca_secret_key=config.alpaca.secret_key,
+            alpaca_data_url=getattr(
+                config.alpaca, "data_url", "https://data.alpaca.markets/v2",
+            ),
+            alpaca_base_url=getattr(
+                config.alpaca, "base_url",
+                "https://paper-api.alpaca.markets/v2",
+            ),
+            surface="watchlist",  # reuse the watchlist surface routing
+        )
     except Exception as exc:  # noqa: BLE001 — fail-open per skill 40 §4
         logger.warning("Could not initialise market-data provider: %s", exc)
         st.warning(
@@ -341,10 +360,14 @@ def _make_chain_fetcher():
         # session; next session sweeps the full band.
         today = date.today()
         try:
-            exp = next_weekly_expiration(today, dte=45)
+            exp = next_weekly_expiration(
+                today, target_dte=45, dte_min=30, dte_max=60,
+            )
             raw = provider.fetch_option_chain(
                 underlying=ticker,
-                expiration_date=exp.isoformat() if hasattr(exp, "isoformat") else str(exp),
+                expiration_date=(
+                    exp.isoformat() if hasattr(exp, "isoformat") else str(exp)
+                ),
                 option_type="call",
             ) or []
         except Exception as exc:  # noqa: BLE001
