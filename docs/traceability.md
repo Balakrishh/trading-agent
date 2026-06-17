@@ -43,8 +43,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 39 | skew model | backtest/skew_model.py, backtest/synthetic_chain.py, backtest/cycle.py, backtest/runner.py | test_backtest/test_synthetic_chain.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_39_skew_model.py | — |
 | 40 | long term options evaluator | long_term_evaluator.py, decision_engine.py, streamlit/long_term_evaluator_ui.py | test_agent_integration.py, test_backtest/test_synthetic_chain.py | conformance/test_skill_40_long_term_evaluator.py | — |
 | 41 | positions provider | positions_provider.py | — | conformance/test_skill_41_positions_provider.py | — |
+| 42 | portfolio alert scheduler | portfolio_alert_scheduler.py, telegram_notifier.py | — | conformance/test_skill_42_portfolio_alert_scheduler.py | — |
 
-**Skills with conformance tests:** 34 / 34 (100%)
+**Skills with conformance tests:** 35 / 35 (100%)
 
 ## Orphan source files
 
@@ -57,7 +58,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
 - `trading_agent/fingpt_analyser.py` (last modified 2026-04-19)
-- `trading_agent/holdings_store.py`
+- `trading_agent/holdings_store.py` (last modified 2026-06-16)
 - `trading_agent/knowledge_base.py` (last modified 2026-04-02)
 - `trading_agent/llm_analyst.py` (last modified 2026-04-19)
 - `trading_agent/llm_client.py` (last modified 2026-04-19)
@@ -85,7 +86,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 34 / 75 files (45% uncovered)
+**Orphan source coverage:** 34 / 76 files (44% uncovered)
 
 ## Orphan skills (no conformance test)
 

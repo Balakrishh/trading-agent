@@ -35,11 +35,17 @@ Skill 32 documents the full contract surface.
 
 from __future__ import annotations
 
+import html as _html
 import logging
 import os
 from typing import Optional
 
 import requests
+
+
+def _html_escape(text: str) -> str:
+    """Escape <, >, & for safe inclusion inside a Telegram HTML payload."""
+    return _html.escape(text or "", quote=False)
 
 logger = logging.getLogger(__name__)
 
@@ -485,6 +491,35 @@ class TelegramNotifier:
                 )
 
         return self._send("\n".join(lines), channel="info")
+
+    def notify_portfolio_review(self, *, body: str, dedup_key: str) -> bool:
+        """Skill 42 (2026-06-16) — hourly long-term portfolio digest.
+
+        Posts the operator's pre-composed digest body to the info
+        channel verbatim (wrapped in HTML ``<pre>`` for fixed-width
+        rendering so the sector percentages + bracket sketches line up).
+
+        Dedup is OWNED BY THE CALLER (the
+        ``portfolio_alert_scheduler``) — the scheduler hashes the body
+        content and gates on a journal-derived "already sent today"
+        check before calling. Two identical hourly bodies in the same
+        UTC day will only send once. This method just fires.
+
+        Routes to the info channel — same as the EOD recap and the VIX
+        regime change. The error channel stays reserved for ops alerts
+        that wake the operator.
+        """
+        # Telegram caps text at 4096 chars; the digest can grow if the
+        # operator's watchlist is large. Truncate gracefully with a
+        # marker so the operator notices and trims rather than getting
+        # a silent send failure on the 4097th char.
+        max_chars = 4000
+        if len(body) > max_chars:
+            body = body[:max_chars] + "\n\n… (truncated)"
+        # ``<pre>`` so multi-line text renders monospaced — bracket
+        # sketches and sector pies need column alignment.
+        payload = f"<pre>{_html_escape(body)}</pre>"
+        return self._send(payload, channel="info")
 
     def notify_vix_regime_change(self, *, from_zone: str, to_zone: str,
                                   vix_level: float, hint: str) -> bool:
