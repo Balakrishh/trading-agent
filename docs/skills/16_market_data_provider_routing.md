@@ -22,18 +22,23 @@ The factory `build_market_data_provider(...)` walks an env-var priority chain an
 ## 2. Routing logic
 
 ```text
-build_market_data_provider(*, alpaca_*, surface=None) -> MarketDataProvider
+build_market_data_provider(*, alpaca_*, surface=None,
+                            default_provider="alpaca") -> MarketDataProvider
 
 Priority order:
-  1. MARKET_DATA_PROVIDER_<SURFACE>      (e.g. _LIVE, _WATCHLIST, _BACKTEST)
+  1. MARKET_DATA_PROVIDER_<SURFACE>      (e.g. _LIVE, _WATCHLIST,
+                                          _BACKTEST, _LONG_TERM)
   2. MARKET_DATA_PROVIDER                (global default)
-  3. "alpaca"                            (hardcoded fallback)
+  3. default_provider                    (call-site surface-aware fallback)
+  4. "alpaca"                            (final hardcoded fallback)
 
 Provider names are case-insensitive: "Schwab", "SCHWAB", "schwab" all valid.
 Empty per-surface var falls through to global. Unknown names → fall through to next level.
 ```
 
-Recognised provider strings: `alpaca` (default), `schwab`, `yahoo`.
+The `default_provider` kwarg (added 2026-06-16 alongside skill 42) lets a surface express its preferred fallback without forcing every other surface to switch. The Long-Term Evaluator tab + the `portfolio_alert_scheduler` both call with `default_provider="schwab"` because Schwab's options-chain coverage includes ADRs, small-caps, and tail-strike contracts that Alpaca's `indicative` feed silently gaps. The credit-spread `live` surface keeps `default_provider="alpaca"` (its caller doesn't pass the kwarg).
+
+Recognised provider strings: `alpaca` (default), `schwab`, `yahoo`. Recognised surface strings: `live`, `watchlist`, `backtest`, `long_term`.
 
 ## 3. Reference Python Implementation
 
@@ -174,4 +179,4 @@ def from_schwab_symbol(schwab: str) -> str:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-22.*
+*Last verified against repo HEAD on 2026-06-17.*

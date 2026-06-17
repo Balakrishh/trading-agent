@@ -356,12 +356,17 @@ def build_default_deps() -> SchedulerDeps:
     def _evaluator_factory(positions: List[Position]) -> LongTermEvaluator:
         provider = ManualPositionsProvider(positions=positions)
         # Chain fetcher — reuse the watchlist surface routing.
+        # surface="long_term" + default_provider="schwab" — see skill 42.
+        # Schwab's options-chain coverage is materially better than
+        # Alpaca's `indicative` feed for the income-overlay scorer.
+        # MARKET_DATA_PROVIDER_LONG_TERM in .env overrides per-tab.
         market_data = build_market_data_provider(
             alpaca_api_key=config.alpaca.api_key,
             alpaca_secret_key=config.alpaca.secret_key,
             alpaca_data_url=config.alpaca.data_url,
             alpaca_base_url=config.alpaca.base_url,
-            surface="watchlist",
+            surface="long_term",
+            default_provider="schwab",
         )
 
         def _fetch(ticker: str) -> List[Dict[str, Any]]:

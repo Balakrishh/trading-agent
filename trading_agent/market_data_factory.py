@@ -60,12 +60,28 @@ _KNOWN_PROVIDERS = {"alpaca", "schwab", "yahoo"}
 # Recognised surface identifiers — included for log clarity only; the
 # factory accepts any surface string (env-var lookup is generated from
 # the string itself), but logging an unknown surface helps catch typos.
-_KNOWN_SURFACES = {"live", "watchlist", "backtest"}
+# "long_term" (skill 42 hourly portfolio digest) defaults to Schwab via
+# the `default_provider` kwarg on `build_market_data_provider` — Schwab's
+# options-chain coverage is better than Alpaca's indicative feed for
+# the covered-call income-overlay scoring.
+_KNOWN_SURFACES = {"live", "watchlist", "backtest", "long_term"}
 
 
-def _resolve_provider_name(surface: Optional[str]) -> str:
+def _resolve_provider_name(
+    surface: Optional[str],
+    *,
+    default_provider: str = "alpaca",
+) -> str:
     """
     Walk the env-var priority chain and return the resolved provider name.
+
+    Priority:
+      1. ``MARKET_DATA_PROVIDER_<SURFACE>`` (per-surface override).
+      2. ``MARKET_DATA_PROVIDER`` (global override).
+      3. ``default_provider`` kwarg — surface-aware fallback the call
+         site supplies. Lets the long-term consumers default to
+         Schwab without forcing every other surface to switch.
+      4. Hardcoded ``"alpaca"`` final fallback.
     """
     surface_norm = (surface or "").strip().upper()
     if surface_norm:
@@ -87,9 +103,14 @@ def _resolve_provider_name(surface: Optional[str]) -> str:
             return global_var
         logger.warning(
             "Unknown provider %r in MARKET_DATA_PROVIDER — falling "
-            "back to alpaca.", global_var,
+            "back to %s.", global_var, default_provider,
         )
-    return "alpaca"
+
+    # Surface-aware default. Long-term tab + scheduler call with
+    # default_provider="schwab" so the operator's preferred broker for
+    # options-chain coverage wins when no env override is set.
+    default = (default_provider or "alpaca").strip().lower()
+    return default if default in _KNOWN_PROVIDERS else "alpaca"
 
 
 def build_market_data_provider(
@@ -99,6 +120,7 @@ def build_market_data_provider(
     alpaca_data_url: str = "https://data.alpaca.markets/v2",
     alpaca_base_url: str = "https://paper-api.alpaca.markets/v2",
     surface: Optional[str] = None,
+    default_provider: str = "alpaca",
 ) -> MarketDataProvider:
     """
     Return a concrete :class:`MarketDataPort` provider for *surface*.
@@ -129,7 +151,9 @@ def build_market_data_provider(
     which adapter is wired into each surface.  Per-cycle data calls
     stay at DEBUG inside the adapters themselves.
     """
-    provider_name = _resolve_provider_name(surface)
+    provider_name = _resolve_provider_name(
+        surface, default_provider=default_provider,
+    )
     label = f"surface={surface!r}" if surface else "(no surface)"
     logger.info("MarketData factory: %s → provider=%s", label, provider_name)
 

@@ -253,4 +253,4 @@ Alongside `MAX_POSITIONS_PER_TICKER = 1`, the agent now also enforces `MAX_POSIT
 
 ---
 
-*Last verified against repo HEAD on 2026-06-16.*
+*Last verified against repo HEAD on 2026-06-17.*

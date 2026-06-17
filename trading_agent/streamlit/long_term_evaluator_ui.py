@@ -588,6 +588,13 @@ def _make_chain_fetcher():
         )
 
         config = load_config()
+        # Surface = "long_term" — picks up MARKET_DATA_PROVIDER_LONG_TERM.
+        # Default = "schwab": Schwab's options-chain coverage (including
+        # ADRs like NOK + small-caps) is materially better than Alpaca's
+        # `indicative` feed, which has gaps the covered-call scorer
+        # silently absorbs as "0 candidates today". The operator's
+        # SchwabMarketDataProvider OAuth is already wired for the agent's
+        # credit-spread chain fetches; we just reuse it here.
         provider = build_market_data_provider(
             alpaca_api_key=config.alpaca.api_key,
             alpaca_secret_key=config.alpaca.secret_key,
@@ -598,7 +605,8 @@ def _make_chain_fetcher():
                 config.alpaca, "base_url",
                 "https://paper-api.alpaca.markets/v2",
             ),
-            surface="watchlist",  # reuse the watchlist surface routing
+            surface="long_term",
+            default_provider="schwab",
         )
     except Exception as exc:  # noqa: BLE001 — fail-open per skill 40 §4
         logger.warning("Could not initialise market-data provider: %s", exc)

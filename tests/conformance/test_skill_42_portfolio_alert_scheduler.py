@@ -373,6 +373,52 @@ def test_send_routes_long_term_channel_credentials(monkeypatch):
     assert captured["chat_id"] == "lt-chat"
 
 
+# ---------------------------------------------------------------------------
+# §4 — Market-data routing defaults to Schwab
+# ---------------------------------------------------------------------------
+
+def test_factory_long_term_surface_defaults_to_schwab(monkeypatch):
+    """Skill 42 §4 — when no env override is set, surface='long_term'
+    resolves to schwab via the default_provider kwarg."""
+    from trading_agent.market_data_factory import _resolve_provider_name
+    monkeypatch.delenv("MARKET_DATA_PROVIDER", raising=False)
+    monkeypatch.delenv("MARKET_DATA_PROVIDER_LONG_TERM", raising=False)
+    assert _resolve_provider_name(
+        "long_term", default_provider="schwab",
+    ) == "schwab"
+
+
+def test_factory_env_override_wins_over_default(monkeypatch):
+    """Operator can force a different provider per-surface via env."""
+    from trading_agent.market_data_factory import _resolve_provider_name
+    monkeypatch.setenv("MARKET_DATA_PROVIDER_LONG_TERM", "alpaca")
+    assert _resolve_provider_name(
+        "long_term", default_provider="schwab",
+    ) == "alpaca"
+
+
+def test_factory_global_env_wins_over_default(monkeypatch):
+    """Global MARKET_DATA_PROVIDER overrides the default kwarg."""
+    from trading_agent.market_data_factory import _resolve_provider_name
+    monkeypatch.delenv("MARKET_DATA_PROVIDER_LONG_TERM", raising=False)
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "yahoo")
+    assert _resolve_provider_name(
+        "long_term", default_provider="schwab",
+    ) == "yahoo"
+
+
+def test_factory_backward_compat_other_surfaces_unchanged(monkeypatch):
+    """The new default_provider kwarg defaults to 'alpaca' so existing
+    `live`/`watchlist`/`backtest` callers behave identically."""
+    from trading_agent.market_data_factory import _resolve_provider_name
+    monkeypatch.delenv("MARKET_DATA_PROVIDER", raising=False)
+    monkeypatch.delenv("MARKET_DATA_PROVIDER_LIVE", raising=False)
+    monkeypatch.delenv("MARKET_DATA_PROVIDER_WATCHLIST", raising=False)
+    assert _resolve_provider_name("live") == "alpaca"
+    assert _resolve_provider_name("watchlist") == "alpaca"
+    assert _resolve_provider_name(None) == "alpaca"
+
+
 def test_scheduler_does_not_define_score_helpers():
     """CI invariant 2 — scoring helpers may only be defined in
     chain_scanner.py / decision_engine.py."""

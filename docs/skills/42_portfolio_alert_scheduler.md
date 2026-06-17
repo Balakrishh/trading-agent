@@ -1,6 +1,6 @@
 # Portfolio alert scheduler
 
-> **One-line summary:** Hourly portfolio digest folded INTO the credit-spread agent's 5-minute cycle (no separate cron / Cowork task). Runs the long-term evaluator against the operator's persisted holdings + watchlist, posts covered-call income-overlay candidates + skipped reasons + watchlist entry-candidate universe + portfolio snapshot to the dedicated Telegram `long_term` channel. Same `journal_kb` body-hash dedup the trade alerts use, so an identical digest within a UTC day stays silent.
+> **One-line summary:** Hourly portfolio digest folded INTO the credit-spread agent's 5-minute cycle (no separate cron / Cowork task). Runs the long-term evaluator against the operator's persisted holdings + watchlist, fetches option chains from **Schwab by default** (better coverage than Alpaca's `indicative` feed for the income-overlay scorer), posts covered-call candidates + skipped reasons + watchlist entry-candidate universe + portfolio snapshot to the dedicated Telegram `long_term` channel. Same `journal_kb` body-hash dedup the trade alerts use, so an identical digest within a UTC day stays silent.
 > **Source of truth:** [`trading_agent/portfolio_alert_scheduler.py`](../../trading_agent/portfolio_alert_scheduler.py), [`trading_agent/telegram_notifier.py:notify_portfolio_review`](../../trading_agent/telegram_notifier.py), [`trading_agent/agent.py:_maybe_run_portfolio_review`](../../trading_agent/agent.py).
 > **Phase:** 2  •  **Group:** ops
 > **Depends on:** `40_long_term_options_evaluator.md` (the scoring engine), `41_positions_provider.md` (holdings input), `32_telegram_operator_alerts.md` (channel-routing + per-day dedup pattern), `19_journal_schema.md` (the `telegram_alert_sent` action).
@@ -89,6 +89,7 @@ Wraps the body in `<pre>{html_escape(body)}</pre>` so Telegram renders it monosp
 
 - **Env opt-out is the hard kill switch.** `PORTFOLIO_ALERTS_ENABLED=false` (or `0`, `no`, `off`) returns `AlertResult(skipped_reason="PORTFOLIO_ALERTS_ENABLED=false")` BEFORE any I/O. Operator setting this on the pi silences the alerts without a code change or notifier teardown. Default is on.
 - **Market-hours gate is bypassable with `--force`.** Outside `is_within_market_hours(now)` the scheduler returns `skipped_reason="outside market hours"`. The `--force` CLI flag overrides for one-shot testing. Cron jobs MUST NOT set `--force` in production; the gate exists so an off-hours invocation doesn't send a stale digest.
+- **Market-data routing defaults to Schwab.** Both the Streamlit Long-Term Evaluator tab and the in-cycle scheduler call `build_market_data_provider(surface="long_term", default_provider="schwab")`. The factory walks `MARKET_DATA_PROVIDER_LONG_TERM` → `MARKET_DATA_PROVIDER` → `default_provider` (skill 16). Operator overrides per-tab by setting `MARKET_DATA_PROVIDER_LONG_TERM=alpaca` (or yahoo) in `.env`; the credit-spread `live` / `watchlist` surfaces are unaffected. Schwab is the default because its options-chain coverage includes ADRs (NOK), small-caps (SOFI, ZS), and tail-strike contracts that Alpaca's `indicative` feed gaps. Conformance: `test_factory_long_term_surface_defaults_to_schwab`.
 - **Empty holdings file = silent skip.** If `holdings_store.load_holdings()` returns an empty snapshot (operator hasn't pasted yet, or clicked Reset), the scheduler skips with `skipped_reason="holdings file empty"` — never sends an "I have no holdings" digest, which would be noise.
 - **Holdings parse failure = silent skip.** If the persisted paste fails `ManualPositionsProvider.from_json_text` (rare — usually means the file was hand-edited or schema changed), the scheduler logs the failure and skips. The Streamlit tab is where parse errors get surfaced to the operator; the hourly scheduler doesn't bother them.
 - **Empty watchlist = silent skip.** No tickers to recommend on. Same fail-quiet contract.
@@ -109,4 +110,4 @@ Wraps the body in `<pre>{html_escape(body)}</pre>` so Telegram renders it monosp
 
 ---
 
-*Last verified against repo HEAD on 2026-06-16.*
+*Last verified against repo HEAD on 2026-06-17.*
