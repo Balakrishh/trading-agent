@@ -190,6 +190,30 @@ def compose_digest_body(
         )
         lines.append("")
 
+    # ── Watchlist signals — entry/exit consolidation ─────────────────
+    # Watchlist tickers NOT held are entry-vehicle candidates (CSP /
+    # LEAPS). The scoring functions land in skill 40 §2.2/§2.3 — once
+    # there, this section renders concrete recommendations the same
+    # shape as the income overlay above. Until then we surface the
+    # universe so the operator sees their watchlist in every digest.
+    watchlist_only = sorted(wl_set - held_set)
+    if watchlist_only:
+        lines.append(
+            f"🔭 Watchlist entry candidates — {len(watchlist_only)} ticker(s)"
+        )
+        # Render up to 8 tickers in one line; the per-ticker entry-vehicle
+        # scoring is next-session work, so a one-liner suffices today.
+        head = watchlist_only[:8]
+        tail_n = len(watchlist_only) - len(head)
+        lines.append(
+            f"   {', '.join(head)}"
+            + (f"  (+{tail_n} more)" if tail_n else "")
+        )
+        lines.append(
+            "   CSP / LEAPS entry signals land next session (skill 40 §2.2/§2.3)."
+        )
+        lines.append("")
+
     lines.append("— Long-Term Evaluator · skill 40 · read-only")
     return "\n".join(lines)
 

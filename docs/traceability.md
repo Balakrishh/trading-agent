@@ -43,7 +43,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 39 | skew model | backtest/skew_model.py, backtest/synthetic_chain.py, backtest/cycle.py, backtest/runner.py | test_backtest/test_synthetic_chain.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_39_skew_model.py | — |
 | 40 | long term options evaluator | long_term_evaluator.py, decision_engine.py, streamlit/long_term_evaluator_ui.py | test_agent_integration.py, test_backtest/test_synthetic_chain.py | conformance/test_skill_40_long_term_evaluator.py | — |
 | 41 | positions provider | positions_provider.py | — | conformance/test_skill_41_positions_provider.py | — |
-| 42 | portfolio alert scheduler | portfolio_alert_scheduler.py, telegram_notifier.py | — | conformance/test_skill_42_portfolio_alert_scheduler.py | — |
+| 42 | portfolio alert scheduler | portfolio_alert_scheduler.py, telegram_notifier.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_42_portfolio_alert_scheduler.py | — |
 
 **Skills with conformance tests:** 35 / 35 (100%)
 

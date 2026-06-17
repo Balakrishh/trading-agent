@@ -59,39 +59,46 @@ _TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 class TelegramNotifier:
     """Opt-in Telegram alerter for stuck-position / manual-intervention events.
 
-    Two channels, both env-gated, with fallback:
+    Three channels, all env-gated, all with fallback to the info channel:
 
-      * **info channel** — `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+      * **info channel** — ``TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_CHAT_ID``.
         Carries lifecycle events (position open, position close,
         end-of-day summary). The "quiet" channel.
 
-      * **error channel** — `TELEGRAM_ERROR_BOT_TOKEN` /
-        `TELEGRAM_ERROR_CHAT_ID`. Carries operator-actionable alerts
+      * **error channel** — ``TELEGRAM_ERROR_BOT_TOKEN`` /
+        ``TELEGRAM_ERROR_CHAT_ID``. Carries operator-actionable alerts
         (PDT block, close cooldown engaged, FLAT after close-then-
         open failure). The "act now" channel.
 
-    Fallback rule: if either error env var is unset, the error
-    channel reuses the info channel's credentials. This keeps the
-    single-bot deployment unchanged for users who haven't created
-    a second bot. Set both error env vars to route errors to a
-    distinct bot; leave them blank to keep everything on the info
-    bot.
+      * **long_term channel** — ``TELEGRAM_LONG_TERM_BOT_TOKEN`` /
+        ``TELEGRAM_LONG_TERM_CHAT_ID``. Carries hourly portfolio review
+        digests (skill 42) — covered-call income overlay
+        recommendations, skipped-reason breakdowns, sector exposure
+        snapshots. Kept on its own channel so the credit-spread
+        operator's info bot doesn't get flooded with the hourly
+        long-term digest.
+
+    Fallback rule: if either env var of a channel is unset, that
+    channel reuses the info channel's credentials. This keeps existing
+    deployments (one bot, one chat) unchanged — operators add new
+    channels only when they want to split traffic to distinct bots.
 
     The notifier is stateless beyond the env config — dedup happens
-    upstream (in agent.py) via the journal. This module just sends
-    the message.
+    upstream (in agent.py + the portfolio_alert_scheduler) via the
+    journal. This module just sends the message.
     """
 
     def __init__(self,
                  token: Optional[str] = None,
                  chat_id: Optional[str] = None,
                  error_token: Optional[str] = None,
-                 error_chat_id: Optional[str] = None):
+                 error_chat_id: Optional[str] = None,
+                 long_term_token: Optional[str] = None,
+                 long_term_chat_id: Optional[str] = None):
         """Args default to env-var lookup; pass explicit values in tests.
 
-        Error-channel credentials fall back to the info channel when
-        not supplied (preserves single-bot behavior for existing
-        deployments).
+        Per-channel credentials fall back to the info channel when not
+        supplied (preserves single-bot behavior for existing deployments).
         """
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -105,6 +112,18 @@ class TelegramNotifier:
         self.error_chat_id = (
             error_chat_id or _env_err_chat or self.chat_id
         )
+        # Long-term-channel credentials — same fallback pattern as
+        # error channel. Added 2026-06-16 alongside skill 42.
+        _env_lt_token = os.environ.get(
+            "TELEGRAM_LONG_TERM_BOT_TOKEN", "",
+        ).strip()
+        _env_lt_chat = os.environ.get(
+            "TELEGRAM_LONG_TERM_CHAT_ID", "",
+        ).strip()
+        self.long_term_token = long_term_token or _env_lt_token or self.token
+        self.long_term_chat_id = (
+            long_term_chat_id or _env_lt_chat or self.chat_id
+        )
 
     @property
     def is_active(self) -> bool:
@@ -117,6 +136,7 @@ class TelegramNotifier:
         return bool(
             (self.token and self.chat_id)
             or (self.error_token and self.error_chat_id)
+            or (self.long_term_token and self.long_term_chat_id)
         )
 
     @property
@@ -129,6 +149,16 @@ class TelegramNotifier:
             or (self.error_chat_id != self.chat_id)
         )
 
+    @property
+    def long_term_channel_distinct(self) -> bool:
+        """True iff the long-term channel uses different credentials
+        from the info channel — useful for the dashboard / SDD
+        diagnostics to confirm the dedicated bot is actually in effect."""
+        return (
+            (self.long_term_token != self.token)
+            or (self.long_term_chat_id != self.chat_id)
+        )
+
     # ------------------------------------------------------------------
     # Internal send (single network call, defensive)
     # ------------------------------------------------------------------
@@ -136,10 +166,14 @@ class TelegramNotifier:
     def _send(self, text: str, *, channel: str = "info") -> bool:
         """POST one message. Returns True on HTTP 200, False otherwise.
 
-        ``channel`` is ``"info"`` (default) or ``"error"`` — routes
-        to the matching token/chat_id pair. If the chosen channel's
-        credentials aren't populated, returns False without raising
-        (the caller treats False as "alert not delivered").
+        ``channel`` is one of ``"info"`` (default), ``"error"``, or
+        ``"long_term"`` — routes to the matching token/chat_id pair.
+        Each channel independently falls back to info-channel creds
+        when its own env vars are unset (see ``__init__``).
+
+        If the chosen channel's credentials aren't populated, returns
+        False without raising (the caller treats False as "alert not
+        delivered").
 
         Any exception is caught — the agent never sees a notifier
         crash. The single WARNING log line lets an operator notice
@@ -147,6 +181,8 @@ class TelegramNotifier:
         """
         if channel == "error":
             token, chat_id = self.error_token, self.error_chat_id
+        elif channel == "long_term":
+            token, chat_id = self.long_term_token, self.long_term_chat_id
         else:
             token, chat_id = self.token, self.chat_id
         if not (token and chat_id):
@@ -495,19 +531,23 @@ class TelegramNotifier:
     def notify_portfolio_review(self, *, body: str, dedup_key: str) -> bool:
         """Skill 42 (2026-06-16) — hourly long-term portfolio digest.
 
-        Posts the operator's pre-composed digest body to the info
-        channel verbatim (wrapped in HTML ``<pre>`` for fixed-width
-        rendering so the sector percentages + bracket sketches line up).
+        Posts the operator's pre-composed digest body to the
+        ``long_term`` channel verbatim (wrapped in HTML ``<pre>`` for
+        fixed-width rendering so the sector percentages + bracket
+        sketches line up).
+
+        Routing: ``TELEGRAM_LONG_TERM_BOT_TOKEN`` /
+        ``TELEGRAM_LONG_TERM_CHAT_ID`` when both env vars are set;
+        otherwise falls back to the info channel (single-bot
+        deployments stay unchanged). The dedicated channel keeps the
+        hourly digest from flooding the info channel with the
+        credit-spread agent's trade/EOD alerts.
 
         Dedup is OWNED BY THE CALLER (the
         ``portfolio_alert_scheduler``) — the scheduler hashes the body
         content and gates on a journal-derived "already sent today"
         check before calling. Two identical hourly bodies in the same
         UTC day will only send once. This method just fires.
-
-        Routes to the info channel — same as the EOD recap and the VIX
-        regime change. The error channel stays reserved for ops alerts
-        that wake the operator.
         """
         # Telegram caps text at 4096 chars; the digest can grow if the
         # operator's watchlist is large. Truncate gracefully with a
@@ -519,7 +559,7 @@ class TelegramNotifier:
         # ``<pre>`` so multi-line text renders monospaced — bracket
         # sketches and sector pies need column alignment.
         payload = f"<pre>{_html_escape(body)}</pre>"
-        return self._send(payload, channel="info")
+        return self._send(payload, channel="long_term")
 
     def notify_vix_regime_change(self, *, from_zone: str, to_zone: str,
                                   vix_level: float, hint: str) -> bool:

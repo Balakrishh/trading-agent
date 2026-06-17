@@ -315,6 +315,64 @@ def test_scheduler_does_not_import_executor():
     assert "place_order" not in src
 
 
+# ---------------------------------------------------------------------------
+# §3.3 — notify_portfolio_review channel routing
+# ---------------------------------------------------------------------------
+
+def test_notify_portfolio_review_routes_to_long_term_channel(monkeypatch):
+    """When TELEGRAM_LONG_TERM_BOT_TOKEN is set, the digest uses it."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "info-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "info-chat")
+    monkeypatch.setenv("TELEGRAM_LONG_TERM_BOT_TOKEN", "lt-token")
+    monkeypatch.setenv("TELEGRAM_LONG_TERM_CHAT_ID", "lt-chat")
+    n = TelegramNotifier()
+    assert n.long_term_token == "lt-token"
+    assert n.long_term_chat_id == "lt-chat"
+    assert n.long_term_channel_distinct is True
+
+
+def test_long_term_channel_falls_back_to_info(monkeypatch):
+    """Single-bot deployments stay unchanged — no LT env vars set →
+    long_term channel reuses info channel credentials."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "info-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "info-chat")
+    monkeypatch.delenv("TELEGRAM_LONG_TERM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_LONG_TERM_CHAT_ID", raising=False)
+    n = TelegramNotifier()
+    assert n.long_term_token == "info-token"
+    assert n.long_term_chat_id == "info-chat"
+    assert n.long_term_channel_distinct is False
+
+
+def test_send_routes_long_term_channel_credentials(monkeypatch):
+    """_send(channel='long_term') uses LT creds, not info or error."""
+    from trading_agent.telegram_notifier import TelegramNotifier
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "info-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "info-chat")
+    monkeypatch.setenv("TELEGRAM_ERROR_BOT_TOKEN", "err-token")
+    monkeypatch.setenv("TELEGRAM_ERROR_CHAT_ID", "err-chat")
+    monkeypatch.setenv("TELEGRAM_LONG_TERM_BOT_TOKEN", "lt-token")
+    monkeypatch.setenv("TELEGRAM_LONG_TERM_CHAT_ID", "lt-chat")
+    n = TelegramNotifier()
+
+    captured = {}
+
+    def _fake_post(url, json, timeout):
+        captured["url"] = url
+        captured["chat_id"] = json["chat_id"]
+        class _Resp: status_code = 200
+        return _Resp()
+
+    monkeypatch.setattr(
+        "trading_agent.telegram_notifier.requests.post", _fake_post,
+    )
+    assert n._send("body", channel="long_term") is True
+    assert "lt-token" in captured["url"]
+    assert captured["chat_id"] == "lt-chat"
+
+
 def test_scheduler_does_not_define_score_helpers():
     """CI invariant 2 — scoring helpers may only be defined in
     chain_scanner.py / decision_engine.py."""

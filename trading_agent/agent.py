@@ -814,6 +814,19 @@ class TradingAgent:
         # transition per UTC day.
         self._vix_monitor.check_and_alert()
 
+        # Skill 42 — Hourly portfolio review (long-term evaluator
+        # digest). Folded into the credit-spread agent's 5-minute
+        # cycle so the pi's existing loop owns BOTH workloads — no
+        # separate cron / Cowork scheduled task needed.
+        #
+        # Cheap minute-of-hour gate runs first: only fire on cycles
+        # where the wall clock minute is in [30, 34], which the
+        # 5-min cycle hits roughly once per hour. Everything else
+        # (market-hours, env opt-out, body-hash dedup) is enforced
+        # inside run_scheduler so the in-cycle invocation behaves
+        # IDENTICALLY to the standalone CLI.
+        self._maybe_run_portfolio_review()
+
         # ------------------------------------------------------------------
         # Stage 1: MONITOR existing positions
         # ------------------------------------------------------------------
@@ -1898,6 +1911,57 @@ class TradingAgent:
                 exc=exc,
             )
         return result
+
+    def _maybe_run_portfolio_review(self) -> None:
+        """Skill 42 — invoke the portfolio alert scheduler in-cycle.
+
+        Called from ``_run_cycle_impl`` after the VIX regime check.
+        The 5-min cycle hits a [:30, :34] minute window roughly once
+        per hour, which is the cheap "rate-limit" gate. Everything
+        else — market-hours weekday/time-of-day check, env opt-out,
+        body-hash dedup against the journal — lives inside
+        ``portfolio_alert_scheduler.run_scheduler`` so the in-cycle
+        path produces identical behavior to the standalone CLI
+        (``python -m trading_agent.portfolio_alert_scheduler``).
+
+        Failures are caught + journalled via ExceptionMonitor so a
+        flaky chain fetch or a Telegram outage never blanks the
+        credit-spread cycle.
+        """
+        # Minute-of-hour gate: fire on cycles where wall clock is
+        # 30..34, which the 5-minute cycle passes through ~once/hour.
+        try:
+            from datetime import datetime as _dt
+            from datetime import timezone as _tz
+            now_utc = _dt.now(_tz.utc)
+        except Exception:                                        # noqa: BLE001, skill-34-exempt — datetime constructors rarely fail
+            return
+        if not (30 <= now_utc.minute < 35):
+            return
+
+        try:
+            from trading_agent.portfolio_alert_scheduler import (
+                build_default_deps,
+                run_scheduler,
+            )
+            deps = build_default_deps()
+            result = run_scheduler(deps=deps, now=now_utc)
+            if result.sent:
+                logger.info(
+                    "[portfolio-review] sent (recs=%d holdings=%d "
+                    "body_hash=%s chars=%d)",
+                    result.rec_count, result.holdings_count,
+                    result.body_hash, result.body_chars,
+                )
+            else:
+                logger.debug(
+                    "[portfolio-review] skipped: %s", result.skipped_reason,
+                )
+        except Exception as exc:                                 # noqa: BLE001
+            self._exception_monitor.record(
+                source="agent._maybe_run_portfolio_review",
+                exc=exc,
+            )
 
     def _maybe_send_eod_summary(self) -> None:
         """Fire the end-of-day Telegram recap once per trading day.
