@@ -44,8 +44,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 40 | long term options evaluator | long_term_evaluator.py, decision_engine.py, streamlit/long_term_evaluator_ui.py | test_agent_integration.py, test_backtest/test_synthetic_chain.py | conformance/test_skill_40_long_term_evaluator.py | — |
 | 41 | positions provider | positions_provider.py | — | conformance/test_skill_41_positions_provider.py | — |
 | 42 | portfolio alert scheduler | portfolio_alert_scheduler.py, telegram_notifier.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_42_portfolio_alert_scheduler.py | — |
+| 44 | position monitor scaling | position_monitor.py | test_backtest/test_sim_position.py, test_position_monitor.py, test_production_readiness.py | conformance/test_skill_44_position_monitor_scaling.py | — |
 
-**Skills with conformance tests:** 35 / 35 (100%)
+**Skills with conformance tests:** 36 / 36 (100%)
 
 ## Orphan source files
 

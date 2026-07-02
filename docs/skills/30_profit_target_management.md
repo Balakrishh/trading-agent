@@ -49,15 +49,18 @@ Preset defaults:
 ### 3.1 The exit predicate (live)
 
 ```python
-# trading_agent/position_monitor.py:601-609
+# trading_agent/position_monitor.py
 # --- 3. Profit target: 50% of credit captured ---
-profit_threshold = credit_value * self.profit_target_pct
+# Skill 44 (2026-07-02) — the threshold now scales by contracts_open so
+# a multi-contract position hits profit-target at 50% of TOTAL credit,
+# not per-contract credit.
+profit_threshold = credit_position * self.profit_target_pct
 if spread.net_unrealized_pl >= profit_threshold > 0:
     return (
         ExitSignal.PROFIT_TARGET,
         f"Profit ${spread.net_unrealized_pl:.2f} ≥ "
         f"{self.profit_target_pct*100:.0f}% of credit "
-        f"${credit_value:.2f}"
+        f"${credit_position:.2f} ({contracts}×${credit_per_contract:.2f})"
     )
 ```
 
@@ -110,4 +113,4 @@ signal, reason = pos.evaluate_exit(
 
 ---
 
-*Last verified against repo HEAD on 2026-05-23.*
+*Last verified against repo HEAD on 2026-07-02.*

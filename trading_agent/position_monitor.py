@@ -119,6 +119,17 @@ class SpreadPosition:
     exit_signal: ExitSignal = ExitSignal.HOLD
     exit_reason: str = ""
     origin: str = "trade_plan"    # "trade_plan" | "inferred"
+    # Contract count across the spread. Derived as the min |qty| across
+    # legs (all legs of a properly-filled spread carry the same qty; the
+    # min guards against a partial fill). Used to scale hard_stop,
+    # stop_loss, and profit_target thresholds — see skill 44.
+    contracts_open: int = 1
+    # ISO-8601 UTC timestamp of the trade plan's submit event. Used by
+    # the post-fill grace period gate in ``_check_exit`` so the monitor
+    # doesn't evaluate P&L on a stale mark in the first N seconds after
+    # entry. Empty string means "no known submit time" (inferred
+    # spreads, legacy positions) — grace gate is skipped in that case.
+    opened_at: str = ""
 
 
 class PositionMonitor:
@@ -143,13 +154,26 @@ class PositionMonitor:
                  stop_loss_pct: float = 0.50,    # kept for legacy compat
                  profit_target_pct: float = 0.50,  # 50% profit taker
                  hard_stop_multiplier: float = 3.0,
-                 strike_proximity_pct: float = 0.01):
+                 strike_proximity_pct: float = 0.01,
+                 post_fill_grace_seconds: int = 60):
+        """
+        Additional parameter
+        --------------------
+        post_fill_grace_seconds : int
+            Skill 44 — number of seconds after a position's ``opened_at``
+            during which the exit-signal check returns HOLD regardless
+            of the current mark. Prevents a stale bid-ask immediately
+            post-fill from triggering a phantom hard_stop. Default 60s.
+            Set to 0 in tests when you want to exercise the exit paths
+            directly against a synthesised mark.
+        """
         self.api_key = api_key
         self.secret_key = secret_key
         self.base_url = base_url
         self.stop_loss_pct = stop_loss_pct
         self.profit_target_pct = profit_target_pct
         self.hard_stop_multiplier = hard_stop_multiplier
+        self.post_fill_grace_seconds = int(post_fill_grace_seconds)
         self.strike_proximity_pct = strike_proximity_pct
 
     def _headers(self) -> Dict[str, str]:
@@ -363,6 +387,24 @@ class PositionMonitor:
 
             net_pl = sum(leg.unrealized_pl for leg in matched_legs)
 
+            # Contract count derivation. All legs of a correctly-filled
+            # spread carry the same |qty|; a partial fill has one leg at
+            # a lower qty. Taking the MIN guards against the partial-
+            # fill case (the position's exposure is bounded by the
+            # smaller side). Skill 44 §4 pins this to a conformance test.
+            contracts_open = max(1, min(
+                abs(leg.qty) for leg in matched_legs if leg.qty
+            )) if matched_legs else 1
+
+            # Submit timestamp — pulled from the trade plan's own
+            # ``timestamp`` field, populated by the executor at submit
+            # time. Falls back to the outer state-history timestamp on
+            # older plan shapes.
+            plan_outer_ts = (
+                plan.get("timestamp", "") if isinstance(plan, dict) else ""
+            )
+            opened_at = str(tp.get("timestamp", "") or plan_outer_ts)
+
             spread = SpreadPosition(
                 underlying=tp.get("ticker", ""),
                 strategy_name=tp.get("strategy", ""),
@@ -374,6 +416,8 @@ class PositionMonitor:
                 expiration=tp.get("expiration", ""),
                 short_strikes=short_strikes,
                 origin="trade_plan",
+                contracts_open=contracts_open,
+                opened_at=opened_at,
             )
             spreads.append(spread)
             matched_symbols.update(p.symbol for p in matched_legs)
@@ -575,37 +619,86 @@ class PositionMonitor:
     def _check_exit(self, spread: SpreadPosition,
                     current_regimes: Dict[str, Regime],
                     underlying_price: float = 0.0):
-        """Return (ExitSignal, reason) for a single spread."""
+        """Return (ExitSignal, reason) for a single spread.
 
-        credit_value = spread.original_credit * 100   # per-contract dollar value
+        Skill 44 (2026-07-02) — two invariants critical to correctness:
 
-        # --- 1. Hard stop: spread has lost 3× the initial credit (IMMEDIATE) ---
-        hard_stop_threshold = credit_value * self.hard_stop_multiplier
+        1. **Contract-count scaling.** ``spread.net_unrealized_pl`` is
+           the POSITION-scale total across all contracts (sum of every
+           leg's unrealized_pl). ``spread.original_credit`` and
+           ``spread.max_loss`` are PER-CONTRACT economics from the
+           trade plan. All three thresholds below multiply by
+           ``spread.contracts_open`` so a 12-contract position doesn't
+           trip the hard-stop line at 1/12 of the intended loss.
+
+        2. **Post-fill grace period.** Immediately after fill (within
+           the first ``post_fill_grace_seconds``) Alpaca's spread quote
+           can lag reality, producing phantom unrealized losses that
+           don't reflect the actual market. Skip exit evaluation
+           during that window so a stale mark doesn't liquidate a
+           just-opened position.
+        """
+
+        # --- 0. Post-fill grace period (skill 44) -----------------------
+        # If we know when the position opened AND it's less than
+        # ``post_fill_grace_seconds`` old, hold — the mark may still be
+        # settling. ``opened_at`` empty ("") means inferred / legacy
+        # spread with no known submit time; skip the gate rather than
+        # block indefinitely.
+        if spread.opened_at:
+            try:
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
+                open_ts = _dt.fromisoformat(
+                    spread.opened_at.replace("Z", "+00:00")
+                )
+                age = (_dt.now(_tz.utc) - open_ts).total_seconds()
+                if 0 <= age < self.post_fill_grace_seconds:
+                    return (
+                        ExitSignal.HOLD,
+                        f"Post-fill grace ({age:.0f}s < "
+                        f"{self.post_fill_grace_seconds}s)"
+                    )
+            except (ValueError, TypeError):
+                # Malformed timestamp — fall through, don't crash.
+                pass
+
+        # ---------------------------------------------------------------
+        # Per-position economics (contract-count-scaled).
+        # ---------------------------------------------------------------
+        contracts = max(1, spread.contracts_open)
+        credit_per_contract = spread.original_credit * 100
+        credit_position = credit_per_contract * contracts    # dollars for the whole position
+        max_loss_position = spread.max_loss * contracts
+
+        # --- 1. Hard stop: position has lost 3× total credit (IMMEDIATE) ---
+        hard_stop_threshold = credit_position * self.hard_stop_multiplier
         loss = -spread.net_unrealized_pl   # positive when losing
         if loss >= hard_stop_threshold > 0:
             return (
                 ExitSignal.HARD_STOP,
                 f"Loss ${loss:.2f} ≥ {self.hard_stop_multiplier:.0f}× credit "
-                f"${credit_value:.2f} (threshold=${hard_stop_threshold:.2f})"
+                f"${credit_position:.2f} ({contracts}×${credit_per_contract:.2f}) "
+                f"threshold=${hard_stop_threshold:.2f}"
             )
 
         # --- 2. Legacy stop-loss: loss ≥ 50% of defined max-loss ---
-        loss_threshold = spread.max_loss * self.stop_loss_pct
+        loss_threshold = max_loss_position * self.stop_loss_pct
         if loss >= loss_threshold > 0:
             return (
                 ExitSignal.STOP_LOSS,
                 f"Loss ${loss:.2f} ≥ {self.stop_loss_pct*100:.0f}% of "
-                f"max loss ${spread.max_loss:.2f}"
+                f"max loss ${max_loss_position:.2f} ({contracts}×${spread.max_loss:.2f})"
             )
 
         # --- 3. Profit target: 50% of credit captured ---
-        profit_threshold = credit_value * self.profit_target_pct
+        profit_threshold = credit_position * self.profit_target_pct
         if spread.net_unrealized_pl >= profit_threshold > 0:
             return (
                 ExitSignal.PROFIT_TARGET,
                 f"Profit ${spread.net_unrealized_pl:.2f} ≥ "
                 f"{self.profit_target_pct*100:.0f}% of credit "
-                f"${credit_value:.2f}"
+                f"${credit_position:.2f} ({contracts}×${credit_per_contract:.2f})"
             )
 
         # --- 4. Strike proximity guard (IMMEDIATE) ---
