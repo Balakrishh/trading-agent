@@ -2616,6 +2616,56 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                  "your universe.",
         )
 
+        # ── Iron Butterfly (skill 45, added 2026-07-06) ─────────────────
+        # 4-leg strategy with both shorts at ATM. Collects ~2× the credit
+        # of an IC at the same DTE because the shorts sit at |Δ|≈0.5
+        # instead of far OTM. Profit zone is narrower (only [K−C, K+C])
+        # so use it when you expect pin-precision + IV mean-reversion.
+        # Ships DISABLED — flip the checkbox to opt in per-preset.
+        st.markdown("**Iron Butterfly** *(skill 45)*")
+        ib_enabled = st.checkbox(
+            "Enable Iron Butterfly on sideways-regime tickers",
+            value=bool(getattr(seed, "iron_butterfly_enabled", False)),
+            key="cust_ib_enabled",
+            help="When ON, the planner tries an Iron Butterfly first "
+                 "on sideways-regime tickers; if no positive-EV "
+                 "candidate exists it falls back to Iron Condor. "
+                 "Ships OFF by default — flip to true once you're ready "
+                 "to test in the current regime.",
+        )
+        ib_min_pop = st.slider(
+            "IB min POP (profit-zone / wing floor)",
+            0.20, 0.85,
+            float(getattr(seed, "iron_butterfly_min_pop", 0.40)),
+            0.05, key="cust_ib_min_pop",
+            help="Drop IB candidates whose POP (≈ 2C / W) is below this. "
+                 "0.40 = the trade collects ≥ 40% of wing width as credit. "
+                 "Lower → more IB attempts, riskier structural profile.",
+        )
+        ib_gc1, ib_gc2 = st.columns(2)
+        with ib_gc1:
+            ib_dte_grid_text = st.text_input(
+                "IB DTE grid (days)",
+                value=", ".join(str(d) for d in getattr(
+                    seed, "iron_butterfly_dte_grid", (21, 30, 45),
+                )),
+                key="cust_ib_dte_grid",
+                help="e.g. 21, 30, 45 — favors LONGER DTE than verticals "
+                     "because the profit zone widens with credit collected.",
+            )
+        with ib_gc2:
+            ib_wing_grid_text = st.text_input(
+                "IB wing-width grid (% of spot)",
+                value=", ".join(f"{w:g}" for w in getattr(
+                    seed, "iron_butterfly_wing_width_pct",
+                    (0.020, 0.030, 0.040),
+                )),
+                key="cust_ib_wing_grid",
+                help="e.g. 0.020, 0.030, 0.040 — wider than vertical "
+                     "widths so the profit zone [K−C, K+C] is meaningfully "
+                     "wide even at modest credit.",
+            )
+
     payload = {
         "max_delta":          max_delta,
         "dte_vertical":       dte_vertical,
@@ -2630,6 +2680,9 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "max_leg_spread_cents":   max_leg_spread_cents,
         "max_leg_spread_pct_mid": max_leg_spread_pct_mid,
         "profit_target_pct":  profit_target_pct,
+        # Iron Butterfly knobs (skill 45).
+        "iron_butterfly_enabled":       ib_enabled,
+        "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to
     # seed value otherwise so a malformed text box doesn't poison the file.
@@ -2639,6 +2692,13 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
     if parsed_dte:    payload["dte_grid"]      = parsed_dte
     if parsed_delta:  payload["delta_grid"]    = parsed_delta
     if parsed_width:  payload["width_grid_pct"] = parsed_width
+    # Iron Butterfly grids (skill 45) — same fall-back-on-parse-fail
+    # discipline as the vertical grids so a hand-edit typo doesn't
+    # poison STRATEGY_PRESET.json.
+    parsed_ib_dte  = _parse_grid(ib_dte_grid_text,  "int")
+    parsed_ib_wing = _parse_grid(ib_wing_grid_text, "float")
+    if parsed_ib_dte:  payload["iron_butterfly_dte_grid"]        = parsed_ib_dte
+    if parsed_ib_wing: payload["iron_butterfly_wing_width_pct"]  = parsed_ib_wing
     return payload
 
 

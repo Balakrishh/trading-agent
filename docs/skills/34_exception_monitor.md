@@ -181,4 +181,4 @@ registered. The convention is `if mon is not None: mon.record(...)`.
 
 ---
 
-*Last verified against repo HEAD on 2026-06-17.*
+*Last verified against repo HEAD on 2026-07-06.*

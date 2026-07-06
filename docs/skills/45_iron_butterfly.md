@@ -193,7 +193,11 @@ return self._plan_iron_condor(ticker, analysis, expiration)
 
 The IB planner fetches put+call chains for the expiration, tags each contract with its `type`, merges into a single `ChainSlice`, delegates to `decide_iron_butterfly`, and converts the winning `IronButterflyCandidate` into a `SpreadPlan` with 4 legs (short put, long put, short call, long call) in the exact shape the executor expects.
 
-Enable per-preset by editing `STRATEGY_PRESET.json`:
+**Two ways to enable per-preset.**
+
+*Dashboard (recommended)*: open the Streamlit **Live Monitoring** tab → **Strategy Profile** panel → **Custom** preset → scroll to *Iron Butterfly* section → tick "Enable Iron Butterfly on sideways-regime tickers" → click Save. Preset hot-reloads on the next 5-minute cycle. The min-POP slider and DTE / wing-width grids in the same section let you tune without touching JSON.
+
+*Raw JSON edit*: alternatively edit `STRATEGY_PRESET.json` directly:
 
 ```json
 {
