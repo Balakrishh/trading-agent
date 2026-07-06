@@ -148,6 +148,31 @@ class PresetConfig:
     max_defensive_rolls_per_position:  int   = 1
 
     # ------------------------------------------------------------------
+    # Iron Butterfly (added 2026-07-02 — see skill 45).
+    # Structurally distinct from Iron Condor: both shorts sit ATM
+    # (Δ≈0.5), profit zone = [K−C, K+C], POP ≈ 2C/W. Ships DISABLED so
+    # the scorer is available for backtest sign-off before it can
+    # affect any live cycle. Enable per-preset once backtest shows
+    # meaningful edge over the credit-spread baseline in the current
+    # regime.
+    # ------------------------------------------------------------------
+    iron_butterfly_enabled:            bool  = False
+    # POP floor for IB — looser than IC's default (0.55) because IB's
+    # profit zone is inherently narrower and the "credit-scaled POP"
+    # approximation biases conservatively. 0.40 admits candidates
+    # collecting ≥ 40% of wing width as credit.
+    iron_butterfly_min_pop:            float = 0.40
+    # DTE grid for IB — favors LONGER DTE than verticals because the
+    # profit zone widens with credit collected, and credit scales with
+    # implied vol × sqrt(DTE). Below 21 DTE the pin-precision required
+    # to be profitable is too tight; above 45 DTE gamma is manageable.
+    iron_butterfly_dte_grid:           Tuple[int, ...] = (21, 30, 45)
+    # Wing widths as fraction of spot. Wider than verticals — a 2-3%
+    # wing on SPY at $735 = $15-22 wing width, enough for the profit
+    # zone [K−C, K+C] to be meaningfully wide even at modest credit.
+    iron_butterfly_wing_width_pct:     Tuple[float, ...] = (0.020, 0.030, 0.040)
+
+    # ------------------------------------------------------------------
     # PDT-aware DTE cap (added 2026-05-20 — see skill 33).
     # When the trading account is sub-$25K (FINRA Pattern Day Trader
     # threshold), same-day closes get blocked by Alpaca code 40310100.

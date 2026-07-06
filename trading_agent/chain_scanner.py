@@ -68,6 +68,22 @@ REJECT_EV_NON_POSITIVE       = "ev_non_positive"
 # worked example.
 REJECT_LEG_SPREAD_WIDE       = "leg_spread_wide"
 
+# ── Iron Butterfly reject taxonomy (skill 45, 2026-07-02) ─────────────────
+# IB has a different structural profile from verticals + IC — both shorts
+# are ATM (Δ≈0.5), profit zone is [K−C, K+C] not the full wing width.
+# These reject reasons are IB-specific so the journal histogram can
+# distinguish "IB rejected because 2C/W too small" from
+# "vertical rejected because C/W below floor". Same string-key discipline
+# as the vertical taxonomy above.
+IB_REJECT_NOT_ATM_SHORTS     = "ib_shorts_not_atm"        # shorts not near |Δ|≈0.5
+IB_REJECT_WINGS_ASYMMETRIC   = "ib_wings_asymmetric"      # call-side wing ≠ put-side wing
+IB_REJECT_WING_TOO_NARROW    = "ib_wing_too_narrow"       # wing_width ≤ 0
+IB_REJECT_CREDIT_NON_POSITIVE_IB = "ib_credit_non_positive"
+IB_REJECT_CREDIT_GE_WING     = "ib_credit_ge_wing"        # net debit or breakeven degenerate
+IB_REJECT_POP_BELOW_MIN_IB   = "ib_pop_below_min"         # 2C/W below iron_butterfly_min_pop
+IB_REJECT_EV_NON_POSITIVE_IB = "ib_ev_non_positive"       # POP·max_profit − (1−POP)·max_loss ≤ 0
+IB_REJECT_DTE_NON_POSITIVE_IB = "ib_dte_non_positive"
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -167,6 +183,193 @@ def _quote_credit(short_bid: float, short_ask: float,
 def _cw_floor(short_delta: float, edge_buffer: float) -> float:
     """Required C/W floor = |Δ| × (1 + edge_buffer). |Δ| is breakeven C/W."""
     return abs(short_delta) * (1.0 + edge_buffer)
+
+
+# ---------------------------------------------------------------------------
+# Iron Butterfly scoring — skill 45.
+# ---------------------------------------------------------------------------
+# Structural differences from a vertical / IC:
+#
+#   * Both shorts sit at the same ATM strike K. Both wings have equal
+#     width W. Credit C = call_credit + put_credit − call_debit − put_debit.
+#   * Max profit = C (at S_T = K exactly).
+#   * Max loss  = W − C (S_T ≤ K − W  OR  S_T ≥ K + W).
+#   * Break-even upper = K + C, lower = K − C. Profit zone width = 2C.
+#
+# POP approximation for an IB — the ratio of profit-zone width to
+# wing-span width, capped at 1. Same rank-order as the more expensive
+# lognormal integral for typical W/C ratios, and easy to reason about
+# from the credit-collected number alone.
+#
+#     POP_IB ≈ min(1.0, (2·C) / W)
+#
+# This is DIFFERENT from the vertical POP ≈ 1 − |Δ_short| formula.
+# Vertical POP depends on short-strike distance from spot; IB POP
+# depends on the credit-collected relative to the wing. Skill 45 §2
+# explains the geometric intuition and edge cases.
+
+# Tolerance for "ATM" — both short strikes should have |Δ| within
+# this band of 0.50 for the position to qualify as an Iron Butterfly.
+# Above 0.55 or below 0.45 → treat as a broken-wing butterfly or IC
+# variant (rejected here; skill 46 handles BWB in a later phase).
+IB_ATM_DELTA_TOLERANCE: float = 0.10
+
+
+def _pop_from_ib_structure(credit: float, wing_width: float) -> float:
+    """Skill 45 §2.1 — POP for an Iron Butterfly from credit + wing width.
+
+    Returns ``0.0`` when the structure is degenerate (non-positive
+    credit or wing width, or credit ≥ wing width which implies a debit
+    position). Otherwise the profit-zone-to-wing-span ratio, capped at
+    1.0. See skill 45 §2.1 for the derivation.
+
+    >>> _pop_from_ib_structure(credit=1.0, wing_width=5.0)
+    0.4
+    >>> _pop_from_ib_structure(credit=0.5, wing_width=1.0)
+    1.0
+    >>> _pop_from_ib_structure(credit=0.0, wing_width=5.0)
+    0.0
+    """
+    if credit <= 0 or wing_width <= 0 or credit >= wing_width:
+        return 0.0
+    return min(1.0, (2.0 * credit) / wing_width)
+
+
+def _ev_per_dollar_risked_ib(
+    credit: float, wing_width: float,
+) -> Optional[float]:
+    """Skill 45 §2.2 — EV per dollar-at-risk for an Iron Butterfly.
+
+    ``max_profit = credit``, ``max_loss = wing_width − credit`` (both
+    per-share; caller scales by 100 × contracts for dollar terms).
+    Returns ``None`` when the structure is invalid (matches the
+    vertical helper's contract — the caller treats None as reject).
+    """
+    if credit <= 0 or wing_width <= 0 or credit >= wing_width:
+        return None
+    pop = _pop_from_ib_structure(credit, wing_width)
+    max_loss = wing_width - credit
+    ev = pop * credit - (1.0 - pop) * max_loss
+    return ev / max_loss
+
+
+def _score_iron_butterfly(
+    *,
+    credit: float,
+    wing_width: float,
+    short_call_delta: float,
+    short_put_delta: float,
+    dte: int,
+    min_pop: float,
+) -> Optional[Tuple[float, float, float, float]]:
+    """Score an Iron Butterfly candidate. Skill 45 §3.1.
+
+    Returns ``(pop_ib, cw_ratio, ev_per_dollar_risked, annualized_score)``
+    on accept, ``None`` on reject. ``cw_ratio`` here is
+    ``credit / wing_width`` and is included for parity with the vertical
+    scorer's output shape (Streamlit / journal consumers can render
+    "IB C/W ratio" uniformly with "vertical C/W ratio").
+
+    Gates
+    -----
+      * ``dte > 0``
+      * ``credit > 0``, ``wing_width > 0``, ``credit < wing_width``
+      * Both short strikes near ATM (``||Δ_call| − 0.5|`` and
+        ``||Δ_put|  − 0.5| ≤ IB_ATM_DELTA_TOLERANCE``)
+      * ``pop_ib ≥ min_pop``
+      * ``EV per $ risked > 0``
+    """
+    if dte <= 0:
+        return None
+    if credit <= 0 or wing_width <= 0 or credit >= wing_width:
+        return None
+    if abs(abs(short_call_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return None
+    if abs(abs(short_put_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return None
+    pop_ib = _pop_from_ib_structure(credit, wing_width)
+    if pop_ib < min_pop:
+        return None
+    ev = _ev_per_dollar_risked_ib(credit, wing_width)
+    if ev is None or ev <= 0:
+        return None
+    cw_ratio = credit / wing_width
+    annualized = ev * (365.0 / dte)
+    return pop_ib, cw_ratio, ev, annualized
+
+
+def _score_iron_butterfly_with_reason(
+    *,
+    credit: float,
+    wing_width: float,
+    short_call_delta: float,
+    short_put_delta: float,
+    dte: int,
+    min_pop: float,
+    call_wing_width: Optional[float] = None,
+    put_wing_width: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Diagnostic sibling of :func:`_score_iron_butterfly`.
+
+    Always returns a ``{"status": ...}`` dict so the scanner can build
+    a per-cycle reject histogram — same pattern the vertical
+    ``_score_candidate_with_reason`` uses. Keys mirror the vertical
+    version's shape wherever the concept translates: ``pop``,
+    ``cw_ratio``, ``ev``, ``annualized``.
+
+    Extra kwargs ``call_wing_width`` and ``put_wing_width`` let the
+    caller supply per-side widths for the asymmetry check when the
+    chain produced a broken-wing structure by accident. When both are
+    None, we assume symmetric wings equal to ``wing_width``.
+    """
+    if dte <= 0:
+        return {"status": "rejected", "reason": IB_REJECT_DTE_NON_POSITIVE_IB}
+    if wing_width <= 0:
+        return {"status": "rejected", "reason": IB_REJECT_WING_TOO_NARROW}
+    if credit <= 0:
+        return {"status": "rejected", "reason": IB_REJECT_CREDIT_NON_POSITIVE_IB}
+    if credit >= wing_width:
+        return {"status": "rejected", "reason": IB_REJECT_CREDIT_GE_WING}
+    # Asymmetric-wing check (only when caller passed both).
+    if call_wing_width is not None and put_wing_width is not None:
+        if abs(call_wing_width - put_wing_width) > 1e-6:
+            return {
+                "status": "rejected",
+                "reason": IB_REJECT_WINGS_ASYMMETRIC,
+                "call_wing_width": float(call_wing_width),
+                "put_wing_width": float(put_wing_width),
+            }
+    if abs(abs(short_call_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return {
+            "status": "rejected", "reason": IB_REJECT_NOT_ATM_SHORTS,
+            "short_call_delta": float(short_call_delta),
+        }
+    if abs(abs(short_put_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return {
+            "status": "rejected", "reason": IB_REJECT_NOT_ATM_SHORTS,
+            "short_put_delta": float(short_put_delta),
+        }
+    pop_ib = _pop_from_ib_structure(credit, wing_width)
+    cw_ratio = credit / wing_width
+    if pop_ib < min_pop:
+        return {
+            "status": "rejected", "reason": IB_REJECT_POP_BELOW_MIN_IB,
+            "pop": float(pop_ib), "cw_ratio": float(cw_ratio),
+        }
+    ev = _ev_per_dollar_risked_ib(credit, wing_width)
+    if ev is None or ev <= 0:
+        return {
+            "status": "rejected", "reason": IB_REJECT_EV_NON_POSITIVE_IB,
+            "pop": float(pop_ib), "cw_ratio": float(cw_ratio),
+            "ev": float(ev) if ev is not None else 0.0,
+        }
+    return {
+        "status": "accepted",
+        "pop": float(pop_ib),
+        "cw_ratio": float(cw_ratio),
+        "ev": float(ev),
+        "annualized": float(ev * (365.0 / dte)),
+    }
 
 
 def _quote_credit_single(
@@ -626,4 +829,18 @@ __all__ = [
     "REJECT_CW_BELOW_FLOOR",
     "REJECT_EV_NON_POSITIVE",
     "REJECT_LEG_SPREAD_WIDE",
+    # Iron Butterfly scoring (skill 45).
+    "_pop_from_ib_structure",
+    "_ev_per_dollar_risked_ib",
+    "_score_iron_butterfly",
+    "_score_iron_butterfly_with_reason",
+    "IB_ATM_DELTA_TOLERANCE",
+    "IB_REJECT_NOT_ATM_SHORTS",
+    "IB_REJECT_WINGS_ASYMMETRIC",
+    "IB_REJECT_WING_TOO_NARROW",
+    "IB_REJECT_CREDIT_NON_POSITIVE_IB",
+    "IB_REJECT_CREDIT_GE_WING",
+    "IB_REJECT_POP_BELOW_MIN_IB",
+    "IB_REJECT_EV_NON_POSITIVE_IB",
+    "IB_REJECT_DTE_NON_POSITIVE_IB",
 ]
