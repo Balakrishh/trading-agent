@@ -173,6 +173,23 @@ class PresetConfig:
     iron_butterfly_wing_width_pct:     Tuple[float, ...] = (0.020, 0.030, 0.040)
 
     # ------------------------------------------------------------------
+    # Broken-Wing Butterfly (added 2026-07-05 — see skill 46).
+    # Asymmetric-wing IB. Direction inferred from which wing is wider
+    # (put wing wider → bullish; call wing wider → bearish). Same
+    # safety posture as IB: ships DISABLED, backtest first.
+    # ------------------------------------------------------------------
+    broken_wing_butterfly_enabled:     bool  = False
+    # POP floor for BWB — matches IB default; the average-wing POP
+    # normalization keeps the numerics on the same scale as IB.
+    broken_wing_butterfly_min_pop:     float = 0.40
+    # DTE grid — same as IB.
+    broken_wing_butterfly_dte_grid:    Tuple[int, ...] = (21, 30, 45)
+    # Wing-width grids per side. Symmetric grid: caller sweeps put_wing_pct
+    # × call_wing_pct to build asymmetric combinations. Grid entries in
+    # ascending order for readable log output.
+    broken_wing_butterfly_wing_width_pct: Tuple[float, ...] = (0.020, 0.030, 0.040, 0.060)
+
+    # ------------------------------------------------------------------
     # PDT-aware DTE cap (added 2026-05-20 — see skill 33).
     # When the trading account is sub-$25K (FINRA Pattern Day Trader
     # threshold), same-day closes get blocked by Alpaca code 40310100.

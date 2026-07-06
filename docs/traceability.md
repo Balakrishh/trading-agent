@@ -46,8 +46,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 42 | portfolio alert scheduler | portfolio_alert_scheduler.py, telegram_notifier.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_42_portfolio_alert_scheduler.py | — |
 | 44 | position monitor scaling | position_monitor.py | test_backtest/test_sim_position.py, test_position_monitor.py, test_production_readiness.py | conformance/test_skill_44_position_monitor_scaling.py | — |
 | 45 | iron butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_45_iron_butterfly.py | — |
+| 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
 
-**Skills with conformance tests:** 37 / 37 (100%)
+**Skills with conformance tests:** 38 / 38 (100%)
 
 ## Orphan source files
 

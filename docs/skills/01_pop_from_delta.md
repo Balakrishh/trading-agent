@@ -52,4 +52,4 @@ def _pop_from_delta(short_delta: float) -> float:
 
 ---
 
-*Last verified against repo HEAD on 2026-07-05.*
+*Last verified against repo HEAD on 2026-07-06.*

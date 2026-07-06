@@ -285,4 +285,4 @@ self.executor: ExecutionPort = OrderExecutor(
 
 ---
 
-*Last verified against repo HEAD on 2026-07-05.*
+*Last verified against repo HEAD on 2026-07-06.*

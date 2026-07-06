@@ -84,6 +84,20 @@ IB_REJECT_POP_BELOW_MIN_IB   = "ib_pop_below_min"         # 2C/W below iron_butt
 IB_REJECT_EV_NON_POSITIVE_IB = "ib_ev_non_positive"       # POP·max_profit − (1−POP)·max_loss ≤ 0
 IB_REJECT_DTE_NON_POSITIVE_IB = "ib_dte_non_positive"
 
+# ── Broken-Wing Butterfly reject taxonomy (skill 46, 2026-07-05) ──────────
+# BWB is a butterfly with asymmetric wings. Direction is inferred from
+# which wing is wider (put wing wider → bullish bias; call wing wider →
+# bearish). Same 4-leg scaffold as IB with wing_ratio > 1.
+BWB_REJECT_WINGS_EQUAL        = "bwb_wings_equal"          # not asymmetric → use IB
+BWB_REJECT_WING_TOO_NARROW_BWB = "bwb_wing_too_narrow"
+BWB_REJECT_CREDIT_NON_POSITIVE_BWB = "bwb_credit_non_positive"
+BWB_REJECT_CREDIT_GE_MIN_WING = "bwb_credit_ge_min_wing"   # one side has negative max_loss
+BWB_REJECT_NOT_ATM_SHORTS_BWB = "bwb_shorts_not_atm"
+BWB_REJECT_POP_BELOW_MIN_BWB  = "bwb_pop_below_min"
+BWB_REJECT_EV_NON_POSITIVE_BWB = "bwb_ev_non_positive"
+BWB_REJECT_DTE_NON_POSITIVE_BWB = "bwb_dte_non_positive"
+BWB_REJECT_WING_RATIO_OUT_OF_BAND = "bwb_wing_ratio_out_of_band"
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -419,6 +433,218 @@ def _score_iron_butterfly_with_reason(
         "cw_ratio": float(cw_ratio),
         "ev": float(ev),
         "annualized": float(ev * (365.0 / dte)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Broken-Wing Butterfly scoring — skill 46.
+# ---------------------------------------------------------------------------
+# Structurally an Iron Butterfly with asymmetric wings. Same 4-leg
+# scaffold: both shorts at ATM strike K, but the long wings sit at
+# K − W_put and K + W_call where W_put ≠ W_call. Direction is inferred:
+#
+#   W_put > W_call   → put wing wider → BULLISH bias
+#                       (worst-case loss to the downside is bigger, so
+#                        the position wants underlying to stay near K
+#                        or drift up)
+#   W_call > W_put   → call wing wider → BEARISH bias
+#
+# POP approximation — profit zone [K − C, K + C] normalized by the
+# average wing width:
+#
+#   POP_BWB = min(1.0, 4·C / (W_put + W_call))
+#
+# EV per share (equal-probability side split):
+#
+#   EV = POP·C − ((1 − POP)/2)·(W_put + W_call − 2·C)
+#
+# EV per $ risked normalizes by the WORST-CASE max_loss:
+#
+#   EV/$risked = EV / max(W_put, W_call − C)
+#
+# The equal-probability split is a simplification — in reality the
+# wider wing has a lower probability of being hit. But at the ranking
+# level (which is what the scanner uses) this is close enough that
+# the candidate ordering matches the more expensive lognormal integral
+# for typical wing_ratios (1.2 to 3.0).
+
+BWB_WING_RATIO_MIN: float = 1.20   # below this → indistinguishable from IB
+BWB_WING_RATIO_MAX: float = 3.00   # above this → one wing is degenerate
+
+
+def _bwb_direction(put_wing: float, call_wing: float) -> str:
+    """Return 'bullish' (put wing wider) or 'bearish' (call wing wider).
+    Returns 'symmetric' when they're equal — the caller should reject
+    with ``BWB_REJECT_WINGS_EQUAL`` in that case."""
+    if put_wing > call_wing:
+        return "bullish"
+    if call_wing > put_wing:
+        return "bearish"
+    return "symmetric"
+
+
+def _pop_from_bwb_structure(
+    credit: float, put_wing: float, call_wing: float,
+) -> float:
+    """Skill 46 §2.1 — POP for a Broken-Wing Butterfly.
+
+    Uses the average-wing normalization:
+    ``POP = min(1.0, 4·C / (W_put + W_call))``. Returns 0.0 when the
+    structure is degenerate.
+
+    >>> _pop_from_bwb_structure(credit=1.0, put_wing=8.0, call_wing=4.0)
+    0.6666666666666666
+    """
+    if credit <= 0 or put_wing <= 0 or call_wing <= 0:
+        return 0.0
+    if credit >= min(put_wing, call_wing):
+        return 0.0
+    total_wing = put_wing + call_wing
+    return min(1.0, (4.0 * credit) / total_wing)
+
+
+def _ev_per_dollar_risked_bwb(
+    credit: float, put_wing: float, call_wing: float,
+) -> Optional[float]:
+    """Skill 46 §2.2 — EV per dollar-at-risk for a BWB.
+
+    ``max_loss = max(put_wing, call_wing) − credit`` — the worst-case
+    loss is on the wider-wing side. Returns None when the structure
+    is invalid.
+    """
+    if credit <= 0 or put_wing <= 0 or call_wing <= 0:
+        return None
+    if credit >= min(put_wing, call_wing):
+        return None
+    pop = _pop_from_bwb_structure(credit, put_wing, call_wing)
+    # EV per share, equal-probability split of the (1-POP) loss mass
+    # across the two sides.
+    ev_per_share = pop * credit - (
+        (1.0 - pop) / 2.0
+    ) * (put_wing + call_wing - 2.0 * credit)
+    max_loss_worst = max(put_wing, call_wing) - credit
+    if max_loss_worst <= 0:
+        return None
+    return ev_per_share / max_loss_worst
+
+
+def _score_broken_wing_butterfly(
+    *,
+    credit: float,
+    put_wing: float,
+    call_wing: float,
+    short_call_delta: float,
+    short_put_delta: float,
+    dte: int,
+    min_pop: float,
+) -> Optional[Tuple[str, float, float, float, float]]:
+    """Score a BWB candidate. Skill 46 §3.1.
+
+    Returns ``(direction, pop, cw_ratio, ev_per_$risked, annualized)``
+    on accept — direction is ``"bullish"`` or ``"bearish"`` inferred
+    from which wing is wider. Returns None on reject.
+
+    Gates
+    -----
+    * ``dte > 0``
+    * ``put_wing, call_wing > 0``
+    * Wings must differ (``put_wing != call_wing``) — symmetric wings
+      are Iron Butterfly (skill 45), not BWB.
+    * Wing ratio ``max/min`` in ``[BWB_WING_RATIO_MIN, BWB_WING_RATIO_MAX]``.
+    * ``credit > 0`` and ``credit < min(put_wing, call_wing)`` — the
+      narrower wing must still be wide enough to leave positive max_loss.
+    * Both shorts near ATM (``|Δ|`` in ``[0.5 ± IB_ATM_DELTA_TOLERANCE]``).
+      Reuses the IB tolerance since ATM detection is identical.
+    * ``pop ≥ min_pop`` and ``EV > 0``.
+    """
+    if dte <= 0:
+        return None
+    if put_wing <= 0 or call_wing <= 0:
+        return None
+    direction = _bwb_direction(put_wing, call_wing)
+    if direction == "symmetric":
+        return None
+    ratio = max(put_wing, call_wing) / min(put_wing, call_wing)
+    if not (BWB_WING_RATIO_MIN <= ratio <= BWB_WING_RATIO_MAX):
+        return None
+    if credit <= 0 or credit >= min(put_wing, call_wing):
+        return None
+    if abs(abs(short_call_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return None
+    if abs(abs(short_put_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return None
+    pop_bwb = _pop_from_bwb_structure(credit, put_wing, call_wing)
+    if pop_bwb < min_pop:
+        return None
+    ev = _ev_per_dollar_risked_bwb(credit, put_wing, call_wing)
+    if ev is None or ev <= 0:
+        return None
+    # C/W ratio uses the average wing width (analogous to IB's C/W).
+    cw_ratio = credit / ((put_wing + call_wing) / 2.0)
+    annualized = ev * (365.0 / dte)
+    return direction, pop_bwb, cw_ratio, ev, annualized
+
+
+def _score_broken_wing_butterfly_with_reason(
+    *,
+    credit: float,
+    put_wing: float,
+    call_wing: float,
+    short_call_delta: float,
+    short_put_delta: float,
+    dte: int,
+    min_pop: float,
+) -> Dict[str, Any]:
+    """Diagnostic sibling of :func:`_score_broken_wing_butterfly`.
+
+    Always returns a ``{"status": ...}`` dict so the scanner can build
+    a per-cycle reject histogram — same pattern as the IB verbose
+    scorer.
+    """
+    if dte <= 0:
+        return {"status": "rejected", "reason": BWB_REJECT_DTE_NON_POSITIVE_BWB}
+    if put_wing <= 0 or call_wing <= 0:
+        return {"status": "rejected", "reason": BWB_REJECT_WING_TOO_NARROW_BWB}
+    direction = _bwb_direction(put_wing, call_wing)
+    if direction == "symmetric":
+        return {"status": "rejected", "reason": BWB_REJECT_WINGS_EQUAL}
+    ratio = max(put_wing, call_wing) / min(put_wing, call_wing)
+    if not (BWB_WING_RATIO_MIN <= ratio <= BWB_WING_RATIO_MAX):
+        return {
+            "status": "rejected", "reason": BWB_REJECT_WING_RATIO_OUT_OF_BAND,
+            "wing_ratio": float(ratio),
+        }
+    if credit <= 0:
+        return {"status": "rejected",
+                "reason": BWB_REJECT_CREDIT_NON_POSITIVE_BWB}
+    if credit >= min(put_wing, call_wing):
+        return {"status": "rejected", "reason": BWB_REJECT_CREDIT_GE_MIN_WING,
+                "credit": float(credit),
+                "min_wing": float(min(put_wing, call_wing))}
+    if abs(abs(short_call_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return {"status": "rejected", "reason": BWB_REJECT_NOT_ATM_SHORTS_BWB,
+                "short_call_delta": float(short_call_delta)}
+    if abs(abs(short_put_delta) - 0.5) > IB_ATM_DELTA_TOLERANCE:
+        return {"status": "rejected", "reason": BWB_REJECT_NOT_ATM_SHORTS_BWB,
+                "short_put_delta": float(short_put_delta)}
+    pop_bwb = _pop_from_bwb_structure(credit, put_wing, call_wing)
+    cw_ratio = credit / ((put_wing + call_wing) / 2.0)
+    if pop_bwb < min_pop:
+        return {"status": "rejected", "reason": BWB_REJECT_POP_BELOW_MIN_BWB,
+                "pop": float(pop_bwb), "cw_ratio": float(cw_ratio)}
+    ev = _ev_per_dollar_risked_bwb(credit, put_wing, call_wing)
+    if ev is None or ev <= 0:
+        return {"status": "rejected", "reason": BWB_REJECT_EV_NON_POSITIVE_BWB,
+                "pop": float(pop_bwb), "cw_ratio": float(cw_ratio),
+                "ev": float(ev) if ev is not None else 0.0}
+    return {
+        "status": "accepted",
+        "direction": direction,
+        "pop": float(pop_bwb),
+        "cw_ratio": float(cw_ratio),
+        "ev": float(ev),
+        "annualized": float(ev * (365.0 / dte)),
+        "wing_ratio": float(ratio),
     }
 
 
@@ -894,4 +1120,21 @@ __all__ = [
     "IB_REJECT_EV_NON_POSITIVE_IB",
     "IB_REJECT_DTE_NON_POSITIVE_IB",
     "IronButterflyCandidate",
+    # Broken-Wing Butterfly scoring (skill 46).
+    "_bwb_direction",
+    "_pop_from_bwb_structure",
+    "_ev_per_dollar_risked_bwb",
+    "_score_broken_wing_butterfly",
+    "_score_broken_wing_butterfly_with_reason",
+    "BWB_WING_RATIO_MIN",
+    "BWB_WING_RATIO_MAX",
+    "BWB_REJECT_WINGS_EQUAL",
+    "BWB_REJECT_WING_TOO_NARROW_BWB",
+    "BWB_REJECT_CREDIT_NON_POSITIVE_BWB",
+    "BWB_REJECT_CREDIT_GE_MIN_WING",
+    "BWB_REJECT_NOT_ATM_SHORTS_BWB",
+    "BWB_REJECT_POP_BELOW_MIN_BWB",
+    "BWB_REJECT_EV_NON_POSITIVE_BWB",
+    "BWB_REJECT_DTE_NON_POSITIVE_BWB",
+    "BWB_REJECT_WING_RATIO_OUT_OF_BAND",
 ]
