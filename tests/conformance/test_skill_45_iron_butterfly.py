@@ -241,6 +241,99 @@ def test_scorer_lives_in_chain_scanner():
 # PresetConfig knobs are wired
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# §3 — decide_iron_butterfly orchestrator (Phase 1.5)
+# ---------------------------------------------------------------------------
+
+def _make_ib_chain(spot: float = 100.0):
+    """Synthetic chain with an ATM strike + one wing on each side.
+
+    Wing prices are cheap enough that net credit > W/3 (the algebraic
+    threshold for positive EV under POP ≈ 2C/W). See skill 45 §2.2 for
+    the derivation.
+    """
+    # 100 strike (ATM), 95 put wing, 105 call wing.
+    return [
+        {"symbol": "TEST100C", "strike": 100.0, "type": "call",
+         "delta": 0.50, "bid": 1.20, "ask": 1.30, "dte": 30},
+        {"symbol": "TEST100P", "strike": 100.0, "type": "put",
+         "delta": -0.50, "bid": 1.20, "ask": 1.30, "dte": 30},
+        {"symbol": "TEST105C", "strike": 105.0, "type": "call",
+         "delta": 0.30, "bid": 0.15, "ask": 0.25, "dte": 30},
+        {"symbol": "TEST95P", "strike": 95.0, "type": "put",
+         "delta": -0.30, "bid": 0.15, "ask": 0.25, "dte": 30},
+    ]
+
+
+class _StubPreset:
+    iron_butterfly_dte_grid = (30,)
+    iron_butterfly_wing_width_pct = (0.05,)   # 5% → wing = $5 on $100 spot
+    iron_butterfly_min_pop = 0.20             # loose so synthetic passes
+
+
+def test_decide_iron_butterfly_produces_candidate():
+    """Skill 45 §3 — a valid ATM structure produces an accepted candidate."""
+    from trading_agent.chain_scanner import IronButterflyCandidate
+    from trading_agent.decision_engine import (
+        ChainSlice,
+        DecisionInput,
+        decide_iron_butterfly,
+    )
+
+    slc = ChainSlice(expiration="2026-08-01", dte=30,
+                     contracts=_make_ib_chain())
+    inp = DecisionInput(side="iron_butterfly", chain_slices=[slc],
+                        preset=_StubPreset())
+    out = decide_iron_butterfly(inp)
+    assert len(out.candidates) == 1
+    c = out.candidates[0]
+    assert isinstance(c, IronButterflyCandidate)
+    assert c.strategy == "iron_butterfly"
+    assert c.center_strike == 100.0
+    assert c.wing_width == 5.0
+    # Credit: mid(100C) + mid(100P) - mid(105C) - mid(95P)
+    #       = 1.25 + 1.25 - 0.20 - 0.20 = 2.10
+    assert c.credit == pytest.approx(2.10, abs=0.02)
+    assert c.max_profit == pytest.approx(c.credit)
+    assert c.max_loss == pytest.approx(5.0 - c.credit, abs=0.02)
+
+
+def test_decide_iron_butterfly_empty_chain_produces_no_candidate():
+    from trading_agent.decision_engine import (
+        ChainSlice,
+        DecisionInput,
+        decide_iron_butterfly,
+    )
+    inp = DecisionInput(
+        side="iron_butterfly",
+        chain_slices=[ChainSlice(expiration="2026-08-01", dte=30, contracts=[])],
+        preset=_StubPreset(),
+    )
+    out = decide_iron_butterfly(inp)
+    assert out.candidates == []
+
+
+def test_decide_iron_butterfly_sorts_by_annualized_score():
+    """Multiple accepted candidates come back highest-annualized first."""
+    from trading_agent.decision_engine import (
+        ChainSlice,
+        DecisionInput,
+        decide_iron_butterfly,
+    )
+    # Two DTE slices: 30d and 60d. The shorter DTE has higher annualized score
+    # for the same EV/$risked ratio, so 30d should win.
+    slc_30 = ChainSlice(expiration="2026-08-01", dte=30,
+                        contracts=_make_ib_chain())
+    slc_60 = ChainSlice(expiration="2026-09-01", dte=60,
+                        contracts=_make_ib_chain())
+    inp = DecisionInput(side="iron_butterfly",
+                        chain_slices=[slc_60, slc_30],
+                        preset=_StubPreset())
+    out = decide_iron_butterfly(inp)
+    assert len(out.candidates) >= 2
+    assert out.candidates[0].dte == 30    # higher annualized wins
+
+
 def test_preset_config_iron_butterfly_defaults():
     """New knobs default safely — enabled=False, sane grids."""
     from trading_agent.strategy_presets import PresetConfig

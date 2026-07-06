@@ -51,6 +51,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from trading_agent.chain_scanner import (
+    IB_REJECT_CREDIT_GE_WING,
+    IB_REJECT_CREDIT_NON_POSITIVE_IB,
+    IB_REJECT_EV_NON_POSITIVE_IB,
+    IB_REJECT_NOT_ATM_SHORTS,
+    IB_REJECT_POP_BELOW_MIN_IB,
+    IB_REJECT_WING_TOO_NARROW,
+    IB_REJECT_WINGS_ASYMMETRIC,
     REJECT_CW_BELOW_FLOOR,
     REJECT_LEG_SPREAD_WIDE,
     REJECT_NO_CHAIN,
@@ -58,6 +65,7 @@ from trading_agent.chain_scanner import (
     REJECT_NO_SHORT_CONTRACT,
     REJECT_NON_POSITIVE_WIDTH,
     ChainScanner,
+    IronButterflyCandidate,
     ScanDiagnostics,
     SpreadCandidate,
     _leg_spread_too_wide,
@@ -65,6 +73,7 @@ from trading_agent.chain_scanner import (
     _quote_credit,
     _quote_credit_single,
     _score_candidate_with_reason,
+    _score_iron_butterfly_with_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -289,6 +298,187 @@ def decide(inp: DecisionInput, *, max_candidates: int = 10) -> DecisionOutput:
 
 
 # ---------------------------------------------------------------------------
+# Iron Butterfly orchestration — skill 45 §3, Phase 1.5.
+# ---------------------------------------------------------------------------
+# The vertical scanner sweeps a (Δ, DTE, width) grid. IB is different:
+# both shorts sit at the same ATM strike, so the grid collapses to
+# (DTE × wing_width). This function is the IB analogue of ``decide()``
+# above — same DecisionOutput shape so consumers (backtester, journal,
+# dashboard) can render candidates uniformly.
+#
+# LIVE-CYCLE GATE: This function is a pure orchestrator. Nothing calls
+# it from the live agent yet — that wiring is future work, gated by
+# ``PresetConfig.iron_butterfly_enabled``. Backtester consumers can
+# invoke it directly for edge measurement.
+
+
+@dataclass
+class IronButterflyDecisionOutput:
+    """Iron Butterfly analogue of ``DecisionOutput``. Same shape/contract
+    so callers can dispatch uniformly on ``strategy`` field."""
+    candidates:  List[IronButterflyCandidate] = field(default_factory=list)
+    diagnostics: ScanDiagnostics = field(
+        default_factory=lambda: ScanDiagnostics(grid_points_total=0)
+    )
+
+
+def decide_iron_butterfly(
+    inp: DecisionInput, *, max_candidates: int = 5,
+) -> IronButterflyDecisionOutput:
+    """Iron Butterfly scanner — skill 45 §3.
+
+    Sweeps (DTE × wing_width) rather than (DTE × Δ × width). For each
+    ChainSlice:
+
+      1. Infer the ATM strike from |Δ|≈0.5 (via ``_infer_spot_proxy``).
+      2. For each wing_width in the preset grid:
+         - Find the short call + short put at the ATM strike.
+         - Find long call at ATM + wing, long put at ATM − wing.
+         - Compute credit from the four leg mids.
+         - Score via ``_score_iron_butterfly_with_reason``.
+      3. Rank accepted candidates by ``annualized_score``, truncate.
+
+    Diagnostics block populated even when zero candidates accept, so
+    the operator can see the per-reject-reason histogram.
+    """
+    preset = inp.preset
+    dte_grid = tuple(getattr(preset, "iron_butterfly_dte_grid", (21, 30, 45)))
+    wing_grid = tuple(getattr(preset, "iron_butterfly_wing_width_pct",
+                              (0.020, 0.030, 0.040)))
+    min_pop = float(getattr(preset, "iron_butterfly_min_pop", 0.40))
+
+    n_dte = len(inp.chain_slices)
+    n_wing = len(wing_grid)
+    diag = ScanDiagnostics(
+        grid_points_total=max(1, len(dte_grid)) * n_wing,
+        expirations_resolved=n_dte,
+    )
+
+    candidates: List[IronButterflyCandidate] = []
+
+    for slc in inp.chain_slices:
+        chain = slc.contracts
+        if not chain:
+            diag.record(REJECT_NO_CHAIN, n_wing)
+            continue
+
+        # Find ATM strike + the two ATM shorts (call + put).
+        atm_strike = ChainScanner._infer_spot_proxy(chain)
+        short_call = _find_closest_delta(chain, 0.50, prefer_type="call")
+        short_put = _find_closest_delta(chain, -0.50, prefer_type="put")
+        if short_call is None or short_put is None:
+            diag.record(IB_REJECT_NOT_ATM_SHORTS, n_wing)
+            continue
+
+        grid_step = ChainScanner._infer_grid_step(chain)
+
+        for width_pct in wing_grid:
+            raw_wing = float(width_pct) * atm_strike
+            wing = ChainScanner._snap_width_to_grid(raw_wing, grid_step)
+            if wing <= 0:
+                diag.record(IB_REJECT_WING_TOO_NARROW)
+                continue
+
+            long_call = ChainScanner._find_strike(
+                chain, float(short_call["strike"]) + wing,
+            )
+            long_put = ChainScanner._find_strike(
+                chain, float(short_put["strike"]) - wing,
+            )
+            if long_call is None or long_put is None:
+                diag.record(REJECT_NO_LONG_CONTRACT)
+                continue
+
+            # Compute per-share credit: shorts collect mid, longs pay mid.
+            credit = (
+                _mid(short_call) + _mid(short_put)
+                - _mid(long_call) - _mid(long_put)
+            )
+            credit = round(max(0.0, credit), 2)
+
+            result = _score_iron_butterfly_with_reason(
+                credit=credit,
+                wing_width=wing,
+                short_call_delta=float(short_call.get("delta", 0.0)),
+                short_put_delta=float(short_put.get("delta", 0.0)),
+                dte=slc.dte,
+                min_pop=min_pop,
+            )
+            diag.grid_points_priced += 1
+            if result["status"] == "rejected":
+                diag.record(result["reason"])
+                continue
+
+            candidates.append(IronButterflyCandidate(
+                expiration=slc.expiration,
+                dte=slc.dte,
+                center_strike=float(short_call["strike"]),
+                wing_width=wing,
+                long_put_strike=float(long_put["strike"]),
+                short_put_strike=float(short_put["strike"]),
+                short_call_strike=float(short_call["strike"]),
+                long_call_strike=float(long_call["strike"]),
+                long_put_symbol=str(long_put.get("symbol", "")),
+                short_put_symbol=str(short_put.get("symbol", "")),
+                short_call_symbol=str(short_call.get("symbol", "")),
+                long_call_symbol=str(long_call.get("symbol", "")),
+                short_call_delta=float(short_call.get("delta", 0.0)),
+                short_put_delta=float(short_put.get("delta", 0.0)),
+                credit=credit,
+                max_profit=credit,
+                max_loss=round(wing - credit, 2),
+                pop=float(result["pop"]),
+                cw_ratio=float(result["cw_ratio"]),
+                ev_per_dollar_risked=float(result["ev"]),
+                annualized_score=float(result["annualized"]),
+                width_pct=float(width_pct),
+            ))
+
+    candidates.sort(
+        key=lambda c: (c.annualized_score, c.credit),
+        reverse=True,
+    )
+    return IronButterflyDecisionOutput(
+        candidates=candidates[:max_candidates],
+        diagnostics=diag,
+    )
+
+
+def _mid(contract: Dict[str, Any]) -> float:
+    """NBBO mid of a single option contract."""
+    bid = float(contract.get("bid", 0) or 0)
+    ask = float(contract.get("ask", 0) or 0)
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2.0
+    return bid   # conservative fallback
+
+
+def _find_closest_delta(
+    chain: List[Dict[str, Any]],
+    target_delta: float,
+    *,
+    prefer_type: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the contract whose (signed) delta is closest to
+    ``target_delta``. When ``prefer_type`` is set ("call" or "put"),
+    limits the candidate pool to that type; otherwise picks across
+    all contracts. Returns None if no priceable contract found.
+    """
+    def _priceable(c):
+        return (c.get("delta") not in (None, 0)
+                and float(c.get("bid", 0) or 0) > 0)
+
+    pool = [c for c in chain if _priceable(c)]
+    if prefer_type is not None:
+        pool = [c for c in pool
+                if str(c.get("type", "")).lower().startswith(prefer_type[0])]
+    if not pool:
+        return None
+    pool.sort(key=lambda c: abs(float(c["delta"]) - target_delta))
+    return pool[0]
+
+
+# ---------------------------------------------------------------------------
 # Long-term covered-call scoring — skill 40.
 # ---------------------------------------------------------------------------
 # The CI invariant scanner (scripts/checks/scan_invariant_check.py) blocks
@@ -440,6 +630,9 @@ __all__ = [
     "DecisionInput",
     "DecisionOutput",
     "decide",
+    # Iron Butterfly orchestrator (skill 45 §3)
+    "IronButterflyDecisionOutput",
+    "decide_iron_butterfly",
     # Long-term evaluator helpers (skill 40)
     "_score_covered_call",
     "_score_covered_call_with_reason",

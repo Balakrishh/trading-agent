@@ -116,7 +116,44 @@ def _score_iron_butterfly(
 
 Same output-shape contract as the vertical scorer's siblings — return None on reject, tuple on accept, with the reject-reason string returned by the `_with_reason` verbose variant. Consumer code that already handles vertical candidates can treat IB candidates identically at the tuple level; only the reject taxonomy is IB-specific.
 
-### 3.4 PresetConfig knobs
+### 3.4 Orchestrator — `decide_iron_butterfly()`
+
+Phase 1.5 wire-up: the IB analogue of the vertical `decide()`. Sweeps `(DTE × wing_width)` (not the vertical `Δ × DTE × width`), ranks candidates, returns the top-N.
+
+```python
+# trading_agent/decision_engine.py
+def decide_iron_butterfly(
+    inp: DecisionInput, *, max_candidates: int = 5,
+) -> IronButterflyDecisionOutput:
+```
+
+Per-slice algorithm:
+
+1. Infer ATM strike from `|Δ|≈0.5` via `ChainScanner._infer_spot_proxy`.
+2. Find short call + short put nearest ATM using `_find_closest_delta` (call/put-typed).
+3. For each `wing_width_pct` in the grid, snap raw wing to strike step, locate long call/put at `ATM ± wing`.
+4. Compute per-share credit = `mid(short_call) + mid(short_put) − mid(long_call) − mid(long_put)`.
+5. Score via `_score_iron_butterfly_with_reason`; on accept, package as `IronButterflyCandidate`.
+6. Sort accepted candidates by `annualized_score desc`, truncate to `max_candidates`.
+
+Returns `IronButterflyDecisionOutput(candidates, diagnostics)` — same shape as `DecisionOutput` so backtester / journal / dashboard code can dispatch uniformly on the `strategy` field.
+
+### 3.5 `IronButterflyCandidate` dataclass
+
+```python
+# trading_agent/chain_scanner.py
+@dataclass
+class IronButterflyCandidate:
+    strategy:            str = "iron_butterfly"
+    expiration:          str = ""
+    dte:                 int = 0
+    center_strike:       float = 0.0
+    wing_width:          float = 0.0
+```
+
+Full field set includes the four leg strikes + symbols, both short deltas, credit / max_profit / max_loss, POP, C/W ratio, EV/$risked, annualized_score, and width_pct. `.to_journal_dict()` rounds every float to 4 decimal places for compact journal rows.
+
+### 3.6 PresetConfig knobs
 
 ```python
 # trading_agent/strategy_presets.py — PresetConfig additions
@@ -150,4 +187,4 @@ iron_butterfly_wing_width_pct:     Tuple[float, ...] = (0.020, 0.030, 0.040)
 
 ---
 
-*Last verified against repo HEAD on 2026-07-02.*
+*Last verified against repo HEAD on 2026-07-05.*

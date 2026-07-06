@@ -90,6 +90,56 @@ IB_REJECT_DTE_NON_POSITIVE_IB = "ib_dte_non_positive"
 # ---------------------------------------------------------------------------
 
 @dataclass
+class IronButterflyCandidate:
+    """One scored Iron Butterfly candidate from the IB scanner.
+
+    Skill 45 §3 — the 4-leg IB analogue of ``SpreadCandidate``. Both
+    shorts sit at the same ATM ``center_strike``; both long wings are
+    ``wing_width`` away. Journal/dashboard consumers can uniformly
+    render candidates from either strategy by sniffing the
+    ``strategy`` field.
+    """
+
+    strategy:            str = "iron_butterfly"   # sniffable stringly-typed tag
+    expiration:          str = ""
+    dte:                 int = 0
+    center_strike:       float = 0.0    # both shorts sit here (ATM)
+    wing_width:          float = 0.0    # equal on both sides
+    long_put_strike:     float = 0.0
+    short_put_strike:    float = 0.0    # == center_strike
+    short_call_strike:   float = 0.0    # == center_strike
+    long_call_strike:    float = 0.0
+    long_put_symbol:     str = ""
+    short_put_symbol:    str = ""
+    short_call_symbol:   str = ""
+    long_call_symbol:    str = ""
+    short_call_delta:    float = 0.0
+    short_put_delta:     float = 0.0
+    credit:              float = 0.0    # net credit per share
+    max_profit:          float = 0.0    # == credit
+    max_loss:            float = 0.0    # == wing_width − credit
+    pop:                 float = 0.0    # skill 45 §2.1
+    cw_ratio:            float = 0.0    # credit / wing_width
+    ev_per_dollar_risked: float = 0.0
+    annualized_score:    float = 0.0
+    width_pct:           float = 0.0    # grid width fraction that produced this row
+
+    def to_journal_dict(self) -> Dict:
+        d = asdict(self)
+        for k in (
+            "center_strike", "wing_width",
+            "long_put_strike", "short_put_strike",
+            "short_call_strike", "long_call_strike",
+            "short_call_delta", "short_put_delta",
+            "credit", "max_profit", "max_loss",
+            "pop", "cw_ratio",
+            "ev_per_dollar_risked", "annualized_score", "width_pct",
+        ):
+            d[k] = round(float(d[k]), 4)
+        return d
+
+
+@dataclass
 class SpreadCandidate:
     """One scored candidate spread from the scanner."""
 
@@ -843,4 +893,5 @@ __all__ = [
     "IB_REJECT_POP_BELOW_MIN_IB",
     "IB_REJECT_EV_NON_POSITIVE_IB",
     "IB_REJECT_DTE_NON_POSITIVE_IB",
+    "IronButterflyCandidate",
 ]
