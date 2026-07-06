@@ -328,6 +328,29 @@ class StrategyPlanner:
             return self._plan_bear_call(ticker, analysis, expiration)
         else:
             expiration = self._pick_expiration(self.KIND_IRON_CONDOR)
+            # Skill 45 §5 — try Iron Butterfly first when the preset
+            # opts in. Iron Butterfly collects ~2× the credit of an IC
+            # at the same DTE (both shorts ATM instead of OTM). When
+            # the market underprices vertical/IC candidates the IB
+            # scorer can still find edge. If no positive-EV IB
+            # candidate exists, we fall back to the existing IC path
+            # so the SIDEWAYS branch never returns empty when IC would
+            # have worked.
+            if getattr(self.preset, "iron_butterfly_enabled", False):
+                logger.info(
+                    "[%s] Planning Iron Butterfly (opt-in), expiration %s",
+                    ticker, expiration,
+                )
+                ib_plan = self._plan_iron_butterfly(
+                    ticker, analysis, expiration,
+                )
+                if ib_plan.valid:
+                    return ib_plan
+                logger.info(
+                    "[%s] Iron Butterfly rejected (%s) — falling back to IC",
+                    ticker,
+                    getattr(ib_plan, "rejection_reason", "no candidate"),
+                )
             logger.info("[%s] Planning Iron Condor, expiration %s",
                         ticker, expiration)
             return self._plan_iron_condor(ticker, analysis, expiration)
@@ -493,6 +516,113 @@ class StrategyPlanner:
                 f"Credit-to-width ratio {ratio:.4f} < minimum {self.min_credit_ratio}")
 
         return plan
+
+    def _plan_iron_butterfly(self, ticker: str, analysis: RegimeAnalysis,
+                              expiration: str) -> SpreadPlan:
+        """Skill 45 §3.4 — Iron Butterfly planner.
+
+        Fetches put + call chains, tags each contract with its ``type``,
+        merges into a single ChainSlice, and delegates to
+        ``decide_iron_butterfly``. Converts the winning
+        ``IronButterflyCandidate`` into a ``SpreadPlan`` with the four
+        legs in the exact shape the executor expects.
+
+        Returns an empty plan (``valid=False``) when the decision engine
+        finds no positive-EV candidate — the caller (``plan_trade``)
+        then falls back to Iron Condor.
+        """
+        from trading_agent.chain_scanner import IronButterflyCandidate
+        from trading_agent.decision_engine import (
+            ChainSlice,
+            DecisionInput,
+            decide_iron_butterfly,
+        )
+
+        put_contracts = self.data.fetch_option_chain(ticker, expiration, "put")
+        call_contracts = self.data.fetch_option_chain(ticker, expiration, "call")
+        if not put_contracts or not call_contracts:
+            return self._empty_plan(ticker, "Iron Butterfly", analysis,
+                                     expiration, "Option chain unavailable")
+
+        # Tag each contract with its type so _find_closest_delta can
+        # filter, and add mid pricing since existing helpers expect it.
+        chain: List[Dict] = []
+        for c in put_contracts:
+            entry = dict(c)
+            entry["type"] = "put"
+            entry.setdefault("mid", (entry.get("bid", 0) + entry.get("ask", 0)) / 2.0)
+            chain.append(entry)
+        for c in call_contracts:
+            entry = dict(c)
+            entry["type"] = "call"
+            entry.setdefault("mid", (entry.get("bid", 0) + entry.get("ask", 0)) / 2.0)
+            chain.append(entry)
+
+        # Compute DTE from expiration string (YYYY-MM-DD).
+        try:
+            from datetime import date as _date
+            exp_date = _date.fromisoformat(expiration)
+            dte = max(1, (exp_date - _date.today()).days)
+        except Exception:
+            dte = 21   # defensive fallback matches typical IB grid entry
+
+        slc = ChainSlice(expiration=expiration, dte=dte, contracts=chain)
+        inp = DecisionInput(side="iron_butterfly", chain_slices=[slc],
+                            preset=self.preset)
+        out = decide_iron_butterfly(inp, max_candidates=1)
+
+        if not out.candidates:
+            return self._empty_plan(
+                ticker, "Iron Butterfly", analysis, expiration,
+                "Iron Butterfly: no positive-EV candidate found",
+            )
+
+        winner: IronButterflyCandidate = out.candidates[0]
+        # Reconstruct leg dicts from chain by symbol.
+        def _by_symbol(sym: str) -> Optional[Dict]:
+            for c in chain:
+                if c.get("symbol") == sym:
+                    return c
+            return None
+
+        legs_source = {
+            "sell_put": _by_symbol(winner.short_put_symbol),
+            "buy_put":  _by_symbol(winner.long_put_symbol),
+            "sell_call": _by_symbol(winner.short_call_symbol),
+            "buy_call":  _by_symbol(winner.long_call_symbol),
+        }
+        if any(v is None for v in legs_source.values()):
+            return self._empty_plan(
+                ticker, "Iron Butterfly", analysis, expiration,
+                "Iron Butterfly: winner legs not resolvable in chain",
+            )
+
+        legs = [
+            self._make_leg(legs_source["sell_put"],  "sell", "put"),
+            self._make_leg(legs_source["buy_put"],   "buy",  "put"),
+            self._make_leg(legs_source["sell_call"], "sell", "call"),
+            self._make_leg(legs_source["buy_call"],  "buy",  "call"),
+        ]
+
+        # max_loss per contract in dollar terms (skill 44 §1 — the
+        # position monitor scales this by contracts_open at exit time).
+        max_loss_dollars = round(winner.max_loss * 100, 2)
+        reasoning = (
+            f"Iron Butterfly ATM at {winner.center_strike:g}. "
+            f"Wings ±{winner.wing_width:g}. "
+            f"Credit ${winner.credit:.2f}/share, POP {winner.pop*100:.0f}%, "
+            f"EV/$risked {winner.ev_per_dollar_risked:.3f}, "
+            f"annualized {winner.annualized_score:.3f}."
+        )
+        return SpreadPlan(
+            ticker=ticker, strategy_name="Iron Butterfly",
+            regime=analysis.regime.value, legs=legs,
+            spread_width=winner.wing_width,
+            net_credit=winner.credit,
+            max_loss=max_loss_dollars,
+            credit_to_width_ratio=winner.cw_ratio,
+            expiration=expiration, reasoning=reasoning,
+        )
 
     # ------------------------------------------------------------------
     # Helpers

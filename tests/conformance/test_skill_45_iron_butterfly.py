@@ -334,6 +334,29 @@ def test_decide_iron_butterfly_sorts_by_annualized_score():
     assert out.candidates[0].dte == 30    # higher annualized wins
 
 
+# ---------------------------------------------------------------------------
+# §5 — strategy.py dispatch wiring
+# ---------------------------------------------------------------------------
+
+def test_strategy_planner_has_plan_iron_butterfly_method():
+    """Skill 45 §5 — StrategyPlanner class must expose
+    _plan_iron_butterfly for the sideways-regime dispatch path."""
+    from trading_agent.strategy import StrategyPlanner
+    assert hasattr(StrategyPlanner, "_plan_iron_butterfly")
+
+
+def test_strategy_dispatch_reads_iron_butterfly_enabled_flag():
+    """The sideways-regime branch of Strategy.plan_trade must gate
+    the IB attempt on preset.iron_butterfly_enabled. Grep the source
+    to confirm the flag consult exists near the IC branch."""
+    from trading_agent import strategy
+    src = open(strategy.__file__).read()
+    assert "iron_butterfly_enabled" in src
+    # And the fallback to IC must still be present so a rejected IB
+    # doesn't leave the sideways regime unhandled.
+    assert "_plan_iron_condor" in src
+
+
 def test_preset_config_iron_butterfly_defaults():
     """New knobs default safely — enabled=False, sane grids."""
     from trading_agent.strategy_presets import PresetConfig

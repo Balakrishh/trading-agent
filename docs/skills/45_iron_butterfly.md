@@ -177,7 +177,37 @@ iron_butterfly_wing_width_pct:     Tuple[float, ...] = (0.020, 0.030, 0.040)
 - **No CI-invariant scanner rule for IB yet.** The vertical invariant is `|Δ_short| × (1 + edge_buffer)`. IB has no analogous scan-time invariant because the equivalent breakeven condition (`2C/W = 1`) is degenerate (implies zero max-loss). The gate here is the EV > 0 check, which is a structural guarantee at the scoring-function level rather than an AST-walker check at the source-file level. When Phase 2 (broken-wing) or Phase 4 (calendar) land, the CI scanner will need an extension to check per-strategy scoring invariants — that's tracked in the additional-strategies plan doc's cross-cutting decision #3.
 - **Live-cycle wiring is future work.** This skill's Phase 1 delivers the scorer, the reject taxonomy, the preset knobs, and the tests. The chain-scanner orchestration (finding the ATM strike, sweeping the wing-width grid, packaging accepted candidates as SpreadCandidate objects) is deliberately NOT in this session — it's the follow-on, alongside the backtester enablement. The pattern matches how skill 40's long-term evaluator shipped as scorer + design doc first, orchestrator second.
 
-## 5. Cross-References
+## 5. Live Dispatch Wiring (added 2026-07-05)
+
+`Strategy._plan_iron_butterfly` is the strategy-planner's IB entry point. Wired into the sideways-regime branch of `Strategy.plan_trade` — when `preset.iron_butterfly_enabled` is True, the planner tries IB first; if `decide_iron_butterfly` returns no positive-EV candidate the planner falls back to `_plan_iron_condor` so the SIDEWAYS branch is never left empty.
+
+```python
+# trading_agent/strategy.py — sideways-regime dispatch
+if getattr(self.preset, "iron_butterfly_enabled", False):
+    ib_plan = self._plan_iron_butterfly(ticker, analysis, expiration)
+    if ib_plan.valid:
+        return ib_plan
+    # else fall through to IC
+return self._plan_iron_condor(ticker, analysis, expiration)
+```
+
+The IB planner fetches put+call chains for the expiration, tags each contract with its `type`, merges into a single `ChainSlice`, delegates to `decide_iron_butterfly`, and converts the winning `IronButterflyCandidate` into a `SpreadPlan` with 4 legs (short put, long put, short call, long call) in the exact shape the executor expects.
+
+Enable per-preset by editing `STRATEGY_PRESET.json`:
+
+```json
+{
+  "profile": "custom",
+  "custom": {
+    ...
+    "iron_butterfly_enabled": true
+  }
+}
+```
+
+Hot-reloads on the next cycle (skill 13). Set back to `false` to disable without restarting.
+
+## 6. Cross-References
 
 - `01_pop_from_delta.md` — vertical POP formula this skill's §2.1 is the IB analogue of.
 - `03_credit_to_width_floor.md` — the C/W floor invariant that applies to verticals but NOT to IB; explains why the IB scorer has its own gate rather than reusing the invariant.
