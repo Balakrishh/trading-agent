@@ -58,7 +58,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/calendar_utils.py` (last modified 2026-05-01)
 - `trading_agent/config.py` (last modified 2026-04-24)
 - `trading_agent/daily_state.py` (last modified 2026-04-19)
-- `trading_agent/data_server/__main__.py`
+- `trading_agent/data_server/__main__.py` (last modified 2026-09-27)
 - `trading_agent/earnings_calendar.py` (last modified 2026-04-24)
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)

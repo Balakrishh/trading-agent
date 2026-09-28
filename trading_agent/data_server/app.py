@@ -26,6 +26,8 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional
 
+from pydantic import BaseModel, Field
+
 from trading_agent.data_server.auth import build_fastapi_dependency
 from trading_agent.data_server.cache import TTLCache
 from trading_agent.data_server.config import CacheTTLs, ServerConfig
@@ -34,6 +36,22 @@ logger = logging.getLogger(__name__)
 
 # Skill 47 §4 — ticker validation. Uppercase alphanumeric + . (BRK.B) + -.
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+# ── Request models (module-level, skill 47 §3.5) ────────────────────────
+# Defining these OUTSIDE build_app() is critical: FastAPI's parameter
+# introspection reads the annotation via __annotations__, and when the
+# model class lives inside a closure the resolution fails on some
+# Pydantic/FastAPI version combos — the parameter falls back to
+# query-param treatment (POST returns 422 "field required as query"
+# and /openapi.json 500s on schema gen). Module-level definition
+# guarantees FastAPI sees the class cleanly.
+class QuotesRequest(BaseModel):
+    symbols: List[str] = Field(..., min_length=1, max_length=200)
+
+
+class SnapshotsRequest(BaseModel):
+    tickers: List[str] = Field(..., min_length=1, max_length=100)
 
 
 class MarketDataPort:
@@ -60,8 +78,7 @@ def build_app(
     to ``ServerConfig()`` (auth disabled, default TTLs) for the
     hermetic-test path.
     """
-    from fastapi import Depends, FastAPI, HTTPException
-    from pydantic import BaseModel, Field
+    from fastapi import Body, Depends, FastAPI, HTTPException
 
     cfg = config or ServerConfig()
     ttls: CacheTTLs = cfg.ttls
@@ -77,13 +94,6 @@ def build_app(
             "over HTTP. Skill 47."
         ),
     )
-
-    # ── Request models ────────────────────────────────────────────────
-    class QuotesRequest(BaseModel):
-        symbols: List[str] = Field(..., min_length=1, max_length=200)
-
-    class SnapshotsRequest(BaseModel):
-        tickers: List[str] = Field(..., min_length=1, max_length=100)
 
     # ── Helper: validate a ticker OR raise 400 ───────────────────────
     def _validate_ticker(ticker: str) -> str:
@@ -186,7 +196,7 @@ def build_app(
         }
 
     @app.post("/quotes", dependencies=[Depends(auth_dep)])
-    async def quotes(req: QuotesRequest) -> Dict[str, Any]:
+    async def quotes(req: QuotesRequest = Body(...)) -> Dict[str, Any]:
         try:
             data = provider.fetch_option_quotes(req.symbols)
         except Exception as exc:                                # noqa: BLE001
@@ -195,7 +205,7 @@ def build_app(
                 "quotes": data}
 
     @app.post("/snapshots", dependencies=[Depends(auth_dep)])
-    async def snapshots(req: SnapshotsRequest) -> Dict[str, Any]:
+    async def snapshots(req: SnapshotsRequest = Body(...)) -> Dict[str, Any]:
         # Validate each ticker before hitting Schwab.
         tickers = [_validate_ticker(t) for t in req.tickers]
         # Cache key spans the full set — different subsets don't share.
