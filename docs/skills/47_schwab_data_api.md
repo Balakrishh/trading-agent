@@ -165,4 +165,4 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 ---
 
-*Last verified against repo HEAD on 2026-09-27.*
+*Last verified against repo HEAD on 2026-09-28.*

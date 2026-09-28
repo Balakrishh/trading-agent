@@ -49,8 +49,13 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
 | 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | — | conformance/test_skill_47_schwab_data_api.py | — |
 | 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | conformance/test_skill_48_mcp_readonly.py | — |
+| 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | ❌ MISSING | — |
+| 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | — | ❌ MISSING | — |
+| 52 | watchlist curation | mcp/tools/positions.py, watchlist_store.py, journal_reader.py | test_watchlist_store.py | ❌ MISSING | — |
+| 53 | incident response | mcp/tools/market.py, exception_monitor.py, journal_reader.py | — | ❌ MISSING | — |
+| 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | — | ❌ MISSING | — |
 
-**Skills with conformance tests:** 40 / 40 (100%)
+**Skills with conformance tests:** 40 / 45 (88%)
 
 ## Orphan source files
 
@@ -71,7 +76,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/logger_setup.py` (last modified 2026-05-01)
 - `trading_agent/market_hours.py` (last modified 2026-04-19)
 - `trading_agent/market_profile.py` (last modified 2026-04-24)
-- `trading_agent/mcp/__main__.py`
+- `trading_agent/mcp/__main__.py` (last modified 2026-09-28)
 - `trading_agent/news_aggregator.py` (last modified 2026-04-19)
 - `trading_agent/order_tracker.py` (last modified 2026-05-01)
 - `trading_agent/ports.py` (last modified 2026-05-06)
@@ -91,15 +96,18 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/trade_journal.py` (last modified 2026-04-02)
 - `trading_agent/trade_plan_report.py` (last modified 2026-04-02)
 - `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
-- `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 36 / 89 files (40% uncovered)
+**Orphan source coverage:** 35 / 89 files (39% uncovered)
 
 ## Orphan skills (no conformance test)
 
 Skills with no corresponding `tests/conformance/test_skill_NN_*.py` file. These are candidates for back-filling conformance tests so the skill's documented behavior gets pinned by an executable assertion.
 
-*(none — every skill has a conformance test)*
+- `docs/skills/49_daily_portfolio_review.md`
+- `docs/skills/50_position_triage.md`
+- `docs/skills/52_watchlist_curation.md`
+- `docs/skills/53_incident_response.md`
+- `docs/skills/54_tax_lot_review.md`
 
 ---
 
