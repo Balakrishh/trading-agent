@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git stash:*)",
+      "Bash(git checkout:*)",
+      "Bash(python -m pytest tests/ -q --ignore=tests/test_agent_integration.py)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import streamlit; import plotly; print\\('streamlit', streamlit.__version__, 'plotly', plotly.__version__\\)\")"
+    ]
+  }
+}

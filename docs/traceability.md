@@ -48,7 +48,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 45 | iron butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_45_iron_butterfly.py | — |
 | 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
 | 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | — | conformance/test_skill_47_schwab_data_api.py | — |
-| 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | conformance/test_skill_48_mcp_readonly.py | — |
+| 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | conformance/test_skill_48_mcp_readonly.py, conformance/test_subagent_and_command_shape.py | — |
 | 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | ❌ MISSING | — |
 | 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | — | ❌ MISSING | — |
 | 51 | pre trade approval | mcp/tools/strategy.py, pending_orders_writer.py, executor_promote.py | — | ❌ MISSING | — |
