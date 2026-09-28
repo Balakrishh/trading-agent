@@ -48,8 +48,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 45 | iron butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_45_iron_butterfly.py | — |
 | 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
 | 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | — | conformance/test_skill_47_schwab_data_api.py | — |
+| 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | conformance/test_skill_48_mcp_readonly.py | — |
 
-**Skills with conformance tests:** 39 / 39 (100%)
+**Skills with conformance tests:** 40 / 40 (100%)
 
 ## Orphan source files
 
@@ -58,7 +59,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/calendar_utils.py` (last modified 2026-05-01)
 - `trading_agent/config.py` (last modified 2026-04-24)
 - `trading_agent/daily_state.py` (last modified 2026-04-19)
-- `trading_agent/data_server/__main__.py` (last modified 2026-09-27)
+- `trading_agent/data_server/__main__.py` (last modified 2026-09-28)
 - `trading_agent/earnings_calendar.py` (last modified 2026-04-24)
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
@@ -70,6 +71,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/logger_setup.py` (last modified 2026-05-01)
 - `trading_agent/market_hours.py` (last modified 2026-04-19)
 - `trading_agent/market_profile.py` (last modified 2026-04-24)
+- `trading_agent/mcp/__main__.py`
 - `trading_agent/news_aggregator.py` (last modified 2026-04-19)
 - `trading_agent/order_tracker.py` (last modified 2026-05-01)
 - `trading_agent/ports.py` (last modified 2026-05-06)
@@ -91,7 +93,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 35 / 82 files (42% uncovered)
+**Orphan source coverage:** 36 / 89 files (40% uncovered)
 
 ## Orphan skills (no conformance test)
 

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "trading-agent": {
+      "command": "python",
+      "args": ["-m", "trading_agent.mcp"],
+      "env": {},
+      "description": "Trading-agent read-only surface (skill 48). Positions, journal, presets, scanner, quotes. Never places orders."
+    }
+  }
+}
