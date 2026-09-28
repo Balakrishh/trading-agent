@@ -563,7 +563,7 @@ class StrategyPlanner:
             from datetime import date as _date
             exp_date = _date.fromisoformat(expiration)
             dte = max(1, (exp_date - _date.today()).days)
-        except Exception:
+        except Exception:  # noqa: skill-34-exempt — date-parse fallback; caller supplies expiration string, worst case is one bogus DTE
             dte = 21   # defensive fallback matches typical IB grid entry
 
         slc = ChainSlice(expiration=expiration, dte=dte, contracts=chain)

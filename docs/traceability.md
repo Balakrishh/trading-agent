@@ -47,8 +47,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 44 | position monitor scaling | position_monitor.py | test_backtest/test_sim_position.py, test_position_monitor.py, test_production_readiness.py | conformance/test_skill_44_position_monitor_scaling.py | — |
 | 45 | iron butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_45_iron_butterfly.py | — |
 | 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
+| 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | — | conformance/test_skill_47_schwab_data_api.py | — |
 
-**Skills with conformance tests:** 38 / 38 (100%)
+**Skills with conformance tests:** 39 / 39 (100%)
 
 ## Orphan source files
 
@@ -57,6 +58,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/calendar_utils.py` (last modified 2026-05-01)
 - `trading_agent/config.py` (last modified 2026-04-24)
 - `trading_agent/daily_state.py` (last modified 2026-04-19)
+- `trading_agent/data_server/__main__.py`
 - `trading_agent/earnings_calendar.py` (last modified 2026-04-24)
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
@@ -89,7 +91,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
 - `trading_agent/watchlist_store.py` (last modified 2026-05-03)
 
-**Orphan source coverage:** 34 / 76 files (44% uncovered)
+**Orphan source coverage:** 35 / 82 files (42% uncovered)
 
 ## Orphan skills (no conformance test)
 
