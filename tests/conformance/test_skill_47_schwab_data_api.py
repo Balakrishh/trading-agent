@@ -456,6 +456,8 @@ def test_serverconfig_reads_env(monkeypatch):
     monkeypatch.setenv("SCHWAB_API_SERVER_KEY", "abc123")
     monkeypatch.setenv("SCHWAB_API_PORT", "9999")
     monkeypatch.setenv("SCHWAB_API_BIND", "100.115.216.79")
+    # Per-endpoint TTL vars are only honoured when the master switch is on.
+    monkeypatch.setenv("SCHWAB_API_CACHE_ENABLED", "true")
     monkeypatch.setenv("SCHWAB_API_PRICE_TTL_SEC", "30")
     monkeypatch.setenv("SCHWAB_API_SNAPSHOT_TTL_SEC", "45")
 
@@ -472,7 +474,7 @@ def test_serverconfig_reads_env(monkeypatch):
 def test_serverconfig_defaults_when_env_unset(monkeypatch):
     for k in ("SCHWAB_API_SERVER_KEY", "SCHWAB_API_PORT", "SCHWAB_API_BIND",
               "SCHWAB_API_PRICE_TTL_SEC", "SCHWAB_API_SNAPSHOT_TTL_SEC",
-              "SCHWAB_API_LOG_FILE"):
+              "SCHWAB_API_LOG_FILE", "SCHWAB_API_CACHE_ENABLED"):
         monkeypatch.delenv(k, raising=False)
     from trading_agent.data_server.config import ServerConfig
     cfg = ServerConfig.from_env()
@@ -480,3 +482,72 @@ def test_serverconfig_defaults_when_env_unset(monkeypatch):
     assert cfg.port == 8765
     assert cfg.bind == "127.0.0.1"
     assert cfg.auth_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# §3.4 — Cache master switch
+# ---------------------------------------------------------------------------
+
+def test_cache_disabled_by_default(monkeypatch):
+    """Skill 47 §3.4 — SCHWAB_API_CACHE_ENABLED defaults to false. When
+    unset, both price and snapshot TTLs are 0 (every request live)."""
+    for k in ("SCHWAB_API_CACHE_ENABLED", "SCHWAB_API_PRICE_TTL_SEC",
+              "SCHWAB_API_SNAPSHOT_TTL_SEC"):
+        monkeypatch.delenv(k, raising=False)
+    from trading_agent.data_server.config import ServerConfig
+    cfg = ServerConfig.from_env()
+    assert cfg.cache_enabled is False
+    assert cfg.ttls.price_sec == 0
+    assert cfg.ttls.snapshot_sec == 0
+
+
+def test_cache_master_switch_true_uses_default_ttls(monkeypatch):
+    for k in ("SCHWAB_API_PRICE_TTL_SEC", "SCHWAB_API_SNAPSHOT_TTL_SEC"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SCHWAB_API_CACHE_ENABLED", "true")
+    from trading_agent.data_server.config import ServerConfig
+    cfg = ServerConfig.from_env()
+    assert cfg.cache_enabled is True
+    assert cfg.ttls.price_sec == 60
+    assert cfg.ttls.snapshot_sec == 90
+
+
+def test_cache_master_switch_ignores_per_endpoint_ttls_when_disabled(monkeypatch):
+    """Even if per-endpoint TTLs are set, the master switch overrides them.
+
+    Documents the "flip the master first, THEN tune per-endpoint" workflow
+    the skill 47 §3.4 note describes.
+    """
+    monkeypatch.setenv("SCHWAB_API_CACHE_ENABLED", "false")
+    monkeypatch.setenv("SCHWAB_API_PRICE_TTL_SEC", "300")     # tries to set 300
+    monkeypatch.setenv("SCHWAB_API_SNAPSHOT_TTL_SEC", "300")  # tries to set 300
+    from trading_agent.data_server.config import ServerConfig
+    cfg = ServerConfig.from_env()
+    assert cfg.cache_enabled is False
+    assert cfg.ttls.price_sec == 0        # ignored, forced to 0
+    assert cfg.ttls.snapshot_sec == 0
+
+
+def test_cache_master_switch_true_respects_per_endpoint_overrides(monkeypatch):
+    monkeypatch.setenv("SCHWAB_API_CACHE_ENABLED", "true")
+    monkeypatch.setenv("SCHWAB_API_PRICE_TTL_SEC", "5")
+    monkeypatch.setenv("SCHWAB_API_SNAPSHOT_TTL_SEC", "10")
+    from trading_agent.data_server.config import ServerConfig
+    cfg = ServerConfig.from_env()
+    assert cfg.cache_enabled is True
+    assert cfg.ttls.price_sec == 5
+    assert cfg.ttls.snapshot_sec == 10
+
+
+def test_env_bool_parses_common_truthy_values(monkeypatch):
+    """The parser recognizes 1, true, yes, on (case-insensitive)."""
+    from trading_agent.data_server.config import _env_bool
+    for truthy in ("1", "true", "True", "TRUE", "yes", "YES", "on", "ON"):
+        monkeypatch.setenv("SCHWAB_API_TEST_BOOL", truthy)
+        assert _env_bool("SCHWAB_API_TEST_BOOL") is True, f"failed for {truthy!r}"
+    for falsy in ("0", "false", "FALSE", "no", "off", "", "banana"):
+        monkeypatch.setenv("SCHWAB_API_TEST_BOOL", falsy)
+        assert _env_bool("SCHWAB_API_TEST_BOOL") is False, f"failed for {falsy!r}"
+    monkeypatch.delenv("SCHWAB_API_TEST_BOOL", raising=False)
+    assert _env_bool("SCHWAB_API_TEST_BOOL", default=True) is True
+    assert _env_bool("SCHWAB_API_TEST_BOOL", default=False) is False

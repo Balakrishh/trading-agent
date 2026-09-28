@@ -43,7 +43,22 @@ logger = logging.getLogger(__name__)
 # Cache TTLs (seconds)
 PRICE_HISTORY_TTL = 14_400      # 4 hours — historical bars don't change intraday
 SNAPSHOT_TTL = 60               # 1 minute — real-time price
-OPTION_CHAIN_TTL = 180          # 3 minutes — Greeks move but not millisecond-fast
+
+# Master cache toggle — skill 47 §3.4. Defaults to DISABLED so every quote
+# request goes live to Schwab. Flip to true (any of "1","true","yes","on")
+# when rate limits become a concern; when enabled, per-cache TTLs are used
+# with their historical defaults unless individually overridden.
+_CACHE_ENABLED = os.environ.get(
+    "SCHWAB_API_CACHE_ENABLED", "false",
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Chain cache: 3 min when caching is enabled, disabled (TTL=0) otherwise.
+# Env var SCHWAB_API_CHAIN_TTL_SEC lets the operator override the enabled
+# TTL without touching the master switch.
+OPTION_CHAIN_TTL = (
+    int(os.environ.get("SCHWAB_API_CHAIN_TTL_SEC", "180"))
+    if _CACHE_ENABLED else 0
+)
 INTRADAY_RETURN_TTL = 60        # 1 minute — 5-min bar return; long enough to
                                 # dedupe SPY/QQQ benchmark calls within one
                                 # cycle (~1-3 min), short enough to roll over

@@ -75,12 +75,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Startup-info line the operator scans to confirm the right thing
     # is running. NEVER log the actual API key (skill 47 §4).
+    cache_mode = (
+        f"ENABLED (price_ttl={cfg.ttls.price_sec}s "
+        f"snapshot_ttl={cfg.ttls.snapshot_sec}s)"
+        if cfg.cache_enabled
+        else "DISABLED (every request live — set "
+             "SCHWAB_API_CACHE_ENABLED=true to enable)"
+    )
     log.info(
-        "Schwab Data API starting — bind=%s port=%d auth=%s "
-        "price_ttl=%ds snapshot_ttl=%ds",
+        "Schwab Data API starting — bind=%s port=%d auth=%s cache=%s",
         bind, port,
         "bearer-token" if cfg.auth_enabled else "TAILSCALE-ONLY (no api key)",
-        cfg.ttls.price_sec, cfg.ttls.snapshot_sec,
+        cache_mode,
     )
     if not cfg.auth_enabled:
         log.warning(

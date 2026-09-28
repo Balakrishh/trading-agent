@@ -121,9 +121,25 @@ Environment variables the CLI reads:
 - `SCHWAB_API_SERVER_KEY` — shared bearer token. Missing → Tailscale-only auth.
 - `SCHWAB_API_PORT` — port to bind (default 8765).
 - `SCHWAB_API_BIND` — address to bind (default 127.0.0.1 — you must override for tailnet exposure).
-- `SCHWAB_API_PRICE_TTL_SEC` — price cache TTL (default 60).
-- `SCHWAB_API_SNAPSHOT_TTL_SEC` — snapshot cache TTL (default 90).
+- `SCHWAB_API_CACHE_ENABLED` — **master cache switch** (default `false`). When false, every price/snapshot/chain request goes live to Schwab; the per-endpoint TTL vars below are ignored. Flip to `true`/`1`/`yes`/`on` when rate limits become a concern.
+- `SCHWAB_API_PRICE_TTL_SEC` — price cache TTL when master switch is on (default 60). Ignored when `SCHWAB_API_CACHE_ENABLED=false`.
+- `SCHWAB_API_SNAPSHOT_TTL_SEC` — snapshot cache TTL when master switch is on (default 90). Ignored when disabled.
+- `SCHWAB_API_CHAIN_TTL_SEC` — option-chain provider cache TTL when master switch is on (default 180). Ignored when disabled — chain cache is force-set to 0 regardless of this value.
 - `SCHWAB_API_LOG_FILE` — access-log destination (default stdout).
+
+Startup log surfaces the resolved mode so the operator can verify at
+a glance. When caching is off:
+
+```
+Schwab Data API starting — bind=100.115.216.79 port=8765 auth=bearer-token
+    cache=DISABLED (every request live — set SCHWAB_API_CACHE_ENABLED=true to enable)
+```
+
+When on:
+
+```
+cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
+```
 
 ## 4. Edge Cases / Guardrails
 
