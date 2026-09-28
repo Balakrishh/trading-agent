@@ -205,6 +205,31 @@ class PresetConfig:
     pdt_dte_cap:                       int   = 14
 
     # ------------------------------------------------------------------
+    # Auto-promote caps for Claude-Code-proposed orders (skill 55).
+    #
+    # When the operator invokes ``python -m trading_agent.executor.promote``
+    # on a proposal in ``pending_orders/``, the promote CLI can either
+    # wait for ``--yes`` (manual) or bypass the prompt (auto-promote).
+    # Auto-promote requires ALL of the following to hold:
+    #
+    #   1. ``TRADING_AGENT_AUTO_PROMOTE_ENABLED`` env master switch = true
+    #   2. debit_notional ≤ auto_promote_max_notional_usd
+    #   3. contract_count ≤ auto_promote_max_contracts
+    #   4. strategy ∈ auto_promote_allowed_strategies
+    #   5. risk_manager.check() returns zero WARNINGS (not just errors)
+    #   6. within regular market hours (not first/last 5 min)
+    #   7. re-score delta from proposal-time < 5%
+    #
+    # Defaults are the SAFE end of every choice — max_notional=0 disables
+    # the config-side gate even if the env master switch is on. Operator
+    # opts in per-preset by editing these fields (frozen dataclass →
+    # dataclasses.replace, per skill 00 conventions).
+    # ------------------------------------------------------------------
+    auto_promote_max_notional_usd:     float = 0.0
+    auto_promote_max_contracts:        int   = 1
+    auto_promote_allowed_strategies:   Tuple[str, ...] = ()
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 

@@ -51,11 +51,13 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | conformance/test_skill_48_mcp_readonly.py | — |
 | 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | ❌ MISSING | — |
 | 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | — | ❌ MISSING | — |
+| 51 | pre trade approval | mcp/tools/strategy.py, pending_orders_writer.py, executor_promote.py | — | ❌ MISSING | — |
 | 52 | watchlist curation | mcp/tools/positions.py, watchlist_store.py, journal_reader.py | test_watchlist_store.py | ❌ MISSING | — |
 | 53 | incident response | mcp/tools/market.py, exception_monitor.py, journal_reader.py | — | ❌ MISSING | — |
 | 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | — | ❌ MISSING | — |
+| 55 | pending orders promotion | executor_promote.py, pending_orders_writer.py, strategy_presets.py | test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_55_promote_gate.py | — |
 
-**Skills with conformance tests:** 40 / 45 (88%)
+**Skills with conformance tests:** 41 / 47 (87%)
 
 ## Orphan source files
 
@@ -97,7 +99,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/trade_plan_report.py` (last modified 2026-04-02)
 - `trading_agent/vix_regime_monitor.py` (last modified 2026-06-02)
 
-**Orphan source coverage:** 35 / 89 files (39% uncovered)
+**Orphan source coverage:** 35 / 91 files (38% uncovered)
 
 ## Orphan skills (no conformance test)
 
@@ -105,6 +107,7 @@ Skills with no corresponding `tests/conformance/test_skill_NN_*.py` file. These 
 
 - `docs/skills/49_daily_portfolio_review.md`
 - `docs/skills/50_position_triage.md`
+- `docs/skills/51_pre_trade_approval.md`
 - `docs/skills/52_watchlist_curation.md`
 - `docs/skills/53_incident_response.md`
 - `docs/skills/54_tax_lot_review.md`
