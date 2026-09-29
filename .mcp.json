@@ -3,10 +3,6 @@
     "trading-agent": {
       "command": "python",
       "args": ["-m", "trading_agent.mcp"],
-      "env": {
-        "SCHWAB_API_BASE_URL": "${SCHWAB_API_BASE_URL:-http://127.0.0.1:8765}",
-        "SCHWAB_API_SERVER_KEY": "${SCHWAB_API_SERVER_KEY:-0k7WV2tGQzsbDwMfl24I68449jfT8YK3DIu-zDwdRso}"
-      },
       "description": "Trading-agent read-only surface (skill 48). Positions, journal, presets, scanner, quotes. Never places orders."
     }
   }

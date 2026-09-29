@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def key_fingerprint(key: Optional[str]) -> str:
+    """First 8 hex chars of SHA-256 of the key — safe to log and compare,
+    never the key itself (skill 47 §4). Matches the operator check
+    ``printf %s "$KEY" | shasum -a 256 | cut -c1-8``; an empty/unset key
+    gives ``e3b0c442``."""
+    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()[:8]
 
 
 class AuthError(Exception):
