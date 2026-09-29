@@ -103,10 +103,17 @@ def get_fundamentals(ticker: str) -> Dict[str, Any]:
       ``dividend_date``, ``next_dividend_pay_date``
     - Trading: ``beta``, ``high_52w``, ``low_52w``,
       ``vol_avg_1d``, ``vol_avg_10d``, ``vol_avg_3mo``,
-      ``shares_outstanding``, ``market_cap_float``
+      ``shares_outstanding``, ``float_shares`` (share COUNT — Schwab's
+      confusingly-named ``marketCapFloat`` field is actually shares
+      floating, not a dollar figure)
     - Profitability: ``roe``, ``roa``, ``gross_margin_ttm``,
       ``net_profit_margin_ttm``, ``operating_margin_ttm``
     - Short interest: ``short_int_to_float``
+
+    Set ``SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW=true`` to have the
+    provider include the raw Schwab ``fundamental`` block as
+    ``_raw_fundamental`` — useful when a field looks wrong and you
+    want to see the exact upstream keys.
     - Provenance: ``as_of`` (ISO-8601 UTC)
     """
     if not ticker:

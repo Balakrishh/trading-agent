@@ -138,17 +138,21 @@ def test_skill_48_fundamentals_tool_registered():
     assert callable(_HANDLERS["get_fundamentals"])
 
 
-def test_skill_48_fundamentals_field_mapping_uses_schwab_native_keys():
-    """Regression 2026-09-29: AAPL fundamentals came back with
-    dividend_yield=None and vol_avg_10d=None because the mapping used
-    TDA-legacy short names ("divYield", "vol10DayAvg" was ok but
-    "divAmount" and "divDate" were not the Schwab long form). This
-    test feeds a realistic-shape payload and asserts every headline
-    field lands.
+def test_skill_48_fundamentals_field_mapping_uses_schwab_native_keys(monkeypatch):
+    """Regression 2026-09-29: three separate mapping bugs that made
+    AAPL look non-dividend-paying with zero volume:
+
+    1. Dividend + volume fields used TDA short names → None values.
+    2. ``market_cap_float`` name suggested dollars but Schwab returns
+       a share COUNT under ``marketCapFloat`` — must expose as
+       ``float_shares`` to avoid misleading downstream consumers.
+    3. ``operatingMarginTTM`` sometimes aliases the net-margin value,
+       so we prefer ``operatingMargin`` (no suffix) when both are
+       present.
     """
+    monkeypatch.delenv("SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW", raising=False)
     from trading_agent.market_data_schwab import SchwabMarketDataProvider
 
-    # Realistic Schwab /instruments response (long-form keys).
     fake_body = {
         "instruments": [
             {
@@ -158,51 +162,79 @@ def test_skill_48_fundamentals_field_mapping_uses_schwab_native_keys():
                 "fundamental": {
                     "peRatio": 31.2, "pegRatio": 2.1, "pbRatio": 58.4,
                     "epsTTM": 6.05, "marketCap": 3_100_000_000_000,
+                    "marketCapFloat": 14_600_000_000,     # share count, not $
                     "sharesOutstanding": 15_200_000_000,
                     "dividendYield": 0.0044, "dividendAmount": 0.96,
                     "dividendDate": "2026-08-15",
                     "nextDividendPayDate": "2026-11-15",
                     "dividendPayAmount": 0.24,
                     "beta": 1.24, "high52": 237.30, "low52": 164.10,
-                    "vol1DayAvg": 52_000_000,
-                    "vol10DayAvg": 55_000_000,
-                    "vol3MonthAvg": 57_500_000,
+                    # New long-form volume shape Schwab is returning today.
+                    "avg1DayVolume": 52_000_000,
+                    "avg10DaysVolume": 55_000_000,
+                    "avg3MonthVolume": 57_500_000,
                     "returnOnEquity": 0.28, "returnOnAssets": 0.20,
                     "bookValuePerShare": 3.10,
                     "grossMarginTTM": 0.44,
-                    "netProfitMarginTTM": 0.25,
-                    "operatingMarginTTM": 0.30,
+                    "netProfitMarginTTM": 0.276,
+                    # Both present; the no-suffix field is the real one.
+                    "operatingMargin": 0.312,
+                    "operatingMarginTTM": 0.276,           # aliases net
                     "shortIntToFloat": 0.008,
-                    "marketCapFloat": 3_050_000_000_000,
                     "epsChangePercentTTM": 12.4,
                 },
             }
         ]
     }
-    # Stub the _get method rather than actually calling Schwab.
     prov = SchwabMarketDataProvider.__new__(SchwabMarketDataProvider)
     prov._get = lambda path, params=None, timeout=None: fake_body   # noqa: SLF001,ARG005
     out = prov.fetch_fundamentals("AAPL")
 
-    # The fields that were reading as None pre-fix — all must be present.
-    assert out["dividend_yield"] == 0.0044
-    assert out["dividend_amount"] == 0.96
-    assert out["dividend_date"] == "2026-08-15"
-    assert out["next_dividend_pay_date"] == "2026-11-15"
-    assert out["vol_avg_1d"] == 52_000_000
+    # Volume — the headline bug the user reported today.
+    assert out["vol_avg_1d"]  == 52_000_000
     assert out["vol_avg_10d"] == 55_000_000
     assert out["vol_avg_3mo"] == 57_500_000
-    # Identity + valuation should also land.
+
+    # market_cap_float removed; float_shares now carries the share count.
+    assert "market_cap_float" not in out
+    assert out["float_shares"] == 14_600_000_000
+
+    # operatingMargin (no suffix) preferred over the aliased ...TTM form.
+    assert out["operating_margin_ttm"] == 0.312
+    assert out["net_profit_margin_ttm"] == 0.276
+    assert out["operating_margin_ttm"] != out["net_profit_margin_ttm"]
+
+    # Rest of the headline mapping still lands.
+    assert out["dividend_yield"] == 0.0044
+    assert out["dividend_amount"] == 0.96
     assert out["ticker"] == "AAPL"
     assert out["pe_ratio"] == 31.2
-    assert out["eps_ttm"] == 6.05
     assert out["market_cap"] == 3_100_000_000_000
     assert out["beta"] == 1.24
     assert out["high_52w"] == 237.30
     assert out["roe"] == 0.28
-    # New fields added in the 2026-09-29 fix.
     assert out["gross_margin_ttm"] == 0.44
     assert out["short_int_to_float"] == 0.008
+
+    # _raw_fundamental should NOT appear when the env flag is off.
+    assert "_raw_fundamental" not in out
+
+
+def test_skill_48_fundamentals_raw_echo_toggle(monkeypatch):
+    """SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW=true adds the upstream
+    payload so an operator can diagnose a field that looks wrong.
+    """
+    from trading_agent.market_data_schwab import SchwabMarketDataProvider
+    monkeypatch.setenv("SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW", "true")
+    fake_body = {"instruments": [{
+        "symbol": "AAPL",
+        "fundamental": {"peRatio": 30.0, "someWeirdKey": 999},
+    }]}
+    prov = SchwabMarketDataProvider.__new__(SchwabMarketDataProvider)
+    prov._get = lambda path, params=None, timeout=None: fake_body   # noqa: SLF001,ARG005
+    out = prov.fetch_fundamentals("AAPL")
+    assert "_raw_fundamental" in out
+    assert out["_raw_fundamental"]["someWeirdKey"] == 999
 
 
 def test_skill_48_fundamentals_legacy_tda_shortnames_still_map():

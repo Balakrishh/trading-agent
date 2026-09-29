@@ -800,7 +800,7 @@ class SchwabMarketDataProvider(MarketDataProvider):
               "eps_ttm":           6.05,
               "eps_change_pct_ttm": 12.4,
               "market_cap":        3_100_000_000_000,
-              "market_cap_float":  3_050_000_000_000,
+              "float_shares":      14_600_000_000,   # share COUNT, not $
               "shares_outstanding": 15_200_000_000,
               "dividend_yield":    0.0044,
               "dividend_amount":   0.96,
@@ -869,7 +869,13 @@ class SchwabMarketDataProvider(MarketDataProvider):
             "eps_ttm":            _safe_float(_pick("epsTTM", "epsTtm")),
             "eps_change_pct_ttm": _safe_float(_pick("epsChangePercentTTM")),
             "market_cap":         _safe_float(_pick("marketCap")),
-            "market_cap_float":   _safe_float(_pick("marketCapFloat")),
+            # NB: Schwab's ``marketCapFloat`` field is a share COUNT
+            # (roughly Apple's ~14.6B floating shares), not a dollar
+            # figure. We expose it as float_shares and derive the
+            # float-only market cap ourselves so downstream callers
+            # aren't misled by the confusing upstream name.
+            "float_shares":       _safe_float(_pick(
+                "marketCapFloat", "floatShares", "publicFloat")),
             "shares_outstanding": _safe_float(_pick("sharesOutstanding")),
             "dividend_yield":     _safe_float(_pick("dividendYield", "divYield")),
             "dividend_amount":    _safe_float(_pick("dividendAmount", "divAmount")),
@@ -880,19 +886,49 @@ class SchwabMarketDataProvider(MarketDataProvider):
             "beta":               _safe_float(_pick("beta")),
             "high_52w":           _safe_float(_pick("high52", "week52High")),
             "low_52w":            _safe_float(_pick("low52",  "week52Low")),
-            "vol_avg_1d":         _safe_float(_pick("vol1DayAvg")),
-            "vol_avg_10d":        _safe_float(_pick("vol10DayAvg")),
-            "vol_avg_3mo":        _safe_float(_pick("vol3MonthAvg")),
+            # Volume fields have varied across Schwab API revisions. The
+            # 2026-09-29 payload returned 0.0 under vol{1,10,3Month}Avg
+            # for AAPL, so we also try the alternate `avg…Volume`
+            # long-form shape observed in newer responses. When Schwab
+            # sends 0.0 explicitly (a real value), _pick treats that as
+            # "present" and returns it — the operator can then see raw
+            # via the SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW env var.
+            "vol_avg_1d":         _safe_float(_pick(
+                "avg1DayVolume", "vol1DayAvg", "averageVolume1Day")),
+            "vol_avg_10d":        _safe_float(_pick(
+                "avg10DaysVolume", "vol10DayAvg", "averageVolume10Day")),
+            "vol_avg_3mo":        _safe_float(_pick(
+                "avg3MonthVolume", "vol3MonthAvg", "averageVolume3Month")),
             "roe":                _safe_float(_pick(
                 "returnOnEquity", "returnOnEquityTTM")),
             "roa":                _safe_float(_pick(
                 "returnOnAssets", "returnOnAssetsTTM")),
             "book_value_per_share": _safe_float(_pick("bookValuePerShare")),
-            "gross_margin_ttm":     _safe_float(_pick("grossMarginTTM")),
-            "net_profit_margin_ttm": _safe_float(_pick("netProfitMarginTTM")),
-            "operating_margin_ttm": _safe_float(_pick("operatingMarginTTM")),
-            "short_int_to_float":   _safe_float(_pick("shortIntToFloat")),
+            "gross_margin_ttm":     _safe_float(_pick(
+                "grossMarginTTM", "grossProfitMarginTTM")),
+            "net_profit_margin_ttm": _safe_float(_pick(
+                "netProfitMarginTTM", "netMarginTTM")),
+            # AAPL returned net==operating (27.6186) under
+            # operatingMarginTTM — Schwab appears to sometimes alias
+            # the two on that key. The distinct real field is
+            # ``operatingMargin`` (no TTM suffix) — try it first.
+            "operating_margin_ttm": _safe_float(_pick(
+                "operatingMargin", "operatingProfitMarginTTM",
+                "operatingMarginMRQ", "operatingMarginTTM")),
+            "short_int_to_float":   _safe_float(_pick(
+                "shortIntToFloat", "shortIntToFloatRatio")),
             "as_of":              datetime.now(timezone.utc).isoformat(),
+            # Optional raw echo — flip
+            # SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW=true to see every
+            # key Schwab actually sent. Off by default (payload can
+            # be large + we don't want it in normal LLM prompts).
+            **(
+                {"_raw_fundamental": f}
+                if os.environ.get(
+                    "SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW",
+                    "").strip().lower() in ("1", "true", "yes", "on")
+                else {}
+            ),
         }
 
 
