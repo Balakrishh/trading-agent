@@ -1,7 +1,7 @@
 # VIX Z-score inhibitor
 
 > **One-line summary:** When the 5-minute VIX-change Z-score exceeds `+2.0σ`, demote any new BULLISH or SIDEWAYS-bullish-routed plan to a Bear Call Spread instead of a Bull Put. Volatility spikes kill bullish premium-selling.
-> **Source of truth:** [`trading_agent/regime.py:117, 293-299`](../../trading_agent/regime.py); [`trading_agent/strategy.py:255-265`](../../trading_agent/strategy.py)
+> **Source of truth:** [`trading_agent/regime.py:117, 293-299`](../../trading_agent/regime.py); [`trading_agent/strategy.py:298-308`](../../trading_agent/strategy.py)
 > **Phase:** 1  •  **Group:** bias
 > **Depends on:** nothing — the VIX RPC is the sole input.
 > **Consumed by:** `strategy._plan_for_ticker` (demotion routing).
@@ -60,7 +60,7 @@ if hasattr(self.data, "get_vix_zscore"):
 ```
 
 ```python
-# trading_agent/strategy.py:255-265
+# trading_agent/strategy.py:298-308
 inter_market_inhibit = getattr(
     analysis, "inter_market_inhibit_bullish", False)
 if inter_market_inhibit and analysis.regime in (
@@ -90,4 +90,4 @@ if inter_market_inhibit and analysis.regime in (
 
 ---
 
-*Last verified against repo HEAD on 2026-09-27.*
+*Last verified against repo HEAD on 2026-09-29.*

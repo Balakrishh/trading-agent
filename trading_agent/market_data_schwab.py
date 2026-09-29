@@ -75,6 +75,9 @@ logger = logging.getLogger(__name__)
 # Schwab Market Data v1 base URL.
 SCHWAB_BASE_URL = "https://api.schwabapi.com/marketdata/v1"
 
+# Strikes per /chains request (centred on ATM). See fetch_option_chain.
+SCHWAB_CHAIN_STRIKE_COUNT = 200
+
 # OCC compact form regex — what the rest of the agent uses.
 #   AAPL 250101P00150000  → root + YYMMDD + C/P + strike*1000 (8 digits)
 _OCC_COMPACT_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
@@ -508,10 +511,16 @@ class SchwabMarketDataProvider(MarketDataProvider):
         # but with delta/gamma/theta/vega all zero — the scanner then
         # can't find any contract within Δ ≤ max_delta and rejects with
         # "no_short_contract×80".
+        #
+        # ``strikeCount`` is centred on ATM, so it must also be wide enough
+        # to reach the protective leg: on $1-grid ETFs (SPY ~$770) a 0.15Δ
+        # short at 45 DTE sits ~7 % OTM and a 3 % wing adds more — ±$80.
+        # 30 strikes (±$15) truncated the chain and collapsed wings to $1
+        # on 2026-09-29 (skill 04 §4).
         params = {
             "symbol": underlying,
             "contractType": contract_type_param,
-            "strikeCount": 30,
+            "strikeCount": SCHWAB_CHAIN_STRIKE_COUNT,
             "fromDate": expiration_date,
             "toDate": expiration_date,
             "strategy": "SINGLE",

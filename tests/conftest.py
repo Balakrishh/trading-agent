@@ -164,3 +164,14 @@ def valid_spread_plan():
         expiration="2025-04-25",
         reasoning="Test plan",
     )
+
+
+@pytest.fixture(autouse=True)
+def _restore_journal_reader_today():
+    """Several conformance tests pin ``JournalReader._today_et`` by direct
+    assignment and never restore it, leaking a frozen "today" into every
+    later test. Restore the original after each test."""
+    from trading_agent.journal_reader import JournalReader
+    original = JournalReader.__dict__["_today_et"]
+    yield
+    JournalReader._today_et = original

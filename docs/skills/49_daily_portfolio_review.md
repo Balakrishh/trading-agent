@@ -35,9 +35,9 @@ alerts         = get_recent_alerts(hours=24)
 
 The brief is rendered as prose sections in this order:
 
-1. **Positions.** From `positions["opens_today"]` — one line per ticker + strategy + expiration + credit.
+1. **Positions.** From `positions["open_positions"]` (any open date) — one line per ticker + strategy + expiration + credit + width. Flag `status="expired_unrecorded"` rows prominently: their P&L is missing from the journal.
 2. **Realized PnL today.** From `journal["realized_pl_today"]`.
-3. **Recent closes.** From `recent["closes_today"]` — closed trades with reason + PnL.
+3. **Recent closes.** From `recent["closes"]` (the `days` window) — closed trades with reason + PnL; total from `recent["realized_pl_window"]`.
 4. **Expiring this week.** Filter `positions` by expiration ≤ 7 days out.
 5. **Alerts.** From `alerts["silenced_today"]` + `alerts["error_count_today"]`.
 6. **Macro.** `market["open"]`, `preset["preset"]["name"]`, `preset["preset"]["directional_bias"]`.
@@ -60,4 +60,4 @@ The brief is rendered as prose sections in this order:
 
 ---
 
-*Last verified against repo HEAD on 2026-09-28.*
+*Last verified against repo HEAD on 2026-09-29.*

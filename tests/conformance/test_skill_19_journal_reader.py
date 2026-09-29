@@ -441,3 +441,60 @@ def test_agent_journal_helpers_delegate_to_journal_reader() -> None:
         "Skill 32 §3.4: agent._telegram_alert_already_sent_today "
         "must delegate to JournalReader.telegram_alert_sent_today_utc()."
     )
+
+
+# ── 2026-09-29: open_trades / closes_since (multi-day reporting) ─────────
+
+def _sub(ts, ticker, strategy, exp, **extra):
+    return {"timestamp": ts, "ticker": ticker, "action": "submitted",
+            "raw_signal": {"strategy": strategy, "expiration": exp,
+                           "net_credit": 0.5, "spread_width": 5.0,
+                           "max_loss": 450.0, "run_id": "r1", **extra}}
+
+
+def _close(ts, ticker, strategy, exp, pl, fill="complete"):
+    return {"timestamp": ts, "ticker": ticker, "action": "closed",
+            "raw_signal": {"strategy": strategy, "expiration": exp,
+                           "net_unrealized_pl": pl, "fill_status": fill}}
+
+
+def test_open_trades_pairs_fifo_and_flags_unrecorded_expiry() -> None:
+    from trading_agent.journal_reader import JournalReader
+    today = datetime.now(_ET).date()
+    past, future = (today - timedelta(days=30)).isoformat(), (today + timedelta(days=20)).isoformat()
+    old = _et_iso_now(today - timedelta(days=40))
+    rows = [
+        _sub(old, "SPY", "Bear Call Spread", future),          # closed below
+        _sub(old, "SPY", "Bear Call Spread", future),          # still open
+        _close(_et_iso_now(today - timedelta(days=39)), "SPY", "Bear Call Spread", future, -135.0),
+        _sub(old, "XLE", "Iron Condor", past),                 # never closed, expired
+        _sub(old, "GLD", "Bull Put Spread", future),
+        _close(_et_iso_now(today - timedelta(days=2)), "GLD", "Bull Put Spread", future,
+               10.0, fill="dry_run"),                          # dry-run close ignored
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "j.jsonl"
+        _write_fixture_journal(rows, p)
+        opens = JournalReader(str(p)).open_trades()
+    got = sorted((o.ticker, o.status) for o in opens)
+    assert got == [("GLD", "open"), ("SPY", "open"), ("XLE", "expired_unrecorded")]
+    spy = next(o for o in opens if o.ticker == "SPY")
+    assert spy.spread_width == 5.0 and spy.max_loss == 450.0 and spy.run_id == "r1"
+
+
+def test_closes_since_honours_window_and_dry_run_skip() -> None:
+    from trading_agent.journal_reader import JournalReader
+    today = datetime.now(_ET).date()
+    rows = [
+        _close(_et_iso_now(today), "SPY", "IC", "x", -10.0),
+        _close(_et_iso_now(today - timedelta(days=5)), "QQQ", "IC", "x", 20.0),
+        _close(_et_iso_now(today - timedelta(days=9)), "IWM", "IC", "x", 30.0),
+        _close(_et_iso_now(today - timedelta(days=1)), "DIA", "IC", "x", 99.0, fill="dry_run"),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "j.jsonl"
+        _write_fixture_journal(rows, p)
+        r = JournalReader(str(p))
+        assert [c.ticker for c in r.closes_since(7)] == ["SPY", "QQQ"]
+        assert [c.ticker for c in r.closes_since(0)] == ["SPY"]
+        assert [c.ticker for c in r.closes_today()] == ["SPY"]

@@ -66,6 +66,16 @@ if self.delta_aware_floor and plan.legs:
 cw_floor = short_max_delta * (1.0 + self.edge_buffer)
 ```
 
+### Iron Condor Δ-sum floor — `trading_agent/strategy.py:_plan_iron_condor` (added 2026-09-29)
+
+```python
+        edge = float(getattr(self.preset, "edge_buffer", 0.0) or 0.0)
+        delta_sum = abs(sold_put["delta"]) + abs(sold_call["delta"])
+        ic_floor = delta_sum * (1.0 + edge)
+```
+
+A condor loses if price finishes past **either** short, so P(loss) ≈ |Δput| + |Δcall|. Break-even needs C/W ≥ that sum, stricter than the max-|Δ| floor shared by scanner / RiskManager / executor. It is a **planner-only** gate: ICs never come from the scanner, so it cannot reject a scanner-picked plan (the thing invariant #1 protects). The shared formula in the three files is unchanged.
+
 ## 4. Edge Cases / Guardrails
 
 - **Multi-leg short side (Iron Condor)** — `short_max_delta = max(abs(l.delta) for l in short_legs)`. We use the *worst* (largest absolute delta) leg as the floor input, not an average. An IC must clear the floor against its more-aggressive wing.
@@ -74,6 +84,7 @@ cw_floor = short_max_delta * (1.0 + self.edge_buffer)
 - **Triple enforcement** — same formula in `chain_scanner.py`, `risk_manager.py`, `executor.py`. The architectural invariant scanner (`scripts/checks/scan_invariant_check.py`) **fails CI** if a fourth implementation appears or if any of these three is removed. Don't refactor into a "shared helper" without updating the invariant check.
 - **C/W ≥ 1** — credit ≥ width implies a debit, not a credit. The scanner's `_ev_per_dollar_risked` returns `None` in that case (skill 05); this floor check never sees it.
 - **Negative credit** — defensive check elsewhere; this formula assumes `C > 0` and would otherwise produce a negative floor with weird semantics.
+- **IC priced below its Δ-sum (2026-09-29 SPY)** — C/W 0.48 passed the max-|Δ| floor (0.29) but P(loss) ≈ 0.28 + 0.30 = 0.58 → negative EV. The Δ-sum gate rejects it with `Iron Condor C/W … < Δ-sum floor …`. Applies in static and adaptive modes; `edge_buffer` scales it like the vertical floor.
 
 ## 5. Cross-References
 
@@ -83,4 +94,4 @@ cw_floor = short_max_delta * (1.0 + self.edge_buffer)
 
 ---
 
-*Last verified against repo HEAD on 2026-07-06.*
+*Last verified against repo HEAD on 2026-09-29.*

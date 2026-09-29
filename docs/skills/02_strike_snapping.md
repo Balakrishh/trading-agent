@@ -1,7 +1,7 @@
 # Strike snapping to grid
 
 > **One-line summary:** Round any continuous distance UP to the next listed strike using `grid × ⌈candidate / grid + 0.4999⌉`.
-> **Source of truth:** [`trading_agent/strategy.py:684`](../../trading_agent/strategy.py), [`trading_agent/chain_scanner.py:496`](../../trading_agent/chain_scanner.py)
+> **Source of truth:** [`trading_agent/strategy.py:892`](../../trading_agent/strategy.py), [`trading_agent/chain_scanner.py:496`](../../trading_agent/chain_scanner.py)
 > **Phase:** 1  •  **Group:** strategy
 > **Depends on:** nothing — atomic primitive.
 > **Consumed by:** `strategy._pick_spread_width`, `chain_scanner` width selection.
@@ -38,7 +38,7 @@ where
 ## 3. Reference Python Implementation
 
 ```python
-# trading_agent/strategy.py:684 — inside _pick_spread_width()
+# trading_agent/strategy.py:892 — inside _pick_spread_width()
 snapped = grid * max(1, int(round(candidate / grid + 0.4999)))
 return float(snapped)
 ```
@@ -65,4 +65,4 @@ Both call sites use the identical formula. If this primitive ever needs to chang
 
 ---
 
-*Last verified against repo HEAD on 2026-09-27.*
+*Last verified against repo HEAD on 2026-09-29.*

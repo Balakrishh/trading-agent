@@ -90,6 +90,20 @@ def _pick_spread_width(self, contracts: List[Dict],
     return float(snapped)
 ```
 
+```python
+# trading_agent/strategy.py — MIN_WING_WIDTH_FRACTION = 0.5 (module level)
+def _find_bought_strike(self, contracts, sold_strike, direction):
+    width = self._pick_spread_width(contracts, sold_strike)
+    target = sold_strike - width if direction == "lower" else sold_strike + width
+    for c in sorted(contracts, key=lambda c: abs(c["strike"] - target)):
+        if (direction == "lower" and c["strike"] < sold_strike) or \
+           (direction == "higher" and c["strike"] > sold_strike):
+            if abs(sold_strike - c["strike"]) < width * MIN_WING_WIDTH_FRACTION:
+                return None          # truncated chain — refuse collapsed wing
+            return c
+    return None
+```
+
 ## 4. Edge Cases / Guardrails
 
 - **Empty chain** — `_strike_grid_step(contracts)` raises if `contracts` is empty. The caller (`_plan_bull_put`) catches this and returns a `SpreadPlan` with `kind=KIND_NO_TRADE` and a reason string. No crash.
@@ -97,6 +111,7 @@ def _pick_spread_width(self, contracts: List[Dict],
 - **Preset says `pct_of_spot` with `value = 0.0`** — `max(grid, 0)` = `grid` → wing is one strike step. The C/W floor (skill 03) usually rejects such a thin wing because credit is too small.
 - **Preset says `fixed_dollar` with `value < SPREAD_WIDTH`** — preset wins, so legacy floor doesn't apply. Intentional: the user explicitly asked for a smaller wing.
 - **`width_mode` is some other string** — falls through `if/elif` to the legacy `else` branch. Defensive; the preset loader validates `width_mode` upstream.
+- **Truncated chain collapses the wing** — `_find_bought_strike` takes the strike nearest the target on the correct side. If the chain doesn't reach the target (e.g. Schwab `strikeCount` too small — skill 16 §4), the nearest strike can be one step from the short: 2026-09-29 SPY IC was built with $1 wings vs a $19 target and sized to 16 contracts. Guard: if the found wing is < `MIN_WING_WIDTH_FRACTION` (0.5) × target, return `None` → plan rejected as "Protective legs not found" with a WARNING naming both widths. 0.5 tolerates sparse far-OTM $5 grids ($17 vs $19) while rejecting collapse. Applies to static verticals and the Iron Condor path; the adaptive scanner (skill 14) builds its own wings.
 - **Grid jumps mid-day** — width is recomputed each plan call, so a strike-grid change between cycles is automatically picked up.
 
 ## 5. Cross-References
@@ -144,4 +159,4 @@ Both filters work in concert with this skill's width-grid retune: the 0.5% width
 
 ---
 
-*Last verified against repo HEAD on 2026-09-27.*
+*Last verified against repo HEAD on 2026-09-29.*

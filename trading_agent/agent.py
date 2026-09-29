@@ -87,6 +87,7 @@ from trading_agent.telegram_notifier import TelegramNotifier
 from trading_agent.journal_reader import JournalReader
 from trading_agent.position_monitor import (
     PositionMonitor, ExitSignal, SpreadPosition, IMMEDIATE_EXIT_SIGNALS,
+    remark_positions_at_mid,
 )
 from trading_agent.order_tracker import OrderTracker
 from trading_agent.llm_client import LLMClient, LLMConfig
@@ -1095,6 +1096,16 @@ class TradingAgent:
             logger.info("No open option positions found.")
             return {"total_spreads": 0, "positions": [], "closed": [],
                     "fetch_failed": False}
+
+        # Skill 44 §4 — value legs at quote mid, not Alpaca's last-trade
+        # mark, so bid/ask noise doesn't trip stops. Legs without a usable
+        # quote keep the broker mark.
+        try:
+            quotes = self.data_provider.fetch_option_quotes(
+                [p.symbol for p in positions])
+            positions = remark_positions_at_mid(positions, quotes or {})
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — re-mark is best-effort; broker marks remain valid
+            logger.warning("Mid re-mark failed (%s) — using broker marks", exc)
 
         trade_plans = self._load_trade_plans()
         spreads = self.position_monitor.group_into_spreads(positions, trade_plans)

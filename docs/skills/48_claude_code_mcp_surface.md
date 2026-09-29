@@ -111,7 +111,7 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 - **Handler registry is closed and symmetric.** The conformance test asserts `set(_HANDLERS) == set(READONLY_TOOLS)`. A drift is a CI failure.
 - **Data-server fallback is silent-but-explicit.** `_market.get_quote` returns `{"source": "unavailable"}` when `SCHWAB_API_BASE_URL` is unset or unreachable, rather than raising — the LLM sees a structured answer and can decide whether to ask the operator to bring the server up.
 - **Backtest parity flag.** `run_scan(backtest=True)` and `score_candidate(...)` route through `decision_engine.decide()` — the same primitive the live agent uses (invariant #3). Never redefine scoring in `trading_agent/mcp/tools/*.py` (invariant #2 — no shadow scorers).
-- **Journal reads are today-only for now.** `list_recent_trades(days=7)` currently returns closes for TODAY plus a `window_days` echo; a broader window requires extending `JournalReader` (out of scope for this skill; tracked in `docs/plans/claude_code_portfolio_integration_plan.md` §Phase 2).
+- **Multi-day journal reads (2026-09-29).** `list_positions()` returns `open_positions` — every submitted spread without a matching close, any open date, with `opened_at`, `width`, `max_loss`, `short_strikes` (from the trade plan by `run_id`; null once aged out of the 200-row history), `order_id`, `status` (`open` | `expired_unrecorded`). `opens_today` is kept for back-compat. `list_recent_trades(days)` honours `days` via `JournalReader.closes_since` and returns `closes` + `realized_pl_window` alongside the legacy `closes_today`. Previously positions were today-only and width/opened_at/pnl were always null (mapped to non-existent attributes).
 - **Errors surface as tool errors, not server errors.** Any exception inside a handler becomes a JSON-RPC error with the exception's type + message. The MCP loop keeps serving; the Claude Code session sees a structured failure.
 - **stdio transport, one process per session.** The server is spawned per Claude Code session. No shared state between sessions.
 
@@ -124,4 +124,4 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 
 ---
 
-*Last verified against repo HEAD on 2026-09-28.*
+*Last verified against repo HEAD on 2026-09-29.*

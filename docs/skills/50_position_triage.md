@@ -54,6 +54,7 @@ Claude then applies the three predicates in priority order (profit target → st
 - **Preset disables defensive rolls.** If `preset["preset"]["defensive_roll_enabled"] == False`, the "Roll" verdict is unreachable — the playbook renders only Hold / Close.
 - **Recommendation is prose, not an order.** The output is a paragraph the operator reads. Producing an actual order means invoking skill 51 (`/propose`); this playbook does NOT emit a `pending_orders/*.json` file.
 - **Backtest mode.** For "how would this have played historically", the operator invokes `/triage` with a `--backtest` flag; the playbook then routes `score_candidate` through `decide()` in backtest mode (invariant #3).
+- **Position fields (2026-09-29)** — `get_position` now searches all open positions (not just today's) and returns `short_strikes` (list), `width`, `max_loss`, `opened_at`. Use `short_strikes` for the proximity predicate; if null (trade plan aged out), read strikes from the broker legs.
 
 ## 5. Cross-References
 
@@ -64,4 +65,4 @@ Claude then applies the three predicates in priority order (profit target → st
 
 ---
 
-*Last verified against repo HEAD on 2026-09-28.*
+*Last verified against repo HEAD on 2026-09-29.*

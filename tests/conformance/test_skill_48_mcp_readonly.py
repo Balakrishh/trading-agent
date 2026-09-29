@@ -138,3 +138,47 @@ def test_skill_48_mcp_json_wires_module():
     entry = cfg["mcpServers"]["trading-agent"]
     assert entry["command"] == "python"
     assert entry["args"] == ["-m", "trading_agent.mcp"]
+
+
+def test_skill_48_positions_span_days_and_carry_fields(tmp_path, monkeypatch):
+    """Regression 2026-09-29: list_positions only returned today's opens
+    (a spread opened yesterday vanished from /portfolio) and mapped
+    width/opened_at/pnl to attributes that don't exist (always null);
+    list_recent_trades ignored ``days``."""
+    import json
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    import trading_agent.journal_reader as jr
+    from trading_agent.mcp.tools.positions import (
+        list_positions, get_position, list_recent_trades)
+
+    et = ZoneInfo("US/Eastern")
+    now = datetime.now(et)
+    exp = (now.date() + timedelta(days=20)).isoformat()
+    rows = [
+        {"timestamp": (now - timedelta(days=3)).isoformat(), "ticker": "SPY",
+         "action": "submitted",
+         "raw_signal": {"strategy": "Iron Condor", "expiration": exp,
+                        "net_credit": 2.1, "spread_width": 10.0,
+                        "max_loss": 790.0, "run_id": "r9"}},
+        {"timestamp": (now - timedelta(days=4)).isoformat(), "ticker": "QQQ",
+         "action": "closed",
+         "raw_signal": {"strategy": "Bull Put Spread", "expiration": exp,
+                        "net_unrealized_pl": 55.0, "exit_signal": "profit_target",
+                        "exit_reason": "50%", "fill_status": "complete"}},
+    ]
+    p = tmp_path / "live.jsonl"
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    real = jr.JournalReader
+    monkeypatch.setattr(jr, "JournalReader", lambda *a, **k: real(str(p)))
+
+    pos = list_positions()["open_positions"]
+    assert len(pos) == 1 and pos[0]["ticker"] == "SPY"
+    assert pos[0]["width"] == 10.0 and pos[0]["opened_at"] and pos[0]["status"] == "open"
+    assert get_position("spy")["found"] is True
+
+    trades = list_recent_trades(days=7)
+    assert [c["ticker"] for c in trades["closes"]] == ["QQQ"]
+    assert trades["closes"][0]["pnl"] == 55.0
+    assert trades["realized_pl_window"] == 55.0
+    assert trades["closes_today"] == []

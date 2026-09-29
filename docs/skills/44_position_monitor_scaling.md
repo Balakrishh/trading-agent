@@ -110,6 +110,20 @@ post_fill_grace_seconds: int = 60
 
 Default 60 seconds. Set to 0 in tests to exercise the exit paths directly. Not currently threaded to `PresetConfig` — the number is a defensive floor, not a preset tunable.
 
+### `trading_agent/position_monitor.py` — mid re-mark (added 2026-09-29)
+
+```python
+def remark_positions_at_mid(positions: List[PositionSnapshot],
+                            quotes: Dict[str, Dict]) -> List[PositionSnapshot]:
+```
+
+```python
+        mid = (bid + ask) / 2
+        pl = round((mid - p.avg_entry_price) * p.qty * 100, 2)
+```
+
+Called by `agent.py` right after `fetch_open_positions()` and before `group_into_spreads()`, with quotes from `data_provider.fetch_option_quotes`. Every exit threshold (hard stop, stop loss, profit target) therefore evaluates mid-based P&L. `PositionSnapshot.mark_source` records `"mid"` or `"broker"`.
+
 ## 4. Edge Cases / Guardrails
 
 - **Empty `opened_at` — grace gate skipped, not blocking.** Inferred spreads (broker-side positions with no matching trade plan) and legacy positions from before this fix have no known submit time. The gate returns nothing rather than blocking indefinitely — the exit paths engage immediately, matching pre-fix behavior for those spreads.
@@ -123,6 +137,10 @@ Default 60 seconds. Set to 0 in tests to exercise the exit paths directly. Not c
 - **Not a `PresetConfig` field yet.** `post_fill_grace_seconds` lives as a `PositionMonitor.__init__` kwarg with a default of 60s. If a preset ever wants to tune this, add `post_fill_grace_seconds: int = 60` to `PresetConfig` (skill 13) and thread it through `agent.py:PositionMonitor` construction. Not needed today; 60s is a defensive floor rather than a strategy tunable.
 - **Pre-existing conformance tests still pass.** Skill 30 (`test_skill_30_profit_target_management.py`) and skill 17 (`test_skill_17_close_failure_and_cooldown.py`) both exercise `_check_exit` with single-contract positions. Contracts=1 makes `contracts_open × per_contract == per_contract`, so the pre-fix numeric expectations still hold.
 
+- **Stale broker marks (2026-09-29 SPY IC)** — Alpaca's `current_price` is often the last trade. Summed over 4 legs × 16 contracts, a flat condor (≈ −$8 at mid) showed −$160, and with wide quotes the natural-price view was −$336. Re-marking at mid removes that noise from stop decisions.
+- **No usable quote** — missing symbol, bid ≤ 0, or crossed (ask < bid): the leg keeps the broker mark (`mark_source="broker"`). Mixed marks within one spread are allowed; better than dropping the leg.
+- **Quote RPC fails** — the whole re-mark is skipped with a WARNING; broker marks are used for that cycle.
+
 ## 5. Cross-References
 
 - `06_stale_spread_risk_gate.md` — companion invariant on the scan side (rejects wide bid-ask legs at scan time); this skill's grace period is the monitor-side symmetric protection against stale marks at evaluation time.
@@ -132,4 +150,4 @@ Default 60 seconds. Set to 0 in tests to exercise the exit paths directly. Not c
 
 ---
 
-*Last verified against repo HEAD on 2026-07-02.*
+*Last verified against repo HEAD on 2026-09-29.*
