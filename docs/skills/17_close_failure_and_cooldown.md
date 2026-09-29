@@ -217,6 +217,27 @@ def _render_close_failures_today(journal_df):
         st.dataframe(...)  # Streak column shows "2/3" or "🚨 cooldown until ..."
 ```
 
+### `trading_agent/executor.py` — atomic mleg close (added 2026-09-29)
+
+`close_spread()` first calls `_close_spread_mleg()`; the per-leg DELETE loop above is now the fallback.
+
+```python
+mleg = self._close_spread_mleg(spread)
+if mleg is not None:
+    return mleg
+```
+
+```python
+# Alpaca sign convention: positive limit_price = net debit.
+attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
+            ("mleg_natural", round(natural, 2))]
+```
+
+- One `order_class="mleg"` limit order: shorts `buy_to_close`, longs `sell_to_close`, `qty` = common leg qty.
+- `natural` = Σ short ask − Σ long bid; `mid` = Σ short mid − Σ long mid (from `data_provider.fetch_option_quotes`).
+- Each attempt polls `GET /orders/{id}` for up to `CLOSE_FILL_WAIT_S` (15 s), then cancels and re-reads status (a fill can race the cancel).
+- Result carries `close_method` ∈ {`mleg_improved`, `mleg_natural`, `mleg_unresolved`, `per_leg`}.
+
 ## 4. Edge Cases / Guardrails
 
 - **Streak is journal-derived, not in-memory.** Pre-2026-05-13 the streak lived in an instance dict (`self._partial_close_count`) — but each cycle subprocess creates a fresh `TradingAgent`, so the dict reset every 5 minutes. The cooldown *never engaged* in production: every partial fill logged "streak 1/3" forever. The 2026-05-12 GLD incident hit 15+ retries; the 2026-05-13 XLF hit 4 before the user noticed and stopped manually. Today's streak is read from the journal on demand — count `close_failed` rows in the last 60 min, reset if a `closed` row appears in between. This works correctly across process restarts because the journal is on disk.
@@ -239,6 +260,11 @@ def _render_close_failures_today(journal_df):
 
 - **Action `close_failed` bypasses the journal dedup gate.** Listed in `_DEDUP_BYPASS_ACTIONS` (`journal_kb.py:95-100`) alongside `submitted`, `closed`, `error`, `warning`. Successive partial-fill rows must remain individually visible so the operator can see the streak progressing toward lockout.
 
+- **Legging on per-leg close (2026-07-02 SPY)** — short leg filled, long leg failed: a ~$135 hard stop became −$837 with a naked short. The atomic mleg close makes all legs fill together or not at all. Per-leg DELETE only runs when the mleg path is skipped or both price attempts end in a terminal non-fill state.
+- **Atomic path skipped** — no `data_provider`, any leg without a usable quote (bid ≤ 0), or unequal |qty| across legs (already-partial position). Falls straight to per-leg.
+- **Cancel unconfirmed (`mleg_unresolved`)** — if the post-cancel status is not terminal (e.g. `pending_cancel`, poll failure), the order may still be live. The executor returns `all_closed=False` and does **not** fall back: a per-leg DELETE plus a late mleg fill would double-close and open a reversed position. The agent records it as a partial close (feeds the cooldown streak) and retries next cycle.
+- **Partial qty fill then cancel** — mleg fills keep legs at equal remaining qty, so the per-leg fallback closes a still-hedged remainder.
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — journal action enumeration; dedup-bypass rules.
@@ -253,4 +279,4 @@ Alongside `MAX_POSITIONS_PER_TICKER = 1`, the agent now also enforces `MAX_POSIT
 
 ---
 
-*Last verified against repo HEAD on 2026-09-27.*
+*Last verified against repo HEAD on 2026-09-29.*

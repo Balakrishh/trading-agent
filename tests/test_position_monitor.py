@@ -606,3 +606,46 @@ def test_fetch_open_positions_filters_to_us_options_only(monkeypatch):
     result = _monitor().fetch_open_positions()
     assert result == [], "Equity positions must be filtered out"
     assert result is not None, "Filtering to zero options is a clean slate, not an RPC failure"
+
+
+# ── Skill 44 §4 — mid re-mark (2026-09-29) ─────────────────────────────
+
+def _leg(symbol, qty, avg, cur, upl):
+    return PositionSnapshot(symbol=symbol, qty=qty, side="short" if qty < 0 else "long",
+                            avg_entry_price=avg, current_price=cur,
+                            market_value=cur * qty * 100,
+                            cost_basis=avg * qty * 100, unrealized_pl=upl,
+                            unrealized_plpc=0.0, asset_class="us_option")
+
+
+def test_remark_short_and_long_legs_at_mid():
+    from trading_agent.position_monitor import remark_positions_at_mid
+    legs = [_leg("S", -16, 4.94, 5.83, -1424.0), _leg("L", 16, 4.76, 5.56, 1280.0)]
+    out = remark_positions_at_mid(legs, {"S": {"bid": 5.70, "ask": 5.90},
+                                         "L": {"bid": 5.50, "ask": 5.56}})
+    assert out[0].unrealized_pl == pytest.approx((5.80 - 4.94) * -16 * 100)
+    assert out[1].unrealized_pl == pytest.approx((5.53 - 4.76) * 16 * 100)
+    assert {p.mark_source for p in out} == {"mid"}
+    assert legs[0].mark_source == "broker"          # input not mutated
+
+
+def test_remark_keeps_broker_mark_without_usable_quote():
+    from trading_agent.position_monitor import remark_positions_at_mid
+    legs = [_leg("A", -1, 1.0, 1.2, -20.0), _leg("B", 1, 0.5, 0.4, -10.0),
+            _leg("C", -1, 1.0, 1.1, -10.0)]
+    out = remark_positions_at_mid(legs, {"B": {"bid": 0.0, "ask": 0.1},     # no bid
+                                         "C": {"bid": 1.3, "ask": 1.2}})    # crossed
+    assert [p.unrealized_pl for p in out] == [-20.0, -10.0, -10.0]
+    assert {p.mark_source for p in out} == {"broker"}
+
+
+def test_remark_flat_condor_shows_near_zero_not_broker_noise():
+    """Regression: 2026-09-29 SPY IC showed -$160 broker vs ~-$8 at mid."""
+    from trading_agent.position_monitor import remark_positions_at_mid
+    legs = [_leg("P752", -16, 4.94, 5.83, -1424.0), _leg("P751", 16, 4.76, 5.56, 1280.0),
+            _leg("C780", -16, 4.41, 3.65, 1216.0), _leg("C781", 16, 4.11, 3.34, -1232.0)]
+    quotes = {"P752": {"bid": 5.68, "ask": 5.92}, "P751": {"bid": 5.51, "ask": 5.56},
+              "C780": {"bid": 3.57, "ask": 3.59}, "C781": {"bid": 3.31, "ask": 3.41}}
+    assert sum(p.unrealized_pl for p in legs) == pytest.approx(-160.0)
+    out = remark_positions_at_mid(legs, quotes)
+    assert sum(p.unrealized_pl for p in out) == pytest.approx(-8.0, abs=1.0)

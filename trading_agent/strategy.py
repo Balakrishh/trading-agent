@@ -520,6 +520,23 @@ class StrategyPlanner:
             plan.valid = False
             plan.rejection_reason = (
                 f"Credit-to-width ratio {ratio:.4f} < minimum {self.min_credit_ratio}")
+            return plan
+
+        # Condor EV floor (skill 03 §4). An IC loses if price finishes past
+        # EITHER short, so P(loss) ≈ |Δput| + |Δcall| — not the max of the
+        # two that the shared vertical floor uses. Break-even needs
+        # C/W ≥ that sum. Planner-only gate: ICs never come from the
+        # scanner, so this cannot contradict the scanner/RM/executor floor.
+        # 2026-09-29 SPY IC: C/W 0.48 vs Δ-sum 0.58 → negative EV, traded.
+        edge = float(getattr(self.preset, "edge_buffer", 0.0) or 0.0)
+        delta_sum = abs(sold_put["delta"]) + abs(sold_call["delta"])
+        ic_floor = delta_sum * (1.0 + edge)
+        if ratio < ic_floor:
+            plan.valid = False
+            plan.rejection_reason = (
+                f"Iron Condor C/W {ratio:.4f} < Δ-sum floor "
+                f"(|Δp|+|Δc|={delta_sum:.3f})×{1 + edge:.2f}={ic_floor:.4f} "
+                f"— negative EV")
 
         return plan
 

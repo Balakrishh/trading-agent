@@ -62,6 +62,16 @@ ORDER_RETRY_ATTEMPTS = 2
 # inspect the broker than block the cycle for 30+ seconds.
 ORDER_RETRY_BACKOFF_S = 1.0
 
+# ── Atomic multi-leg close (skill 17 §3) ────────────────────────────────────
+# close_spread() first tries ONE mleg order for all legs — no legging risk —
+# at a price halfway between mid and natural, then at natural (marketable).
+# Each attempt waits up to CLOSE_FILL_WAIT_S for a fill. Worst case ≈ 2 ×
+# 15s, inside the cycle's 270s guard. Per-leg DELETE is the last resort.
+CLOSE_FILL_WAIT_S = 15.0
+CLOSE_POLL_INTERVAL_S = 1.0
+_ORDER_TERMINAL_FAIL = {"canceled", "cancelled", "rejected", "expired",
+                        "done_for_day", "stopped", "suspended"}
+
 if TYPE_CHECKING:
     from trading_agent.market_data import MarketDataProvider
 
@@ -716,7 +726,15 @@ class OrderExecutor:
     def close_spread(self, spread) -> Dict:
         """
         Close an open credit spread.
-        Uses DELETE /v2/positions/{symbol} for each leg individually.
+
+        Preferred path — one atomic mleg order (``_close_spread_mleg``):
+        all legs fill together or not at all, priced from live quotes
+        (halfway mid→natural, then natural). On 2026-07-02 the per-leg
+        path filled the short but failed the long, turning a ~$135 stop
+        into -$837. Skipped when there is no data provider, any leg lacks
+        a quote, or leg quantities are unequal (already-partial position).
+
+        Fallback — DELETE /v2/positions/{symbol} for each leg individually.
 
         Leg ordering — close shorts before longs
         ----------------------------------------
@@ -737,6 +755,10 @@ class OrderExecutor:
         than shorts (or equal), so the account is never naked and
         Alpaca accepts each DELETE on the first try.
         """
+        mleg = self._close_spread_mleg(spread)
+        if mleg is not None:
+            return mleg
+
         ordered_legs = sorted(
             spread.legs,
             key=lambda leg: getattr(leg, "qty", 0),
@@ -754,6 +776,7 @@ class OrderExecutor:
             "reason": spread.exit_reason,
             "leg_results": results,
             "all_closed": all_ok,
+            "close_method": "per_leg",
         }
 
         if all_ok:
@@ -764,6 +787,157 @@ class OrderExecutor:
                            spread.underlying)
 
         return summary
+
+    def _close_spread_mleg(self, spread) -> Optional[Dict]:
+        """Close all legs with one mleg limit order. Returns the
+        ``close_spread`` summary on a full fill, or None to fall back to
+        the per-leg path (no quotes, unequal qty, or no fill after both
+        price attempts). A partially-filled qty is safe to fall back on:
+        mleg fills keep every leg at equal remaining qty, and DELETE
+        closes whatever remains.
+        """
+        legs = list(getattr(spread, "legs", []) or [])
+        if self.data_provider is None or len(legs) < 2:
+            return None
+        qtys = {abs(int(getattr(leg, "qty", 0) or 0)) for leg in legs}
+        if len(qtys) != 1 or 0 in qtys:
+            logger.warning("[%s] Unequal leg qty %s — skipping atomic close",
+                           spread.underlying, sorted(qtys))
+            return None
+        qty = qtys.pop()
+
+        try:
+            quotes = self.data_provider.fetch_option_quotes(
+                [leg.symbol for leg in legs]) or {}
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — quote miss falls back to per-leg close
+            logger.warning("[%s] Close quote fetch failed (%s) — per-leg close",
+                           spread.underlying, exc)
+            return None
+
+        natural = mid = 0.0
+        legs_payload = []
+        for leg in legs:
+            q = quotes.get(leg.symbol)
+            if not q or float(q.get("bid", 0)) <= 0 or float(q.get("ask", 0)) <= 0:
+                logger.warning("[%s] No usable quote for %s — per-leg close",
+                               spread.underlying, leg.symbol)
+                return None
+            bid, ask = float(q["bid"]), float(q["ask"])
+            if leg.qty < 0:      # short → buy to close, pay the ask
+                natural += ask
+                mid += (bid + ask) / 2
+                legs_payload.append({"symbol": leg.symbol, "ratio_qty": "1",
+                                     "side": "buy",
+                                     "position_intent": "buy_to_close"})
+            else:                # long → sell to close, receive the bid
+                natural -= bid
+                mid -= (bid + ask) / 2
+                legs_payload.append({"symbol": leg.symbol, "ratio_qty": "1",
+                                     "side": "sell",
+                                     "position_intent": "sell_to_close"})
+
+        # Alpaca sign convention: positive limit_price = net debit.
+        attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
+                    ("mleg_natural", round(natural, 2))]
+        for method, price in attempts:
+            if method == "mleg_natural" and price == attempts[0][1]:
+                continue         # natural == improved; nothing new to try
+            order = self._submit_close_order(spread, legs_payload, qty, price)
+            if order is None:
+                continue
+            status = self._await_fill(order["id"])
+            if status == "filled":
+                logger.info("[%s] Spread CLOSED atomically (%s) %s @ %.2f debit",
+                            spread.underlying, spread.exit_signal.value,
+                            method, price)
+                return {
+                    "action": "close_spread",
+                    "underlying": spread.underlying,
+                    "strategy": spread.strategy_name,
+                    "signal": spread.exit_signal.value,
+                    "reason": spread.exit_reason,
+                    "leg_results": [{"status": "closed", "symbol": leg.symbol,
+                                     "order_id": order["id"]} for leg in legs],
+                    "all_closed": True,
+                    "close_method": method,
+                    "limit_price": price,
+                    "mid_debit": round(mid, 4),
+                    "natural_debit": round(natural, 4),
+                }
+            if status not in _ORDER_TERMINAL_FAIL:
+                # Cancel unconfirmed — the order may still be live. Any
+                # further close (another mleg or per-leg DELETE) could
+                # double-close and open a reversed position. Stop here;
+                # the agent journals close_failed and retries next cycle.
+                logger.error("[%s] Atomic close order %s in state %r after "
+                             "cancel — NOT falling back to avoid a double "
+                             "close", spread.underlying, order["id"], status)
+                return {
+                    "action": "close_spread",
+                    "underlying": spread.underlying,
+                    "strategy": spread.strategy_name,
+                    "signal": spread.exit_signal.value,
+                    "reason": spread.exit_reason,
+                    "leg_results": [{"status": "unresolved", "symbol": leg.symbol,
+                                     "order_id": order["id"]} for leg in legs],
+                    "all_closed": False,
+                    "close_method": "mleg_unresolved",
+                    "limit_price": price,
+                }
+        logger.warning("[%s] Atomic close unfilled at improved and natural "
+                       "prices — falling back to per-leg close",
+                       spread.underlying)
+        return None
+
+    def _submit_close_order(self, spread, legs_payload, qty: int,
+                            price: float) -> Optional[Dict]:
+        payload = {
+            "type": "limit",
+            "time_in_force": "day",
+            "order_class": "mleg",
+            "qty": str(qty),
+            "limit_price": f"{price:.2f}",
+            "client_order_id": f"ta-close-{uuid.uuid4().hex[:12]}",
+            "legs": legs_payload,
+        }
+        try:
+            resp = requests.post(f"{self.base_url}/orders", headers=self._headers(),
+                                 json=payload, timeout=ALPACA_TIMEOUT_LONG)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("[%s] Atomic close order rejected @ %.2f: %s",
+                           spread.underlying, price, exc)
+            return None
+
+    def _await_fill(self, order_id: str) -> str:
+        """Poll until filled / terminal / timeout. On timeout, cancel and
+        return the post-cancel status — a fill can race the cancel."""
+        url = f"{self.base_url}/orders/{order_id}"
+        deadline = time.monotonic() + CLOSE_FILL_WAIT_S
+        status = "unknown"
+        while True:
+            try:
+                resp = requests.get(url, headers=self._headers(),
+                                    timeout=ALPACA_TIMEOUT_LONG)
+                resp.raise_for_status()
+                status = str(resp.json().get("status", "unknown"))
+            except (requests.RequestException, ValueError) as exc:
+                logger.debug("Close order %s poll failed: %s", order_id, exc)
+            if status == "filled" or status in _ORDER_TERMINAL_FAIL:
+                return status
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(CLOSE_POLL_INTERVAL_S)
+        try:
+            requests.delete(url, headers=self._headers(), timeout=ALPACA_TIMEOUT_LONG)
+            resp = requests.get(url, headers=self._headers(),
+                                timeout=ALPACA_TIMEOUT_LONG)
+            resp.raise_for_status()
+            status = str(resp.json().get("status", "unknown"))
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("Close order %s cancel/check failed: %s", order_id, exc)
+        return status
 
     def roll_position_defensive(self, spread, new_verdict: "RiskVerdict") -> Dict:
         """Atomic defensive roll: close + open in one operation.

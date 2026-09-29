@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional
@@ -83,6 +83,40 @@ class PositionSnapshot:
     unrealized_pl: float
     unrealized_plpc: float
     asset_class: str         # "us_option" for options
+    # "broker" = Alpaca's last-trade mark; "mid" = re-marked from the
+    # live bid/ask by ``remark_positions_at_mid`` (skill 44 §4).
+    mark_source: str = "broker"
+
+
+def remark_positions_at_mid(positions: List[PositionSnapshot],
+                            quotes: Dict[str, Dict]) -> List[PositionSnapshot]:
+    """Re-value each leg at its bid/ask mid instead of Alpaca's mark.
+
+    Alpaca's ``current_price`` is often the last trade — minutes stale
+    and on one side of a wide option market. Summed over 4 legs × N
+    contracts that noise alone showed a -$150 "loss" on a flat Iron
+    Condor (2026-09-29) and can trip stops. Legs without a usable quote
+    (missing, bid ≤ 0, crossed) keep the broker mark.
+    """
+    out: List[PositionSnapshot] = []
+    for p in positions:
+        q = quotes.get(p.symbol) if quotes else None
+        bid = float((q or {}).get("bid", 0) or 0)
+        ask = float((q or {}).get("ask", 0) or 0)
+        if bid <= 0 or ask < bid:
+            out.append(p)
+            continue
+        mid = (bid + ask) / 2
+        pl = round((mid - p.avg_entry_price) * p.qty * 100, 2)
+        out.append(replace(
+            p,
+            current_price=round(mid, 4),
+            market_value=round(mid * p.qty * 100, 2),
+            unrealized_pl=pl,
+            unrealized_plpc=(pl / abs(p.cost_basis)) if p.cost_basis else 0.0,
+            mark_source="mid",
+        ))
+    return out
 
 
 @dataclass

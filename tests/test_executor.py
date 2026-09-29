@@ -589,3 +589,100 @@ class TestCalculatePositionQty:
                 assert ex._calculate_qty(plan, equity) == \
                        calculate_position_qty(plan, equity, pct), (
                     f"delegator drift at pct={pct} equity={equity}")
+
+
+# ── Skill 17 §3 — atomic mleg close (2026-09-29) ─────────────────────────
+
+from types import SimpleNamespace
+import trading_agent.executor as executor_mod
+from trading_agent.position_monitor import ExitSignal
+
+_CLOSE_QUOTES = {
+    "P752": {"bid": 5.70, "ask": 5.90}, "P751": {"bid": 5.50, "ask": 5.56},
+    "C780": {"bid": 3.57, "ask": 3.59}, "C781": {"bid": 3.30, "ask": 3.42},
+}   # natural debit = 5.90+3.59-5.50-3.30 = 0.69; mid = 0.49; improved = 0.59
+
+
+def _ic_spread(qtys=(-16, 16, -16, 16)):
+    syms = ("P752", "P751", "C780", "C781")
+    return SimpleNamespace(
+        underlying="SPY", strategy_name="Iron Condor",
+        exit_signal=ExitSignal.HARD_STOP, exit_reason="test",
+        legs=[SimpleNamespace(symbol=s, qty=q) for s, q in zip(syms, qtys)])
+
+
+def _resp(body):
+    r = MagicMock()
+    r.json.return_value = body
+    r.raise_for_status.return_value = None
+    return r
+
+
+class TestAtomicClose:
+
+    @pytest.fixture(autouse=True)
+    def _fast(self, monkeypatch):
+        monkeypatch.setattr(executor_mod, "CLOSE_FILL_WAIT_S", 0.0)
+        monkeypatch.setattr(executor_mod.time, "sleep", lambda s: None)
+
+    def _ex(self, tmp_path, quotes=_CLOSE_QUOTES, provider=True):
+        dp = None
+        if provider:
+            dp = MagicMock()
+            dp.fetch_option_quotes.return_value = quotes
+        return OrderExecutor("k", "s", trade_plan_dir=str(tmp_path),
+                             dry_run=False, data_provider=dp)
+
+    def _run(self, ex, get_statuses):
+        """Each POST returns a new order id; GETs return ``get_statuses``
+        in order. Returns (result, post_mock, delete_mock)."""
+        posts = iter([_resp({"id": "o1"}), _resp({"id": "o2"})])
+        gets = iter([_resp({"status": s}) for s in get_statuses])
+        with patch.object(executor_mod.requests, "post", side_effect=lambda *a, **k: next(posts)) as p, \
+             patch.object(executor_mod.requests, "get", side_effect=lambda *a, **k: next(gets)), \
+             patch.object(executor_mod.requests, "delete", return_value=_resp({})) as d:
+            return ex.close_spread(_ic_spread()), p, d
+
+    def test_fills_at_improved_price_in_one_order(self, tmp_path):
+        res, post, delete = self._run(self._ex(tmp_path), ["filled"])
+        assert res["all_closed"] and res["close_method"] == "mleg_improved"
+        body = post.call_args.kwargs["json"]
+        assert body["order_class"] == "mleg" and body["qty"] == "16"
+        assert body["limit_price"] == "0.59"
+        intents = {l["symbol"]: l["position_intent"] for l in body["legs"]}
+        assert intents == {"P752": "buy_to_close", "P751": "sell_to_close",
+                           "C780": "buy_to_close", "C781": "sell_to_close"}
+        delete.assert_not_called()
+
+    def test_escalates_to_natural_when_improved_unfilled(self, tmp_path):
+        # improved: poll "new", cancel, post-cancel "canceled"; natural: "filled"
+        res, post, _ = self._run(self._ex(tmp_path), ["new", "canceled", "filled"])
+        assert res["close_method"] == "mleg_natural"
+        assert post.call_args.kwargs["json"]["limit_price"] == "0.69"
+
+    def test_falls_back_to_per_leg_after_both_canceled(self, tmp_path):
+        res, post, delete = self._run(self._ex(tmp_path),
+                                      ["new", "canceled", "new", "canceled"])
+        assert res["close_method"] == "per_leg"
+        pos_deletes = [c for c in delete.call_args_list if "/positions/" in c.args[0]]
+        assert len(pos_deletes) == 4
+
+    def test_unresolved_cancel_never_double_closes(self, tmp_path):
+        res, post, delete = self._run(self._ex(tmp_path), ["new", "pending_cancel"])
+        assert res["close_method"] == "mleg_unresolved" and not res["all_closed"]
+        assert post.call_count == 1
+        assert not [c for c in delete.call_args_list if "/positions/" in c.args[0]]
+
+    @pytest.mark.parametrize("kw,qtys", [
+        ({"provider": False}, (-16, 16, -16, 16)),                  # no quotes source
+        ({"quotes": {k: v for k, v in _CLOSE_QUOTES.items() if k != "C781"}},
+         (-16, 16, -16, 16)),                                       # missing quote
+        ({}, (-16, 10, -16, 16)),                                   # partial position
+    ])
+    def test_skips_atomic_path_when_unsafe(self, tmp_path, kw, qtys):
+        ex = self._ex(tmp_path, **kw)
+        with patch.object(executor_mod.requests, "post") as post, \
+             patch.object(executor_mod.requests, "delete", return_value=_resp({})):
+            res = ex.close_spread(_ic_spread(qtys))
+        post.assert_not_called()
+        assert res["close_method"] == "per_leg"

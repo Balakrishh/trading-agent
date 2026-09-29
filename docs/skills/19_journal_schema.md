@@ -171,6 +171,9 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 - **Atomic write per row via `locked_append`.** Concurrent writers (a cron-launched cycle + a Streamlit-launched manual cycle + the backtester) won't interleave bytes mid-line and break the JSONL parser. The lock is a per-file `fcntl` exclusive lock.
 
 - **Run-mode mistake.** A bug introduced 2025 wrote to `signals_lvie.jsonl` (typo) silently. The current code asserts `run_mode in {"live", "backtest"}` at construction so the typo can't recur (`journal_kb.py:118-122`).
+- **Multi-day reads (2026-09-29)** — `JournalReader.closes_since(days)` returns real closes within the last N ET days (`closes_today()` = `closes_since(0)`). `open_trades()` pairs `submitted` with real `closed` rows FIFO on (ticker, strategy, expiration); unmatched opens past expiration get `status="expired_unrecorded"` (e.g. XLE IC exp 2026-07-31 while the agent was down) — their P&L is not in the journal and must be reconciled against the broker. A submitted limit that never filled also shows as open until reconciled.
+- **`OpenedTrade` append-only fields** — `spread_width`, `max_loss`, `run_id`, `order_id`, `status` (defaults keep old constructors valid).
+- **Test hygiene** — tests that pin `JournalReader._today_et` by assignment are restored by the autouse fixture in `tests/conftest.py`; prefer `monkeypatch` in new tests.
 
 ## 5. Cross-References
 
@@ -183,4 +186,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-06-17.*
+*Last verified against repo HEAD on 2026-09-29.*

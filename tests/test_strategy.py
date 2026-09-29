@@ -518,3 +518,54 @@ class TestPlanSerialization:
         assert d["strategy"] == "Bull Put Spread"
         assert len(d["legs"]) == 2
         assert isinstance(d["max_loss"], (int, float))
+
+
+class TestIronCondorDeltaSumFloor:
+    """IC P(loss) ≈ |Δput| + |Δcall|; C/W must clear that sum (skill 03 §4).
+    Regression: 2026-09-29 SPY IC traded at C/W 0.48 with Δ-sum 0.58."""
+
+    @staticmethod
+    def _planner(short_bid, edge_buffer=0.0):
+        def put(s):
+            d = -0.28 if s == 752 else (-0.40 if s > 752 else -0.05)
+            b = short_bid if s == 752 else 0.10
+            return {"symbol": f"P{s}", "strike": float(s), "bid": b,
+                    "ask": b + 0.10, "mid": b + 0.05, "delta": d}
+
+        def call(s):
+            d = 0.30 if s == 780 else (0.40 if s < 780 else 0.05)
+            b = short_bid if s == 780 else 0.10
+            return {"symbol": f"C{s}", "strike": float(s), "bid": b,
+                    "ask": b + 0.10, "mid": b + 0.05, "delta": d}
+
+        puts = [put(s) for s in range(700, 767)]
+        calls = [call(s) for s in range(767, 830)]
+        provider = MagicMock(spec=MarketDataProvider)
+        provider.fetch_option_chain.side_effect = lambda t, e, o: (
+            puts if o == "put" else calls)
+        preset = MagicMock(edge_buffer=edge_buffer, scan_mode="static")
+        return StrategyPlanner(provider, max_delta=0.30, min_credit_ratio=0.25,
+                               width_mode="pct_of_spot", width_value=0.025,
+                               preset=preset)
+
+    def _plan(self, planner):
+        return planner._plan_iron_condor("SPY", _make_analysis(Regime.SIDEWAYS),
+                                         "2026-10-23")
+
+    def test_rejects_ic_below_delta_sum(self):
+        # wider wing = call side 2.5%×780 → $20; net = 2×(4.76 − 0.20)
+        # = 9.12 → C/W 0.456 < 0.58
+        plan = self._plan(self._planner(4.76))
+        assert plan.spread_width == 20.0
+        assert plan.valid is False
+        assert "Δ-sum floor" in plan.rejection_reason
+
+    def test_accepts_ic_above_delta_sum(self):
+        # net = 2×(6.40 − 0.20) = 12.40 on $20 → C/W 0.62 ≥ 0.58
+        plan = self._plan(self._planner(6.40))
+        assert plan.valid is True, plan.rejection_reason
+
+    def test_edge_buffer_raises_the_floor(self):
+        # 0.62 < 0.58 × 1.15 = 0.667 → rejected once edge_buffer applies
+        plan = self._plan(self._planner(6.40, edge_buffer=0.15))
+        assert plan.valid is False

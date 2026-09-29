@@ -53,7 +53,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Iterator, List, Optional, Set
 from zoneinfo import ZoneInfo
 
@@ -89,12 +89,21 @@ class ClosedTrade:
 
 @dataclass(frozen=True)
 class OpenedTrade:
-    """One submitted spread from today's ET trading session."""
+    """One submitted spread (from ``opens_today`` or ``open_trades``)."""
     ticker: str
     strategy: str
     credit: float
     expiration: str
     timestamp_utc: str
+    # Append-only (2026-09-29): populated from the submitted row's
+    # raw_signal so reporting surfaces stop showing width/opened_at as null.
+    spread_width: float = 0.0
+    max_loss: float = 0.0
+    run_id: str = ""
+    order_id: str = ""
+    # "open" | "expired_unrecorded" (expiration passed, no close row —
+    # e.g. the agent was down through expiry). Only set by open_trades().
+    status: str = "open"
 
 
 @dataclass(frozen=True)
@@ -218,26 +227,36 @@ class JournalReader:
             have any after decoupling #1, but historical pi journals
             still might)
         """
-        today_et = self._today_et()
+        return self.closes_since(0)
+
+    def closes_since(self, days: int) -> List[ClosedTrade]:
+        """Real broker closes whose ET date is within the last ``days``
+        calendar days (0 = today only). Same filters as ``closes_today``."""
+        cutoff = self._today_et() - timedelta(days=max(0, int(days)))
         out: List[ClosedTrade] = []
         for rec in self._iter_rows():
-            if self._row_et_date(rec) != today_et:
+            d = self._row_et_date(rec)
+            if d is None or d < cutoff:
                 continue
             if not self._is_real_close(rec):
                 continue
-            rs = rec.get("raw_signal") or {}
-            if not isinstance(rs, dict):
-                rs = {}
-            out.append(ClosedTrade(
-                ticker=rec.get("ticker", "") or "",
-                strategy=str(rs.get("strategy", "?")),
-                exit_signal=str(rs.get("exit_signal", "?")),
-                exit_reason=str(rs.get("exit_reason", "") or ""),
-                realized_pl=float(rs.get("net_unrealized_pl") or 0.0),
-                expiration=str(rs.get("expiration", "") or ""),
-                timestamp_utc=rec.get("timestamp", "") or "",
-            ))
+            out.append(self._closed_from_row(rec))
         return out
+
+    @staticmethod
+    def _closed_from_row(rec: dict) -> ClosedTrade:
+        rs = rec.get("raw_signal") or {}
+        if not isinstance(rs, dict):
+            rs = {}
+        return ClosedTrade(
+            ticker=rec.get("ticker", "") or "",
+            strategy=str(rs.get("strategy", "?")),
+            exit_signal=str(rs.get("exit_signal", "?")),
+            exit_reason=str(rs.get("exit_reason", "") or ""),
+            realized_pl=float(rs.get("net_unrealized_pl") or 0.0),
+            expiration=str(rs.get("expiration", "") or ""),
+            timestamp_utc=rec.get("timestamp", "") or "",
+        )
 
     def realized_pl_today(self) -> float:
         """Sum of realized P&L across ``closes_today``. One-line caller
@@ -247,25 +266,67 @@ class JournalReader:
     def opens_today(self) -> List[OpenedTrade]:
         """Every submitted spread from today's ET trading session."""
         today_et = self._today_et()
-        out: List[OpenedTrade] = []
+        return [self._opened_from_row(rec) for rec in self._iter_rows()
+                if self._row_et_date(rec) == today_et
+                and rec.get("action") == "submitted" and rec.get("ticker")]
+
+    def open_trades(self) -> List[OpenedTrade]:
+        """Every submitted spread not yet matched by a real close.
+
+        Opens and closes pair FIFO on (ticker, strategy, expiration).
+        An unmatched open whose expiration is before today (ET) gets
+        ``status="expired_unrecorded"`` — it expired or was closed while
+        the agent wasn't journaling, so its P&L is missing from the
+        journal. Journal-derived: a submitted limit order that never
+        filled also appears here until reconciled against the broker.
+        """
+        today_et = self._today_et()
+        pending: dict = {}
+        order: List[tuple] = []
         for rec in self._iter_rows():
-            if self._row_et_date(rec) != today_et:
+            action = rec.get("action")
+            if action == "submitted" and rec.get("ticker"):
+                o = self._opened_from_row(rec)
+                key = (o.ticker, o.strategy, o.expiration)
+                pending.setdefault(key, []).append(o)
+                order.append(key)
+            elif self._is_real_close(rec):
+                c = self._closed_from_row(rec)
+                queue = pending.get((c.ticker, c.strategy, c.expiration))
+                if queue:
+                    queue.pop(0)
+        out: List[OpenedTrade] = []
+        seen: Set[tuple] = set()
+        for key in order:
+            if key in seen:
                 continue
-            if rec.get("action") != "submitted":
-                continue
-            if not rec.get("ticker"):
-                continue
-            rs = rec.get("raw_signal") or {}
-            if not isinstance(rs, dict):
-                rs = {}
-            out.append(OpenedTrade(
-                ticker=rec["ticker"],
-                strategy=str(rs.get("strategy", "?")),
-                credit=float(rs.get("net_credit") or 0.0),
-                expiration=str(rs.get("expiration", "") or ""),
-                timestamp_utc=rec.get("timestamp", "") or "",
-            ))
+            seen.add(key)
+            for o in pending.get(key, []):
+                try:
+                    expired = date.fromisoformat(o.expiration) < today_et
+                except ValueError:
+                    expired = False
+                if expired:
+                    o = OpenedTrade(**{**o.__dict__, "status": "expired_unrecorded"})
+                out.append(o)
         return out
+
+    @staticmethod
+    def _opened_from_row(rec: dict) -> OpenedTrade:
+        rs = rec.get("raw_signal") or {}
+        if not isinstance(rs, dict):
+            rs = {}
+        return OpenedTrade(
+            ticker=rec["ticker"],
+            strategy=str(rs.get("strategy", "?")),
+            credit=float(rs.get("net_credit") or 0.0),
+            expiration=str(rs.get("expiration", "") or ""),
+            timestamp_utc=rec.get("timestamp", "") or "",
+            spread_width=float(rs.get("spread_width") or 0.0),
+            max_loss=float(rs.get("max_loss") or 0.0),
+            run_id=str(rs.get("run_id", "") or ""),
+            order_id=str(rs.get("order_id", "") or ""),
+        )
 
     def stuck_positions(self) -> List[StuckPosition]:
         """Positions currently requiring operator intervention.
