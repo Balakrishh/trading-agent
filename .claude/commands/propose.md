@@ -11,16 +11,31 @@ Arguments: `$ARGUMENTS` — underlying ticker, strategy name, then any
 Steps:
 
 1. `get_preset()` → note preset name + directional bias.
-2. `get_chain(underlying=..., expiration=..., option_type=...)` — pick the
-   expiration matching preset DTE window.
-3. `score_candidate(underlying=..., strategy=..., params=...)`.
-4. `get_risk_report()`.
-5. **Invoke the `risk-reviewer` subagent** (`.claude/agents/risk-reviewer.md`)
+2. `score_candidate(underlying=..., strategy=..., params=...)`.
+   The tool calls `decision_engine.decide()` internally and returns
+   `verdict.plan` (a `SpreadPlan`-shaped dict). If `verdict` is `null`,
+   report the error to the operator and stop.
+3. `get_risk_report()`.
+4. **Invoke the `risk-reviewer` subagent** (`.claude/agents/risk-reviewer.md`)
    with the scored verdict + risk report. Wait for its approve/reject.
-6. On approve: shell out to a Python one-liner that calls
-   `trading_agent.pending_orders_writer.write(...)` with the collected
-   fields. Record the returned UUID.
-7. Tell the operator: *"Proposal `<uuid>` written to `pending_orders/`. Run
+5. On approve: shell out to a Python one-liner that calls
+   `trading_agent.pending_orders_writer.write(...)` passing the whole
+   verdict dict from step 2. Record the returned UUID. Example:
+
+   ```bash
+   python -c "
+   import trading_agent.pending_orders_writer as w
+   import json, sys
+   verdict = json.loads(sys.stdin.read())
+   print(w.write(
+       underlying='AAPL', strategy='bull_put', params={},
+       verdict=verdict, risk_snapshot={}, preset_name='current',
+       auto_promote_requested=False,
+   ))
+   " <<< '<json>'
+   ```
+
+6. Tell the operator: *"Proposal `<uuid>` written to `pending_orders/`. Run
    `python -m trading_agent.executor_promote <uuid>` to review and submit."*
 
 Do NOT call `trading_agent.executor.*`. Do NOT run the promote CLI

@@ -247,6 +247,47 @@ def test_skill_55_preset_carries_auto_promote_fields():
     assert "auto_promote_allowed_strategies" in fields
 
 
+def test_skill_55_rehydrate_plan_round_trips():
+    """The proposal's ``verdict.plan`` dict must rebuild into a
+    SpreadPlan the RiskManager and OrderExecutor can consume.
+    """
+    from trading_agent.executor_promote import _rehydrate_plan
+    plan_dict = {
+        "ticker": "AAPL",
+        "strategy": "Bull Put Spread",
+        "regime": "test",
+        "legs": [
+            {"symbol": "AAPL251017P00170000", "strike": 170.0,
+             "action": "sell", "type": "put", "delta": -0.25,
+             "bid": 1.20, "ask": 1.25},
+            {"symbol": "AAPL251017P00165000", "strike": 165.0,
+             "action": "buy", "type": "put", "delta": -0.15,
+             "bid": 0.60, "ask": 0.65},
+        ],
+        "spread_width": 5.0,
+        "net_credit": 0.60,
+        "max_loss": 440.0,
+        "credit_to_width_ratio": 0.12,
+        "expiration": "2025-10-17",
+        "reasoning": "unit test",
+    }
+    plan = _rehydrate_plan(plan_dict)
+    assert plan.ticker == "AAPL"
+    assert plan.strategy_name == "Bull Put Spread"
+    assert len(plan.legs) == 2
+    assert plan.legs[0].action == "sell"
+    assert plan.legs[1].action == "buy"
+    assert plan.spread_width == 5.0
+    assert plan.net_credit == 0.60
+
+
+def test_skill_55_rehydrate_plan_rejects_missing_fields():
+    from trading_agent.executor_promote import _rehydrate_plan
+    import pytest
+    with pytest.raises(ValueError, match="missing fields"):
+        _rehydrate_plan({"ticker": "AAPL"})  # nowhere near enough
+
+
 def test_skill_55_preset_auto_promote_defaults_are_safe():
     """Every default must be the SAFE end of the scale."""
     from trading_agent.strategy_presets import PresetConfig
