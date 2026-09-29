@@ -559,6 +559,33 @@ def load_active_preset(path: Optional[Path] = None) -> PresetConfig:
             profit_target_pct, preset.profit_target_pct,
         )
 
+    # Skill 56 overlays — LLM-tunable fields the daily reviewer may
+    # propose. Same validation shape as profit_target_pct: range-checked
+    # here; invalid values log a warning and preserve the profile default.
+    min_pop = data.get("min_pop")
+    if isinstance(min_pop, (int, float)) and 0.30 <= min_pop <= 0.90:
+        overlay["min_pop"] = float(min_pop)
+    elif min_pop is not None:
+        logger.warning("Invalid min_pop %r — keeping profile default %r",
+                       min_pop, preset.min_pop)
+
+    max_leg_spread_cents = data.get("max_leg_spread_cents")
+    if (isinstance(max_leg_spread_cents, (int, float))
+            and 0.01 <= max_leg_spread_cents <= 1.00):
+        overlay["max_leg_spread_cents"] = float(max_leg_spread_cents)
+    elif max_leg_spread_cents is not None:
+        logger.warning(
+            "Invalid max_leg_spread_cents %r — keeping profile default %r",
+            max_leg_spread_cents, preset.max_leg_spread_cents)
+
+    defensive_roll_enabled = data.get("defensive_roll_enabled")
+    if isinstance(defensive_roll_enabled, bool):
+        overlay["defensive_roll_enabled"] = defensive_roll_enabled
+    elif defensive_roll_enabled is not None:
+        logger.warning(
+            "Invalid defensive_roll_enabled %r — keeping profile default %r",
+            defensive_roll_enabled, preset.defensive_roll_enabled)
+
     return replace(preset, **overlay)
 
 
@@ -569,6 +596,9 @@ def save_active_preset(profile: ProfileName,
                        scan_mode: Optional[ScanMode] = None,
                        edge_buffer: Optional[float] = None,
                        profit_target_pct: Optional[float] = None,
+                       min_pop: Optional[float] = None,
+                       max_leg_spread_cents: Optional[float] = None,
+                       defensive_roll_enabled: Optional[bool] = None,
                        path: Optional[Path] = None) -> Path:
     """
     Persist the active preset selection to ``STRATEGY_PRESET.json``.
@@ -593,6 +623,16 @@ def save_active_preset(profile: ProfileName,
         payload["edge_buffer"] = float(edge_buffer)
     if profit_target_pct is not None:
         payload["profit_target_pct"] = float(profit_target_pct)
+    # Skill 56 additions — LLM-tunable overlays. Same overlay pattern
+    # as edge_buffer / profit_target_pct: applied on top of whichever
+    # profile is chosen; the loader falls back to profile defaults
+    # when the field is absent.
+    if min_pop is not None:
+        payload["min_pop"] = float(min_pop)
+    if max_leg_spread_cents is not None:
+        payload["max_leg_spread_cents"] = float(max_leg_spread_cents)
+    if defensive_roll_enabled is not None:
+        payload["defensive_roll_enabled"] = bool(defensive_roll_enabled)
     if profile == "custom" and custom:
         # Only persist the dataclass-known keys.
         valid = {f.name for f in PresetConfig.__dataclass_fields__.values()}

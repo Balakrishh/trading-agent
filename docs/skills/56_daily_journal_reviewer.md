@@ -78,6 +78,47 @@ All three default to the SAFE end — auto-apply is unreachable without operator
 
 `ops/launchd/com.trading-agent.daily-reviewer.plist` — Mon-Fri at 16:15 local. Requires two hand-edits (venv python path + repo dir) before installing.
 
+### 3.7 Apply CLI (Phase B write path)
+
+```python
+# trading_agent/apply_preset_update.py
+def evaluate_apply_gate(
+    *,
+    proposal: Dict[str, Any],
+    preset: Any,
+) -> ApplyGateResult:
+    """Return an ApplyGateResult. Every predicate mirrors skill 56 §3.5."""
+```
+
+Three predicates for auto-apply:
+
+1. `TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED` env truthy.
+2. Every field in `proposal["preset_diff"]` appears in
+   `preset.auto_apply_allowed_fields`.
+3. For each numeric field, `|new − old| / max(|old|, 1e-9) ≤
+   preset.auto_apply_max_delta_change_pct`. Boolean fields (e.g.
+   `defensive_roll_enabled`) skip the cap — a flip is a flip.
+
+Any fail → the CLI prints the diff, lists the gate failures, and
+prompts `y/N`. All pass → auto-apply fires. Preset changes go through
+`save_active_preset` with the LLM-proposed field passed as an overlay
+kwarg; watchlist changes go through `add_ticker` / `remove_ticker`.
+
+### 3.8 Slash command (Phase C)
+
+`.claude/commands/review.md` — `/review [YYYY-MM-DD]` re-renders any
+past daily review from disk using the same
+`render_telegram_digest()` code path. Read-only; never invokes the
+apply CLI.
+
+### 3.9 Prompt evals (Phase D)
+
+`evals/daily_reviewer/scenarios.jsonl` — hand-curated day scenarios.
+`tests/eval/test_daily_reviewer_scenarios.py` runs offline in CI
+(parser + digest structure claims); opt-in online mode
+(`EVAL_DAILY_REVIEWER_ONLINE=true`) sends each scenario to the live
+LLM and checks the parsed output.
+
 ## 4. Edge Cases / Guardrails
 
 - **Read-only invariant.** `daily_reviewer.py`, `daily_reviewer_main.py`, `apply_preset_update.py`, and `pending_preset_updates_writer.py` must never import `trading_agent.executor`, `submit_order`, `place_order`, or `OrderExecutor`. AST-verified.
@@ -87,7 +128,8 @@ All three default to the SAFE end — auto-apply is unreachable without operator
 - **Weekend skip.** The launchd unit only schedules Mon–Fri. Manual runs on weekends still work; the reviewer processes whatever the journal contains.
 - **Telegram outage.** A send failure logs a warning and returns `sent=False`. The audit + proposal writes still complete.
 - **Malformed LLM JSON.** Parse fails → returns an empty `ReviewOutput` with `raw_llm_text` echoing the failure. Digest renders with the "no proposals" branch; no proposal file is staged.
-- **Phase A apply is a stub.** `apply_preset_update.py` prints the diff and exits 0. Phase B lands the actual `save_active_preset` + `save_watchlist` writes plus the 3-predicate auto-apply gate.
+- **Apply CLI is opt-in.** `apply_preset_update.py` never runs unattended. Auto-apply requires the operator to (a) flip `TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED=true`, (b) populate `preset.auto_apply_allowed_fields`, AND (c) set `auto_apply_max_delta_change_pct > 0`. Any one of the three at its default disables auto-apply.
+- **`save_active_preset` callers are CI-restricted.** Only `apply_preset_update.py`, `strategy_presets.py` itself, and Streamlit surfaces may import it. A new scheduled task or MCP tool cannot silently mutate live config — enforced by `test_skill_56_save_active_preset_callers_restricted`.
 - **`pending_preset_updates/` + `daily_reviews/` must be `.gitignore`d.** Both may contain live PnL and account context.
 
 ## 5. Cross-References

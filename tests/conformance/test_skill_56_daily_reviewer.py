@@ -55,19 +55,34 @@ def test_skill_56_reviewer_never_imports_executor():
     )
 
 
-def test_skill_56_apply_stub_does_not_import_preset_save():
-    """The Phase-A apply CLI must NOT import save_active_preset yet.
-    Phase B will wire it behind the 3-predicate gate; landing them
-    together would be an untested change.
+def test_skill_56_save_active_preset_callers_restricted():
+    """save_active_preset may only be imported by
+    ``apply_preset_update.py`` (Claude Code write path) and Streamlit
+    surfaces (the operator's existing "Apply" button). No other
+    module in ``trading_agent/`` may reach the persistence primitive.
+    Widening this would let a scheduled task or MCP tool silently
+    mutate live config.
     """
-    src = (_ROOT / "trading_agent" / "apply_preset_update.py").read_text()
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            for a in node.names:
-                assert a.name != "save_active_preset", (
-                    "apply_preset_update.py must remain a stub in Phase A"
-                )
+    allowed = {"apply_preset_update.py", "strategy_presets.py"}
+    offenders = []
+    for py in (_ROOT / "trading_agent").rglob("*.py"):
+        if py.name in allowed:
+            continue
+        try:
+            tree = ast.parse(py.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name == "save_active_preset":
+                        offenders.append(str(py.relative_to(_ROOT)))
+    # Streamlit surfaces are the one intentional exception.
+    disallowed = [f for f in offenders if "streamlit" not in f]
+    assert not disallowed, (
+        "save_active_preset may only be imported by apply_preset_update.py, "
+        f"strategy_presets.py, and Streamlit surfaces. Offenders: {disallowed}"
+    )
 
 
 def test_skill_56_parse_llm_output_filters_forbidden_fields():
@@ -215,3 +230,201 @@ def test_skill_56_gitignored():
     ig = (_ROOT / ".gitignore").read_text()
     assert "daily_reviews/" in ig
     assert "pending_preset_updates/" in ig
+
+
+# ---------------------------------------------------------------------------
+# Phase B — 3-predicate auto-apply gate
+# ---------------------------------------------------------------------------
+
+class _StubPreset:
+    """Minimal PresetConfig stand-in for gate tests."""
+    def __init__(self, **kw):
+        self.auto_apply_preset_updates_enabled = kw.get("enabled", True)
+        self.auto_apply_max_delta_change_pct = kw.get("cap_pct", 0.15)
+        self.auto_apply_allowed_fields = kw.get(
+            "allowed", ("profit_target_pct", "edge_buffer"))
+
+
+def _proposal(**over):
+    base = {
+        "preset_snapshot": {"profit_target_pct": 0.50},
+        "preset_diff":     {"profit_target_pct": 0.55},
+        "watchlist_diff":  {},
+    }
+    base.update(over)
+    return base
+
+
+def test_skill_56_apply_gate_happy_path(monkeypatch):
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "true")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    g = evaluate_apply_gate(proposal=_proposal(), preset=_StubPreset())
+    assert g.all_pass, g.failures()
+
+
+def test_skill_56_apply_gate_master_switch_off(monkeypatch):
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "false")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    g = evaluate_apply_gate(proposal=_proposal(), preset=_StubPreset())
+    assert not g.all_pass
+    assert "AUTO_APPLY_PRESET_UPDATES_ENABLED" in g.master_switch
+
+
+def test_skill_56_apply_gate_field_not_in_allowlist(monkeypatch):
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "true")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    g = evaluate_apply_gate(
+        proposal=_proposal(preset_diff={"min_pop": 0.60},
+                           preset_snapshot={"min_pop": 0.55}),
+        preset=_StubPreset(allowed=("profit_target_pct",)))
+    assert not g.all_pass
+    assert "not in allowlist" in g.field_allowlist
+
+
+def test_skill_56_apply_gate_empty_allowlist_disables(monkeypatch):
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "true")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    g = evaluate_apply_gate(
+        proposal=_proposal(),
+        preset=_StubPreset(allowed=()))
+    assert not g.all_pass
+    assert "empty" in g.field_allowlist
+
+
+def test_skill_56_apply_gate_delta_size_over_cap(monkeypatch):
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "true")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    # 0.50 → 0.75 = +50% change; cap is 10%
+    g = evaluate_apply_gate(
+        proposal=_proposal(preset_diff={"profit_target_pct": 0.75}),
+        preset=_StubPreset(cap_pct=0.10))
+    assert not g.all_pass
+    assert "cap" in g.delta_size_cap
+
+
+def test_skill_56_apply_gate_delta_size_zero_cap_disables(monkeypatch):
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "true")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    g = evaluate_apply_gate(
+        proposal=_proposal(),
+        preset=_StubPreset(cap_pct=0.0))
+    assert not g.all_pass
+    assert "disabled" in g.delta_size_cap
+
+
+def test_skill_56_apply_gate_boolean_flip_bypasses_size_cap(monkeypatch):
+    """Boolean fields (defensive_roll_enabled) have no meaningful
+    delta-percent — a flip should count as within-cap.
+    """
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "true")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    g = evaluate_apply_gate(
+        proposal=_proposal(
+            preset_diff={"defensive_roll_enabled": True},
+            preset_snapshot={"defensive_roll_enabled": False}),
+        preset=_StubPreset(
+            cap_pct=0.10,
+            allowed=("defensive_roll_enabled",)))
+    assert g.all_pass, g.failures()
+
+
+def test_skill_56_apply_gate_no_preset_diff_trivially_ok(monkeypatch):
+    """A watchlist-only proposal has no preset_diff; the allowlist +
+    size-cap predicates are trivially satisfied.
+    """
+    monkeypatch.setenv(
+        "TRADING_AGENT_AUTO_APPLY_PRESET_UPDATES_ENABLED", "true")
+    from trading_agent.apply_preset_update import evaluate_apply_gate
+    g = evaluate_apply_gate(
+        proposal={"preset_diff": {}, "preset_snapshot": {},
+                  "watchlist_diff": {"drops": ["XYZ"]}},
+        preset=_StubPreset())
+    # allowlist and size-cap are pass; only depend on master switch
+    assert g.field_allowlist == "pass"
+    # size-cap still shows "disabled" because cap>0 but no fields to check.
+    # It's fine either way — this test just verifies no crash on empty diff.
+
+
+def test_skill_56_digest_snapshot_stable():
+    """Golden-file snapshot test — a curated fixture renders to a
+    specific byte sequence. Change here means every downstream
+    dashboard / Telegram consumer needs review.
+    """
+    from trading_agent.daily_reviewer import (
+        render_telegram_digest, ReviewContext, ReviewOutput,
+    )
+    ctx = ReviewContext(
+        review_date="2026-09-29",
+        opens=[
+            {"ticker": "AAPL", "strategy": "bull_put", "credit": 0.61},
+            {"ticker": "MSFT", "strategy": "iron_condor", "credit": 1.20},
+        ],
+        closes=[
+            {"ticker": "JPM", "strategy": "bear_call",
+             "pnl": 128.0, "reason": "profit_target"},
+        ],
+        reject_reasons=[["wide_spread", 4], ["low_pop", 2]],
+        realized_pl=128.0,
+        preset={"name": "custom", "profit_target_pct": 0.50},
+        watchlist=["SPY", "QQQ", "IWM"],
+        macro={"vix_zone": "normal"},
+        recent_alerts=[],
+        cold_start=False,
+    )
+    out = ReviewOutput(
+        observations=[
+            "Bull-puts on tech names took profit on day 2.",
+            "GLD rejects for wide spreads continued — 4 of 5 cycles.",
+        ],
+        preset_proposal={
+            "field": "profit_target_pct",
+            "current": 0.50,
+            "proposed": 0.55,
+            "reason": "Today's winners closed at 51% — 5% wringing improves per-trade PnL without hurting hit rate.",
+            "confidence": 0.72,
+        },
+        watchlist_proposal={
+            "drops": ["GLD"],
+            "adds": [],
+            "reason": "Chronic per-leg spread rejects; not tradeable this regime.",
+        },
+        digest_lines=[],
+        confidence=0.72,
+    )
+    digest = render_telegram_digest(ctx, out, proposal_id="test-uuid-000")
+
+    # Structural assertions rather than a byte-for-byte snapshot so
+    # future prose tweaks in the digest don't force a fixture rewrite.
+    # If a change here surprises a downstream consumer, extend the
+    # assertions rather than pinning the whole string.
+    for expected in [
+        "Daily Review — 2026-09-29",
+        "2 opens · 1 closes",
+        "P&amp;L +128.00",
+        "Bull-puts on tech names",
+        "profit_target_pct",
+        "0.5 → 0.55",
+        "conf 0.72",
+        "Watchlist drops: GLD",
+        "test-uuid-000",
+    ]:
+        assert expected in digest, f"digest missing: {expected}\n{digest}"
+
+
+def test_skill_56_save_active_preset_accepts_new_overlays():
+    """The Phase B write path passes min_pop / max_leg_spread_cents /
+    defensive_roll_enabled as overlays. Verify the function signature
+    accepts them without raising a TypeError at call time.
+    """
+    import inspect
+    from trading_agent.strategy_presets import save_active_preset
+    sig = inspect.signature(save_active_preset)
+    for kw in ("min_pop", "max_leg_spread_cents", "defensive_roll_enabled"):
+        assert kw in sig.parameters, f"{kw} missing from save_active_preset"

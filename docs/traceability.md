@@ -56,7 +56,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 53 | incident response | mcp/tools/market.py, exception_monitor.py, journal_reader.py | — | ❌ MISSING | — |
 | 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | — | ❌ MISSING | — |
 | 55 | pending orders promotion | executor_promote.py, pending_orders_writer.py, strategy_presets.py | test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_55_promote_gate.py | — |
-| 56 | daily journal reviewer | daily_reviewer.py, daily_reviewer_main.py, pending_preset_updates_writer.py, apply_preset_update.py | — | conformance/test_skill_56_daily_reviewer.py | — |
+| 56 | daily journal reviewer | daily_reviewer.py, daily_reviewer_main.py, pending_preset_updates_writer.py, apply_preset_update.py | eval/test_daily_reviewer_scenarios.py | conformance/test_skill_56_daily_reviewer.py | — |
 
 **Skills with conformance tests:** 42 / 48 (87%)
 
