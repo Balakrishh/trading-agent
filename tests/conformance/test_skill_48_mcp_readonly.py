@@ -127,6 +127,29 @@ def test_skill_48_numeric_args_coerced_from_strings():
         get_recent_alerts(hours="banana")
 
 
+def test_skill_48_fundamentals_tool_registered():
+    """Skill 47 fundamentals extension: get_fundamentals must appear in
+    the closed READONLY_TOOLS set AND be wired in _HANDLERS.
+    """
+    from trading_agent.mcp import READONLY_TOOLS
+    from trading_agent.mcp.server import _HANDLERS
+    assert "get_fundamentals" in READONLY_TOOLS
+    assert "get_fundamentals" in _HANDLERS
+    assert callable(_HANDLERS["get_fundamentals"])
+
+
+def test_skill_48_fundamentals_returns_unavailable_when_server_down(monkeypatch):
+    """When SCHWAB_API_BASE_URL is unset, the tool returns a structured
+    unavailable row rather than raising — matches the get_quote pattern.
+    """
+    monkeypatch.delenv("SCHWAB_API_BASE_URL", raising=False)
+    from trading_agent.mcp.tools.market import get_fundamentals
+    r = get_fundamentals("AAPL")
+    assert r["ticker"] == "AAPL"
+    assert r.get("source") == "unavailable"
+    assert r.get("fundamentals") == {}
+
+
 def test_skill_48_mcp_json_wires_module():
     """The .mcp.json at repo root wires ``python -m trading_agent.mcp``.
     Refactoring the entry point without updating .mcp.json would

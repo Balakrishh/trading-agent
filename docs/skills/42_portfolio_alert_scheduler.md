@@ -110,4 +110,4 @@ Wraps the body in `<pre>{html_escape(body)}</pre>` so Telegram renders it monosp
 
 ---
 
-*Last verified against repo HEAD on 2026-06-17.*
+*Last verified against repo HEAD on 2026-09-29.*

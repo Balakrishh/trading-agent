@@ -85,6 +85,38 @@ def get_market_status() -> Dict[str, Any]:
         return {"open": None, "source": "unavailable", "error": str(exc)}
 
 
+def get_fundamentals(ticker: str) -> Dict[str, Any]:
+    """Return the fundamentals block for one equity ticker.
+
+    Passthrough to the skill-47 data server's ``/fundamentals/{ticker}``
+    route. When the data server is unreachable, returns a structured
+    ``{"source": "unavailable"}`` row rather than raising — the LLM
+    decides whether to ask the operator to bring the server up.
+
+    Fields (all present as dict keys; individual values may be None):
+
+    - Identity: ``ticker``, ``cusip``, ``description``, ``exchange``,
+      ``asset_type``
+    - Valuation: ``pe_ratio``, ``peg_ratio``, ``pb_ratio``, ``eps_ttm``,
+      ``market_cap``, ``book_value_per_share``
+    - Dividend: ``dividend_yield``, ``dividend_amount``,
+      ``dividend_date``, ``next_dividend_pay_date``
+    - Trading: ``beta``, ``high_52w``, ``low_52w``,
+      ``vol_avg_10d``, ``vol_avg_1y``, ``shares_outstanding``
+    - Profitability: ``roe``, ``roa``
+    - Provenance: ``as_of`` (ISO-8601 UTC)
+    """
+    if not ticker:
+        raise ValueError("ticker is required")
+    remote = _data_server_get(f"fundamentals/{ticker.upper()}")
+    if remote is not None:
+        return remote
+    return {"ticker": ticker.upper(),
+            "fundamentals": {},
+            "source": "unavailable",
+            "note": "data server unreachable"}
+
+
 def get_recent_alerts(hours: Any = 24) -> Dict[str, Any]:
     """Read the ExceptionMonitor's recent-events log (skill 34).
 

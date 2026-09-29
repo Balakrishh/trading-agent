@@ -64,6 +64,9 @@ class MarketDataPort:
         fetch_option_chain(underlying, expiration_date, option_type) -> list[dict]
         fetch_option_quotes(symbols: list[str]) -> list[dict]
         fetch_batch_snapshots(tickers: list[str]) -> dict[str, dict]
+
+    Optional methods (route returns 501 if absent):
+        fetch_fundamentals(ticker: str) -> dict   # skill 47 fundamentals extension
     """
 
 
@@ -220,6 +223,31 @@ def build_app(
             raise _upstream_error(exc)
         return {"count": len(data) if hasattr(data, "__len__") else 0,
                 "snapshots": data}
+
+    @app.get("/fundamentals/{ticker}", dependencies=[Depends(auth_dep)])
+    async def fundamentals(ticker: str) -> Dict[str, Any]:
+        t = _validate_ticker(ticker)
+        # Fundamentals change at earnings cadence, not by the minute —
+        # any caching decision here is decoupled from the price/snapshot
+        # TTLs. When the master cache switch is off we return live every
+        # time (matches skill 47 §3.4 semantics); when on, we defer to
+        # the provider's own instrument-level cache. No new server-side
+        # TTLCache instance is created; the LLM watchlist-curation flow
+        # calls this at most once per ticker per day.
+        try:
+            data = provider.fetch_fundamentals(t)
+        except AttributeError as exc:
+            # Provider doesn't implement fundamentals — surface a 501 so
+            # a stub-provider in tests can gracefully answer "not here".
+            raise HTTPException(
+                status_code=501,
+                detail={"error": "not_implemented",
+                        "reason": "provider does not implement fetch_fundamentals",
+                        "underlying": str(exc)},
+            )
+        except Exception as exc:                                # noqa: BLE001
+            raise _upstream_error(exc)
+        return {"ticker": t, "fundamentals": data or {}}
 
     @app.get("/market-status", dependencies=[Depends(auth_dep)])
     async def market_status() -> Dict[str, Any]:

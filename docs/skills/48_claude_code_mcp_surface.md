@@ -32,6 +32,7 @@ get_chain(underlying, expiration=None,          — skill-47 passthrough
           option_type=None)
 get_quote(symbol)                               — skill-47 passthrough
 get_market_status()                             — skill-47 passthrough
+get_fundamentals(ticker)                        — P/E, EPS, mcap, dividend, beta, 52w, ROE/ROA (skill-47 passthrough)
 get_recent_alerts(hours=24)                     — ExceptionMonitor tail
 ```
 
@@ -62,6 +63,7 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_chain",
     "get_quote",
     "get_market_status",
+    "get_fundamentals",
     "get_recent_alerts",
 )
 ```
@@ -82,6 +84,7 @@ _HANDLERS: Dict[str, Callable[..., Any]] = {
     "get_chain":          _market.get_chain,
     "get_quote":          _market.get_quote,
     "get_market_status":  _market.get_market_status,
+    "get_fundamentals":   _market.get_fundamentals,
     "get_recent_alerts":  _market.get_recent_alerts,
 }
 ```

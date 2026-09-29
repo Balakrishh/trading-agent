@@ -35,6 +35,7 @@ GET  /chain/{underlying}?expiration=&option_type=
 POST /quotes           body {"symbols": [...]}   — batch option/stock quote lookup
 POST /snapshots        body {"tickers": [...]}   — batch stock snapshots with indicators
 GET  /market-status                              — is_within_market_hours() + next open/close
+GET  /fundamentals/{ticker}                      — P/E, EPS, market cap, dividend, beta, 52w range, ROE/ROA
 ```
 
 **Explicitly NOT exposed** — CI-verified via `test_readonly_no_forbidden_imports`:
@@ -165,4 +166,4 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 ---
 
-*Last verified against repo HEAD on 2026-09-28.*
+*Last verified against repo HEAD on 2026-09-29.*

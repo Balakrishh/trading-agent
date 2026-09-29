@@ -776,6 +776,104 @@ class SchwabMarketDataProvider(MarketDataProvider):
         except AttributeError:
             return False
 
+    # ------------------------------------------------------------------
+    # Fundamentals — instrument screener + quality filter feed (skill 58)
+    # ------------------------------------------------------------------
+    def fetch_fundamentals(self, ticker: str) -> Dict[str, Any]:
+        """Return Schwab's fundamentals block for a single equity ticker.
+
+        Wraps ``GET /instruments?symbol={ticker}&projection=fundamental``.
+        The response is normalised to a flat dict with the fields the
+        watchlist curation and daily-reviewer flows consume:
+
+            {
+              "ticker":            "AAPL",
+              "cusip":             "037833100",
+              "description":       "APPLE INC",
+              "exchange":          "NASDAQ",
+              "asset_type":        "EQUITY",
+              "pe_ratio":          31.2,
+              "peg_ratio":         2.10,
+              "pb_ratio":          58.4,
+              "eps_ttm":           6.05,
+              "market_cap":        3_100_000_000_000,
+              "shares_outstanding": 15_200_000_000,
+              "dividend_yield":    0.0044,
+              "dividend_amount":   0.24,
+              "dividend_date":     "2026-08-15",
+              "next_dividend_pay_date": "2026-11-15",
+              "beta":              1.24,
+              "high_52w":          237.30,
+              "low_52w":           164.10,
+              "vol_avg_10d":       55_000_000,
+              "vol_avg_1y":        60_000_000,
+              "roe":               0.28,
+              "roa":               0.20,
+              "book_value_per_share": 3.10,
+              "as_of":             ISO utc timestamp of the fetch,
+            }
+
+        Returns an empty dict when Schwab returns nothing (unknown
+        ticker, delisted, OTC name not in Schwab's universe) — callers
+        treat empty as "no fundamentals available" rather than raising.
+        """
+        t = (ticker or "").strip().upper()
+        if not t:
+            return {}
+        body = self._get(
+            "/instruments",
+            params={"symbol": t, "projection": "fundamental"},
+        )
+        if not isinstance(body, dict):
+            return {}
+        # Schwab shape: {"instruments": [ {"symbol": "AAPL",
+        #   "fundamental": {...}, "cusip": "...", ...} ]}
+        instruments = body.get("instruments")
+        if not isinstance(instruments, list) or not instruments:
+            return {}
+        row = instruments[0]
+        f = row.get("fundamental") or {}
+        return {
+            "ticker":             row.get("symbol") or t,
+            "cusip":              row.get("cusip"),
+            "description":        row.get("description"),
+            "exchange":           row.get("exchange"),
+            "asset_type":         row.get("assetType"),
+            "pe_ratio":           _safe_float(f.get("peRatio")),
+            "peg_ratio":          _safe_float(f.get("pegRatio")),
+            "pb_ratio":           _safe_float(f.get("pbRatio")),
+            "eps_ttm":            _safe_float(f.get("epsTTM")),
+            "market_cap":         _safe_float(f.get("marketCap")),
+            "shares_outstanding": _safe_float(f.get("sharesOutstanding")),
+            "dividend_yield":     _safe_float(f.get("divYield")),
+            "dividend_amount":    _safe_float(f.get("divAmount")),
+            "dividend_date":      f.get("divDate"),
+            "next_dividend_pay_date": f.get("nextDivPayDate"),
+            "beta":               _safe_float(f.get("beta")),
+            "high_52w":           _safe_float(f.get("high52")),
+            "low_52w":            _safe_float(f.get("low52")),
+            "vol_avg_10d":        _safe_float(f.get("vol10DayAvg")),
+            "vol_avg_1y":         _safe_float(f.get("vol1YearAvg")),
+            "roe":                _safe_float(f.get("returnOnEquity")),
+            "roa":                _safe_float(f.get("returnOnAssets")),
+            "book_value_per_share": _safe_float(f.get("bookValuePerShare")),
+            "as_of":              datetime.now(timezone.utc).isoformat(),
+        }
+
+
+def _safe_float(v: Any) -> Optional[float]:
+    """None-preserving float coerce. Schwab omits fields that don't
+    apply (e.g. div_yield for non-dividend-paying tickers); we keep
+    those as None rather than coercing to 0.0 which would blur the
+    "no data" vs "zero" distinction downstream.
+    """
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Backwards-compat shim — re-exports the factory from its new home.

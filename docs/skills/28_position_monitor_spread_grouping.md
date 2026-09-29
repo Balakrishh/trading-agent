@@ -119,4 +119,4 @@ spreads.extend(inferred)
 
 ---
 
-*Last verified against repo HEAD on 2026-07-02.*
+*Last verified against repo HEAD on 2026-09-29.*
