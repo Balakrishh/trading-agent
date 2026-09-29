@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily journal reviewer launchd unit (skill 56).
+
+  Install:
+    1. Copy to ~/Library/LaunchAgents/
+       cp ops/launchd/com.trading-agent.daily-reviewer.plist \
+          ~/Library/LaunchAgents/
+
+    2. Edit the two <string> paths below to match your setup:
+       - REPLACE_WITH_VENV_PYTHON with the absolute path to your venv's
+         python (e.g. /Users/balakrishnapedada/trading-agent/myenv/bin/python)
+       - REPLACE_WITH_REPO_DIR with the trading-agent repo root
+         (e.g. /Users/balakrishnapedada/trading-agent)
+
+    3. Load it:
+       launchctl load ~/Library/LaunchAgents/com.trading-agent.daily-reviewer.plist
+
+    4. Verify it's scheduled:
+       launchctl list | grep trading-agent
+
+  This unit runs at 4:15 PM local time Mon-Fri. The reviewer itself
+  exits cleanly with a stderr note when TRADING_AGENT_DAILY_REVIEWER_ENABLED
+  is unset — so this .plist is safe to install even before you're ready
+  to flip the switch.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.trading-agent.daily-reviewer</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_VENV_PYTHON</string>
+    <string>-m</string>
+    <string>trading_agent.daily_reviewer_main</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_REPO_DIR</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Master switch. Set to "true" to actually run the review;
+         anything else exits cleanly. -->
+    <key>TRADING_AGENT_DAILY_REVIEWER_ENABLED</key>
+    <string>false</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>15</integer></dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/trading-agent.daily-reviewer.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/trading-agent.daily-reviewer.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

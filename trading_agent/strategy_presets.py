@@ -230,6 +230,23 @@ class PresetConfig:
     auto_promote_allowed_strategies:   Tuple[str, ...] = ()
 
     # ------------------------------------------------------------------
+    # Auto-apply caps for LLM-proposed preset updates (skill 56).
+    #
+    # After each daily_reviewer run, an LLM may propose PresetConfig
+    # diffs (e.g. raise profit_target_pct from 0.50 → 0.55). By default
+    # the operator applies these manually via
+    # ``python -m trading_agent.apply_preset_update <uuid>``.
+    #
+    # When ``auto_apply_preset_updates_enabled`` is set AND the proposed
+    # change stays within the allowlisted fields AND the delta is under
+    # the per-field size cap, the apply CLI can auto-persist without
+    # prompting. All three fields default to the SAFE end.
+    # ------------------------------------------------------------------
+    auto_apply_preset_updates_enabled: bool  = False
+    auto_apply_max_delta_change_pct:   float = 0.0    # e.g. 0.10 = up to 10 %
+    auto_apply_allowed_fields:         Tuple[str, ...] = ()
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
