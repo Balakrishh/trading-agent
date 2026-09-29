@@ -157,6 +157,8 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 - **CORS is off by default.** No `Access-Control-Allow-Origin` header. If a browser-side consumer ever appears, add it explicitly then. Curl and Python `requests` don't care about CORS.
 - **The trading agent process does NOT depend on this server.** If the server is down, the trading agent's cycle proceeds normally with its own in-process `SchwabMarketDataProvider`. Vice versa: if the trading agent is down, the API server keeps serving. Full crash isolation.
 
+- **Key source + fingerprint at startup (2026-09-29).** `main()` loads `.env` *before* `ServerConfig.from_env()` (previously the key came only from the launching shell) and logs `API key source=<shell env | shell env (overrides .env) | .env | unset> fingerprint=<sha256[:8]>`. The key itself is never logged. If a shell export shadows a *different* `.env` key it logs a WARNING with both fingerprints and the `env -u SCHWAB_API_SERVER_KEY …` restart command — the stale-export case that made every MCP call 401. Operators compare with `printf %s "$SCHWAB_API_SERVER_KEY" | shasum -a 256 | cut -c1-8` on the client side; `e3b0c442` = empty.
+
 ## 5. Cross-References
 
 - `16_market_data_provider_routing.md` — the underlying provider this server wraps. When the surface routing picks Schwab, we're calling the same code path this server exposes.

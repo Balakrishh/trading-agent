@@ -118,6 +118,8 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 - **Errors surface as tool errors, not server errors.** Any exception inside a handler becomes a JSON-RPC error with the exception's type + message. The MCP loop keeps serving; the Claude Code session sees a structured failure.
 - **stdio transport, one process per session.** The server is spawned per Claude Code session. No shared state between sessions.
 
+- **`.env` loading (2026-09-29).** `python -m trading_agent.mcp` calls `load_dotenv()` at startup, the same source the data server reads via `load_config()`, so `SCHWAB_API_SERVER_KEY` / `SCHWAB_API_BASE_URL` in `.env` reach the MCP. As with `load_config()`, a variable already exported in the launching shell (e.g. `~/.zshrc`) wins over `.env` — keep the key in exactly one place or the two servers can disagree (every data-server call then surfaces as "unreachable", since the client swallows 401s).
+
 ## 5. Cross-References
 
 - `47_schwab_data_api.md` — the HTTP data server this MCP layer prefers for quotes/chains/market-status. When it's up, `_data_server_get()` uses it; when it's down, the tools return `{"source": "unavailable"}` structured rows.

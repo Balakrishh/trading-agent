@@ -205,3 +205,13 @@ def test_skill_48_positions_span_days_and_carry_fields(tmp_path, monkeypatch):
     assert trades["closes"][0]["pnl"] == 55.0
     assert trades["realized_pl_window"] == 55.0
     assert trades["closes_today"] == []
+
+
+def test_skill_48_mcp_entry_loads_dotenv(monkeypatch):
+    """The MCP must read .env like the data server (load_config), or a
+    SCHWAB_API_SERVER_KEY set only in .env never reaches it."""
+    import trading_agent.mcp.__main__ as entry
+    calls = []
+    monkeypatch.setattr(entry, "load_dotenv", lambda *a, **k: calls.append(1))
+    assert entry.main(["--list-tools"]) == 0
+    assert calls, "python -m trading_agent.mcp must call load_dotenv()"

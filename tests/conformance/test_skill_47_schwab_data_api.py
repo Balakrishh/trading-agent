@@ -551,3 +551,55 @@ def test_env_bool_parses_common_truthy_values(monkeypatch):
     monkeypatch.delenv("SCHWAB_API_TEST_BOOL", raising=False)
     assert _env_bool("SCHWAB_API_TEST_BOOL", default=True) is True
     assert _env_bool("SCHWAB_API_TEST_BOOL", default=False) is False
+
+
+def test_skill_47_main_loads_dotenv_before_reading_server_key(monkeypatch):
+    """Regression 2026-09-29: ServerConfig.from_env() ran before .env was
+    loaded, so a SCHWAB_API_SERVER_KEY set only in .env never applied and
+    the MCP (which reads .env) got 401 on every call."""
+    import trading_agent.data_server.__main__ as entry
+
+    order = []
+
+    class _Stop(Exception):
+        pass
+
+    def fake_from_env():
+        order.append("from_env")
+        raise _Stop
+
+    monkeypatch.setattr(entry, "load_dotenv", lambda *a, **k: order.append("dotenv"))
+    monkeypatch.setattr(entry.ServerConfig, "from_env", staticmethod(fake_from_env))
+    try:
+        entry.main([])
+    except _Stop:
+        pass
+    assert order == ["dotenv", "from_env"]
+
+
+def test_skill_47_key_fingerprint_matches_shasum_and_never_leaks():
+    """sha256[:8] — same as `printf %s KEY | shasum -a 256 | cut -c1-8`."""
+    from trading_agent.data_server.auth import key_fingerprint
+    assert key_fingerprint("test") == "9f86d081"
+    assert key_fingerprint("") == key_fingerprint(None) == "e3b0c442"
+    assert "secret-value" not in key_fingerprint("secret-value")
+
+
+@pytest.mark.parametrize("shell,dotenv,source,warns", [
+    ("", "", "unset", False),
+    ("", "k1", ".env", False),
+    ("k1", "", "shell env", False),
+    ("k1", "k1", "shell env (overrides .env)", False),
+    ("k1", "k2", "shell env (overrides .env)", True),
+])
+def test_skill_47_describe_key_source(shell, dotenv, source, warns):
+    """Startup log must name where the enforced key came from and warn
+    when a shell export shadows a different .env key (2026-09-29: stale
+    export → MCP using .env key got 401 on every call)."""
+    from trading_agent.data_server.__main__ import describe_key_source
+    got_source, warning = describe_key_source(shell, dotenv, shell or dotenv)
+    assert got_source == source
+    assert (warning is not None) == warns
+    if warning:
+        assert "k1" not in warning and "k2" not in warning   # fingerprints only
+        assert "env -u SCHWAB_API_SERVER_KEY" in warning

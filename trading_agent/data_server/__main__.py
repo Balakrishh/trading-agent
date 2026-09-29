@@ -21,10 +21,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 
 from trading_agent.data_server.app import build_app
+from trading_agent.data_server.auth import key_fingerprint
 from trading_agent.data_server.config import ServerConfig
 
 
@@ -48,6 +52,35 @@ def _build_default_provider():
     )
 
 
+_KEY_VAR = "SCHWAB_API_SERVER_KEY"
+
+
+def describe_key_source(shell_key: str, dotenv_key: str,
+                        effective_key: str) -> Tuple[str, Optional[str]]:
+    """Return (source label, optional mismatch warning) for the startup log.
+
+    ``shell_key`` — value exported in the launching shell (before .env
+    load); ``dotenv_key`` — value in .env; ``effective_key`` — what the
+    server enforces. An exported var wins over .env (load_dotenv default),
+    which silently diverges from a client that only reads .env.
+    """
+    if shell_key:
+        source = "shell env (overrides .env)" if dotenv_key else "shell env"
+    elif dotenv_key:
+        source = ".env"
+    else:
+        source = "unset"
+    warning = None
+    if shell_key and dotenv_key and shell_key != dotenv_key:
+        warning = (
+            f"{_KEY_VAR} in the launching shell (fp={key_fingerprint(shell_key)}) "
+            f"DIFFERS from .env (fp={key_fingerprint(dotenv_key)}) — the shell "
+            f"value is enforced, so clients using the .env key will get 401. "
+            f"Restart with: env -u {_KEY_VAR} python -m trading_agent.data_server"
+        )
+    return source, warning
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m trading_agent.data_server",
@@ -69,7 +102,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     log = logging.getLogger("trading_agent.data_server")
 
+    # Load .env BEFORE reading SCHWAB_API_SERVER_KEY. Pre-2026-09-29 the
+    # key was read here from the launching shell only; .env was loaded
+    # later (inside load_config() when the provider was built), so a key
+    # set in .env never took effect and the MCP — which reads .env —
+    # got 401 on every call. An already-exported var still wins.
+    shell_key = os.environ.get(_KEY_VAR, "").strip()
+    dotenv_key = (dotenv_values(find_dotenv()).get(_KEY_VAR) or "").strip()
+    load_dotenv()
     cfg = ServerConfig.from_env()
+    key_source, key_warning = describe_key_source(
+        shell_key, dotenv_key, cfg.api_key or "")
     bind = args.bind or cfg.bind
     port = args.port or cfg.port
 
@@ -88,6 +131,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "bearer-token" if cfg.auth_enabled else "TAILSCALE-ONLY (no api key)",
         cache_mode,
     )
+    # Fingerprint only (sha256[:8]) — compare with the client's
+    # `printf %s "$SCHWAB_API_SERVER_KEY" | shasum -a 256 | cut -c1-8`.
+    log.info("API key source=%s fingerprint=%s",
+             key_source, key_fingerprint(cfg.api_key))
+    if key_warning:
+        log.warning(key_warning)
     if not cfg.auth_enabled:
         log.warning(
             "SCHWAB_API_SERVER_KEY is not set — server relies on network "
