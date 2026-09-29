@@ -138,6 +138,93 @@ def test_skill_48_fundamentals_tool_registered():
     assert callable(_HANDLERS["get_fundamentals"])
 
 
+def test_skill_48_fundamentals_field_mapping_uses_schwab_native_keys():
+    """Regression 2026-09-29: AAPL fundamentals came back with
+    dividend_yield=None and vol_avg_10d=None because the mapping used
+    TDA-legacy short names ("divYield", "vol10DayAvg" was ok but
+    "divAmount" and "divDate" were not the Schwab long form). This
+    test feeds a realistic-shape payload and asserts every headline
+    field lands.
+    """
+    from trading_agent.market_data_schwab import SchwabMarketDataProvider
+
+    # Realistic Schwab /instruments response (long-form keys).
+    fake_body = {
+        "instruments": [
+            {
+                "symbol": "AAPL", "cusip": "037833100",
+                "description": "APPLE INC", "exchange": "NASDAQ",
+                "assetType": "EQUITY",
+                "fundamental": {
+                    "peRatio": 31.2, "pegRatio": 2.1, "pbRatio": 58.4,
+                    "epsTTM": 6.05, "marketCap": 3_100_000_000_000,
+                    "sharesOutstanding": 15_200_000_000,
+                    "dividendYield": 0.0044, "dividendAmount": 0.96,
+                    "dividendDate": "2026-08-15",
+                    "nextDividendPayDate": "2026-11-15",
+                    "dividendPayAmount": 0.24,
+                    "beta": 1.24, "high52": 237.30, "low52": 164.10,
+                    "vol1DayAvg": 52_000_000,
+                    "vol10DayAvg": 55_000_000,
+                    "vol3MonthAvg": 57_500_000,
+                    "returnOnEquity": 0.28, "returnOnAssets": 0.20,
+                    "bookValuePerShare": 3.10,
+                    "grossMarginTTM": 0.44,
+                    "netProfitMarginTTM": 0.25,
+                    "operatingMarginTTM": 0.30,
+                    "shortIntToFloat": 0.008,
+                    "marketCapFloat": 3_050_000_000_000,
+                    "epsChangePercentTTM": 12.4,
+                },
+            }
+        ]
+    }
+    # Stub the _get method rather than actually calling Schwab.
+    prov = SchwabMarketDataProvider.__new__(SchwabMarketDataProvider)
+    prov._get = lambda path, params=None, timeout=None: fake_body   # noqa: SLF001,ARG005
+    out = prov.fetch_fundamentals("AAPL")
+
+    # The fields that were reading as None pre-fix — all must be present.
+    assert out["dividend_yield"] == 0.0044
+    assert out["dividend_amount"] == 0.96
+    assert out["dividend_date"] == "2026-08-15"
+    assert out["next_dividend_pay_date"] == "2026-11-15"
+    assert out["vol_avg_1d"] == 52_000_000
+    assert out["vol_avg_10d"] == 55_000_000
+    assert out["vol_avg_3mo"] == 57_500_000
+    # Identity + valuation should also land.
+    assert out["ticker"] == "AAPL"
+    assert out["pe_ratio"] == 31.2
+    assert out["eps_ttm"] == 6.05
+    assert out["market_cap"] == 3_100_000_000_000
+    assert out["beta"] == 1.24
+    assert out["high_52w"] == 237.30
+    assert out["roe"] == 0.28
+    # New fields added in the 2026-09-29 fix.
+    assert out["gross_margin_ttm"] == 0.44
+    assert out["short_int_to_float"] == 0.008
+
+
+def test_skill_48_fundamentals_legacy_tda_shortnames_still_map():
+    """Belt: if Schwab ever revives TDA-legacy short-name payloads,
+    dividend/volume fields still populate. Same pick-first-non-null
+    fallback the source code uses.
+    """
+    from trading_agent.market_data_schwab import SchwabMarketDataProvider
+    fake_body = {"instruments": [{
+        "symbol": "T",
+        "fundamental": {
+            "divYield": 0.065, "divAmount": 1.11, "divDate": "2026-07-10",
+        },
+    }]}
+    prov = SchwabMarketDataProvider.__new__(SchwabMarketDataProvider)
+    prov._get = lambda path, params=None, timeout=None: fake_body   # noqa: SLF001,ARG005
+    out = prov.fetch_fundamentals("T")
+    assert out["dividend_yield"] == 0.065
+    assert out["dividend_amount"] == 1.11
+    assert out["dividend_date"] == "2026-07-10"
+
+
 def test_skill_48_fundamentals_returns_unavailable_when_server_down(monkeypatch):
     """When SCHWAB_API_BASE_URL is unset, the tool returns a structured
     unavailable row rather than raising — matches the get_quote pattern.

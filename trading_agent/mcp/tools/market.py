@@ -102,8 +102,11 @@ def get_fundamentals(ticker: str) -> Dict[str, Any]:
     - Dividend: ``dividend_yield``, ``dividend_amount``,
       ``dividend_date``, ``next_dividend_pay_date``
     - Trading: ``beta``, ``high_52w``, ``low_52w``,
-      ``vol_avg_10d``, ``vol_avg_1y``, ``shares_outstanding``
-    - Profitability: ``roe``, ``roa``
+      ``vol_avg_1d``, ``vol_avg_10d``, ``vol_avg_3mo``,
+      ``shares_outstanding``, ``market_cap_float``
+    - Profitability: ``roe``, ``roa``, ``gross_margin_ttm``,
+      ``net_profit_margin_ttm``, ``operating_margin_ttm``
+    - Short interest: ``short_int_to_float``
     - Provenance: ``as_of`` (ISO-8601 UTC)
     """
     if not ticker:

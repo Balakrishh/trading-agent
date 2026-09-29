@@ -783,8 +783,10 @@ class SchwabMarketDataProvider(MarketDataProvider):
         """Return Schwab's fundamentals block for a single equity ticker.
 
         Wraps ``GET /instruments?symbol={ticker}&projection=fundamental``.
-        The response is normalised to a flat dict with the fields the
-        watchlist curation and daily-reviewer flows consume:
+        Schwab's ``fundamental`` block uses long-form keys
+        (``dividendYield``, ``vol10DayAvg``, …); this method reads those
+        (with a legacy short-name fallback for older TDA-style payloads
+        like ``divYield``) and returns a flat, snake_case-keyed dict:
 
             {
               "ticker":            "AAPL",
@@ -796,20 +798,28 @@ class SchwabMarketDataProvider(MarketDataProvider):
               "peg_ratio":         2.10,
               "pb_ratio":          58.4,
               "eps_ttm":           6.05,
+              "eps_change_pct_ttm": 12.4,
               "market_cap":        3_100_000_000_000,
+              "market_cap_float":  3_050_000_000_000,
               "shares_outstanding": 15_200_000_000,
               "dividend_yield":    0.0044,
-              "dividend_amount":   0.24,
+              "dividend_amount":   0.96,
               "dividend_date":     "2026-08-15",
               "next_dividend_pay_date": "2026-11-15",
+              "dividend_pay_amount": 0.24,
               "beta":              1.24,
               "high_52w":          237.30,
               "low_52w":           164.10,
+              "vol_avg_1d":        52_000_000,
               "vol_avg_10d":       55_000_000,
-              "vol_avg_1y":        60_000_000,
+              "vol_avg_3mo":       57_500_000,
               "roe":               0.28,
               "roa":               0.20,
               "book_value_per_share": 3.10,
+              "gross_margin_ttm":       0.44,
+              "net_profit_margin_ttm":  0.25,
+              "operating_margin_ttm":   0.30,
+              "short_int_to_float":     0.008,
               "as_of":             ISO utc timestamp of the fetch,
             }
 
@@ -833,30 +843,55 @@ class SchwabMarketDataProvider(MarketDataProvider):
             return {}
         row = instruments[0]
         f = row.get("fundamental") or {}
+        # Schwab's ``fundamental`` block uses long-form names ("dividendYield",
+        # "vol10DayAvg", …) — a fresh grep of a live payload on 2026-09-29
+        # confirmed the shape. Pre-fix this method used TDA-legacy short
+        # names ("divYield", "divAmount") and got None for AAPL's obvious
+        # dividend / volume fields. Try each key + a legacy fallback so
+        # older TDA-style payloads (if Schwab ever revives them) still
+        # populate cleanly.
+        def _pick(*keys):
+            for k in keys:
+                v = f.get(k)
+                if v is not None:
+                    return v
+            return None
+
         return {
             "ticker":             row.get("symbol") or t,
             "cusip":              row.get("cusip"),
             "description":        row.get("description"),
             "exchange":           row.get("exchange"),
             "asset_type":         row.get("assetType"),
-            "pe_ratio":           _safe_float(f.get("peRatio")),
-            "peg_ratio":          _safe_float(f.get("pegRatio")),
-            "pb_ratio":           _safe_float(f.get("pbRatio")),
-            "eps_ttm":            _safe_float(f.get("epsTTM")),
-            "market_cap":         _safe_float(f.get("marketCap")),
-            "shares_outstanding": _safe_float(f.get("sharesOutstanding")),
-            "dividend_yield":     _safe_float(f.get("divYield")),
-            "dividend_amount":    _safe_float(f.get("divAmount")),
-            "dividend_date":      f.get("divDate"),
-            "next_dividend_pay_date": f.get("nextDivPayDate"),
-            "beta":               _safe_float(f.get("beta")),
-            "high_52w":           _safe_float(f.get("high52")),
-            "low_52w":            _safe_float(f.get("low52")),
-            "vol_avg_10d":        _safe_float(f.get("vol10DayAvg")),
-            "vol_avg_1y":         _safe_float(f.get("vol1YearAvg")),
-            "roe":                _safe_float(f.get("returnOnEquity")),
-            "roa":                _safe_float(f.get("returnOnAssets")),
-            "book_value_per_share": _safe_float(f.get("bookValuePerShare")),
+            "pe_ratio":           _safe_float(_pick("peRatio")),
+            "peg_ratio":          _safe_float(_pick("pegRatio")),
+            "pb_ratio":           _safe_float(_pick("pbRatio")),
+            "eps_ttm":            _safe_float(_pick("epsTTM", "epsTtm")),
+            "eps_change_pct_ttm": _safe_float(_pick("epsChangePercentTTM")),
+            "market_cap":         _safe_float(_pick("marketCap")),
+            "market_cap_float":   _safe_float(_pick("marketCapFloat")),
+            "shares_outstanding": _safe_float(_pick("sharesOutstanding")),
+            "dividend_yield":     _safe_float(_pick("dividendYield", "divYield")),
+            "dividend_amount":    _safe_float(_pick("dividendAmount", "divAmount")),
+            "dividend_date":      _pick("dividendDate", "divDate"),
+            "next_dividend_pay_date": _pick(
+                "nextDividendPayDate", "dividendPayDate", "nextDivPayDate"),
+            "dividend_pay_amount": _safe_float(_pick("dividendPayAmount")),
+            "beta":               _safe_float(_pick("beta")),
+            "high_52w":           _safe_float(_pick("high52", "week52High")),
+            "low_52w":            _safe_float(_pick("low52",  "week52Low")),
+            "vol_avg_1d":         _safe_float(_pick("vol1DayAvg")),
+            "vol_avg_10d":        _safe_float(_pick("vol10DayAvg")),
+            "vol_avg_3mo":        _safe_float(_pick("vol3MonthAvg")),
+            "roe":                _safe_float(_pick(
+                "returnOnEquity", "returnOnEquityTTM")),
+            "roa":                _safe_float(_pick(
+                "returnOnAssets", "returnOnAssetsTTM")),
+            "book_value_per_share": _safe_float(_pick("bookValuePerShare")),
+            "gross_margin_ttm":     _safe_float(_pick("grossMarginTTM")),
+            "net_profit_margin_ttm": _safe_float(_pick("netProfitMarginTTM")),
+            "operating_margin_ttm": _safe_float(_pick("operatingMarginTTM")),
+            "short_int_to_float":   _safe_float(_pick("shortIntToFloat")),
             "as_of":              datetime.now(timezone.utc).isoformat(),
         }
 
