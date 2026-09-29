@@ -165,6 +165,7 @@ def from_schwab_symbol(schwab: str) -> str:
 - **Schwab option symbols have spaces** — Always translate at the adapter boundary; never let a padded symbol leak into the executor or journal.
 - **Yahoo provider on a live surface** — `fetch_option_chain` returns `None` and `fetch_option_quotes` returns `{}`.  The agent's cycle will skip every ticker (no chains → no plans).  Yahoo is intentionally unsupported for the live surface; stick to Alpaca/Schwab there.
 - **Yahoo `get_underlying_bid_ask` returns `None`** — Yahoo's free feed has no real-time NBBO.  The risk manager treats `None` as "no quote" (the liquidity guardrail soft-passes).  Use Yahoo only on surfaces that don't need this gate.
+- **`strikeCount` truncation** — Schwab's `/chains` returns `strikeCount` strikes *centred on ATM*. At the old value of 30, SPY (~$770, $1 grid) came back as 751–781 only, so ~0.28Δ shorts sat at the chain edge and the protective leg landed one strike away ($1 wings; live 16-lot Iron Condor on 2026-09-29). `SCHWAB_CHAIN_STRIKE_COUNT = 200` (`market_data_schwab.py`) covers a 0.15Δ/45-DTE short plus a 3 % wing on $1-grid ETFs. The strategy layer also refuses collapsed wings (skill 04 §4).
 - **Boolean params** — Schwab's URL parser accepts only lowercase `"true"`/`"false"` in query strings, not Python's `True`/`False` (which `requests` serializes as `"True"`/`"False"`).  The adapter passes booleans as lowercase strings explicitly (`market_data_schwab.py:fetch_intraday_bars`).
 - **Empty `candles` from `/pricehistory`** — Adapter logs a WARNING with the exact request params so operators can see whether the empty response is a bad period/frequency combo, an unavailable symbol, or extended-hours filtering.
 - **Account-info path stays Alpaca-direct** — `live_monitor.py:_fetch_account_cached` never goes through the factory.  Schwab has no equivalent endpoint shape and the executor still talks to Alpaca; routing through the factory would just break the broker-state cache.
@@ -179,4 +180,4 @@ def from_schwab_symbol(schwab: str) -> str:
 
 ---
 
-*Last verified against repo HEAD on 2026-06-17.*
+*Last verified against repo HEAD on 2026-09-29.*

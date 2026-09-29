@@ -16,6 +16,12 @@ from trading_agent.chain_scanner import ChainScanner, SpreadCandidate
 
 logger = logging.getLogger(__name__)
 
+# Safety guard, not a strategy tunable: the protective leg actually found
+# must be at least this fraction of the target wing width. Tolerates sparse
+# far-OTM grids ($17 found vs $19 wanted) but rejects a truncated chain
+# collapsing the wing to a strike or two ($1 vs $19). Skill 04 §4.
+MIN_WING_WIDTH_FRACTION = 0.5
+
 
 # ------------------------------------------------------------------
 # Strategy data structures
@@ -883,9 +889,21 @@ class StrategyPlanner:
 
         candidates = sorted(contracts, key=lambda c: abs(c["strike"] - target))
         for c in candidates:
-            if direction == "lower" and c["strike"] < sold_strike:
-                return c
-            if direction == "higher" and c["strike"] > sold_strike:
+            if ((direction == "lower" and c["strike"] < sold_strike)
+                    or (direction == "higher" and c["strike"] > sold_strike)):
+                # The nearest strike to target is the best available; if
+                # it still yields a far narrower wing than requested, the
+                # chain is truncated (skill 04 §4) — refuse rather than
+                # ship a collapsed wing.
+                actual = abs(sold_strike - c["strike"])
+                if actual < width * MIN_WING_WIDTH_FRACTION:
+                    logger.warning(
+                        "Protective leg too narrow: best %s strike %.2f gives "
+                        "$%.2f wing vs target $%.2f (sold %.2f) — chain likely "
+                        "truncated; rejecting",
+                        direction, c["strike"], actual, width, sold_strike,
+                    )
+                    return None
                 return c
         return None
 

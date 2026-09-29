@@ -171,6 +171,23 @@ def test_fetch_option_chain_normalises_to_agent_shape(adapter, monkeypatch):
     assert c["type"] == "call"
 
 
+def test_fetch_option_chain_requests_wide_strike_window(adapter, monkeypatch):
+    """strikeCount must cover short strike + full wing on $1-grid ETFs.
+    Regression for 2026-09-29: strikeCount=30 returned SPY 751–781 only,
+    so protective legs landed one strike from the shorts ($1 wings)."""
+    captured = {}
+
+    def fake_get(path, params=None, **kw):
+        captured["params"] = params
+        return SAMPLE_CHAIN_RESPONSE
+
+    monkeypatch.setattr(adapter, "_get", fake_get)
+    adapter.fetch_option_chain("SPY", "2026-10-23", "put")
+    # SPY ~$770 on a $1 grid: 0.15Δ short at 45 DTE ≈ 7% OTM plus a 3%
+    # wing ≈ ±$80 → needs well over 100 strikes in the window.
+    assert captured["params"]["strikeCount"] >= 160
+
+
 def test_fetch_option_chain_caches(adapter, monkeypatch):
     """Second call within OPTION_CHAIN_TTL must reuse the cached list."""
     calls = {"n": 0}

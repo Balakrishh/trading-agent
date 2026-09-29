@@ -441,6 +441,67 @@ class TestAdaptiveSpreadWidth:
         assert width >= 15.0
 
 
+class TestProtectiveLegWidthGuard:
+    """``_find_bought_strike`` must not silently collapse the wing when the
+    chain has no strike near the target width (skill 04 §4). Regression for
+    2026-09-29: a Schwab chain truncated to 30 strikes (751–781 on SPY)
+    turned a $19 target wing into a $1 wing, and a 16-lot $1-wide Iron
+    Condor went live."""
+
+    def _planner(self):
+        return StrategyPlanner(MagicMock(), max_delta=0.30, min_credit_ratio=0.25,
+                               width_mode="pct_of_spot", width_value=0.025)
+
+    @staticmethod
+    def _chain(lo, hi):
+        return [{"strike": float(s), "bid": 1.0, "ask": 1.1, "mid": 1.05,
+                 "delta": -0.2} for s in range(lo, hi + 1)]
+
+    def test_truncated_chain_put_side_rejects(self):
+        """Target $19 below 752, chain bottoms at 751 → no protective leg."""
+        planner = self._planner()
+        assert planner._find_bought_strike(self._chain(751, 781), 752.0,
+                                           "lower") is None
+
+    def test_truncated_chain_call_side_rejects(self):
+        planner = self._planner()
+        assert planner._find_bought_strike(self._chain(751, 781), 780.0,
+                                           "higher") is None
+
+    def test_full_chain_picks_target_width(self):
+        planner = self._planner()
+        leg = planner._find_bought_strike(self._chain(700, 800), 752.0, "lower")
+        assert leg is not None
+        assert 752.0 - leg["strike"] == 19.0
+
+    def test_sparse_far_grid_still_accepted(self):
+        """Far-OTM $5 grid: target 733 unavailable, 735 ($17 wing) is fine."""
+        planner = self._planner()
+        chain = self._chain(740, 760) + [{"strike": float(s), "bid": 0.5,
+                                          "ask": 0.6, "mid": 0.55, "delta": -0.1}
+                                         for s in (725, 730, 735)]
+        leg = planner._find_bought_strike(chain, 752.0, "lower")
+        assert leg is not None and leg["strike"] in (730.0, 735.0)
+
+    def test_iron_condor_on_truncated_chain_is_invalid(self):
+        """End-to-end: the IC planner must refuse, not ship $1 wings."""
+        puts = [{"symbol": f"P{s}", "strike": float(s), "bid": 5.0, "ask": 5.1,
+                 "mid": 5.05, "delta": -0.28 if s == 752 else -0.35}
+                for s in range(751, 767)]
+        calls = [{"symbol": f"C{s}", "strike": float(s), "bid": 4.0, "ask": 4.1,
+                  "mid": 4.05, "delta": 0.28 if s == 780 else 0.35}
+                 for s in range(767, 782)]
+        provider = MagicMock(spec=MarketDataProvider)
+        provider.fetch_option_chain.side_effect = lambda t, e, o: (
+            puts if o == "put" else calls)
+        planner = StrategyPlanner(provider, max_delta=0.30, min_credit_ratio=0.25,
+                                  width_mode="pct_of_spot", width_value=0.025)
+        plan = planner._plan_iron_condor("SPY", _make_analysis(Regime.SIDEWAYS),
+                                         "2026-10-23")
+        assert plan.valid is False
+        assert "Protective legs" in plan.rejection_reason
+
+
 class TestDTEBand:
     """Theta capture is concentrated in 25-40 DTE; the planner targets
     a 35-DTE Friday and accepts anything in (28, 45)."""
