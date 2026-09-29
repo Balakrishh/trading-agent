@@ -103,4 +103,4 @@ The CLI always prints the proposal diff first, then runs the gate. If the operat
 
 ---
 
-*Last verified against repo HEAD on 2026-09-28.*
+*Last verified against repo HEAD on 2026-09-29.*

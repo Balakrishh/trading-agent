@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Headless trading-agent supervisor launchd unit (skill 57).
+
+  This runs ``python -m trading_agent.agent_supervisor``, which itself
+  runs the trading agent in a loop — starting cycles at market open,
+  sleeping until next open when the agent gracefully exits at market
+  close, restarting on crash after a short backoff.
+
+  Install:
+    1. Copy to ~/Library/LaunchAgents/
+       cp ops/launchd/com.trading-agent.headless.plist \
+          ~/Library/LaunchAgents/
+
+    2. Edit the two <string> paths below:
+       - REPLACE_WITH_VENV_PYTHON → your venv's python
+         (e.g. /Users/balakrishnapedada/trading-agent/myenv/bin/python)
+       - REPLACE_WITH_REPO_DIR → the trading-agent repo root
+
+    3. Load it:
+       launchctl load ~/Library/LaunchAgents/com.trading-agent.headless.plist
+
+    4. Confirm it's running:
+       launchctl list | grep trading-agent
+       tail -f /tmp/trading-agent.headless.out.log
+
+  To stop it (e.g. during maintenance):
+    launchctl unload ~/Library/LaunchAgents/com.trading-agent.headless.plist
+
+  Design notes:
+    * ``KeepAlive=true`` is a belt-and-suspenders around the supervisor's
+      own restart loop — if the supervisor itself crashes, launchd
+      brings it back.
+    * ``ThrottleInterval=60`` prevents a hot-loop should the supervisor
+      exit immediately on repeat (e.g. missing dependency at boot).
+    * ``RunAtLoad=true`` means the agent starts trading as soon as
+      you install this file (or reboot). The supervisor handles the
+      "market is closed right now" case internally.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.trading-agent.headless</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_VENV_PYTHON</string>
+    <string>-m</string>
+    <string>trading_agent.agent_supervisor</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_REPO_DIR</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Add any env vars your agent needs at boot time. Most operators
+         load these from .env via a shell wrapper; if you'd rather
+         inline them, add <key>NAME</key><string>value</string> pairs
+         here. Leave empty by default. -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/trading-agent.headless.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/trading-agent.headless.err.log</string>
+</dict>
+</plist>
