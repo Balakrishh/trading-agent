@@ -49,11 +49,18 @@ def get_position(ticker: str, strategy: Optional[str] = None) -> Dict[str, Any]:
     return {"ticker": ticker, "found": True, "positions": matches}
 
 
-def list_recent_trades(days: int = 7) -> Dict[str, Any]:
+def list_recent_trades(days: Any = 7) -> Dict[str, Any]:
     """Closes in the last N calendar days (default 7).
 
     Reads the live journal directly — no executor state involved.
+
+    ``days`` is coerced from string/float since some MCP clients JSON-
+    serialize numeric arguments as strings.
     """
+    try:
+        days = int(days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"days must be an integer, got {days!r}") from exc
     if days <= 0:
         raise ValueError("days must be positive")
     from trading_agent.journal_reader import JournalReader

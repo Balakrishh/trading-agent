@@ -100,6 +100,33 @@ def test_skill_48_every_handler_is_callable():
         assert callable(fn), f"handler {name} is not callable"
 
 
+def test_skill_48_numeric_args_coerced_from_strings():
+    """Regression: MCP clients (including Claude Code) sometimes JSON-
+    serialize numeric arguments as strings. Handlers whose validation
+    used ``<= 0`` on the raw arg would fail with TypeError. Coerce
+    with int() and re-validate.
+    """
+    from trading_agent.mcp.tools.positions import list_recent_trades
+    from trading_agent.mcp.tools.market import get_recent_alerts
+    # Both should accept string ints without raising TypeError
+    try:
+        list_recent_trades(days="7")
+    except (ValueError, Exception) as exc:  # ValueError is OK for other reasons
+        assert "must be an integer" not in str(exc), (
+            f"days='7' should coerce, got: {exc}")
+    try:
+        get_recent_alerts(hours="24")
+    except (ValueError, Exception) as exc:
+        assert "must be an integer" not in str(exc), (
+            f"hours='24' should coerce, got: {exc}")
+    # Non-numeric strings should raise a clear ValueError
+    import pytest
+    with pytest.raises(ValueError, match="must be an integer"):
+        list_recent_trades(days="banana")
+    with pytest.raises(ValueError, match="must be an integer"):
+        get_recent_alerts(hours="banana")
+
+
 def test_skill_48_mcp_json_wires_module():
     """The .mcp.json at repo root wires ``python -m trading_agent.mcp``.
     Refactoring the entry point without updating .mcp.json would

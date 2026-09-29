@@ -85,8 +85,16 @@ def get_market_status() -> Dict[str, Any]:
         return {"open": None, "source": "unavailable", "error": str(exc)}
 
 
-def get_recent_alerts(hours: int = 24) -> Dict[str, Any]:
-    """Read the ExceptionMonitor's recent-events log (skill 34)."""
+def get_recent_alerts(hours: Any = 24) -> Dict[str, Any]:
+    """Read the ExceptionMonitor's recent-events log (skill 34).
+
+    ``hours`` is coerced from string/float since some MCP clients JSON-
+    serialize numeric arguments as strings.
+    """
+    try:
+        hours = int(hours)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"hours must be an integer, got {hours!r}") from exc
     if hours <= 0:
         raise ValueError("hours must be positive")
     try:
