@@ -355,7 +355,7 @@ from trading_agent.fundamentals_screen import (   # noqa: E402
 )
 
 
-def _short_put(*, strike=95.0, delta=-0.25, bid=1.90, ask=2.10, dte=35,
+def _short_put(*, strike=95.0, delta=-0.25, bid=1.95, ask=2.05, dte=35,
                iv_rank=None, symbol="KO    261106P00095000"):
     d = {"strike": strike, "delta": delta, "bid": bid, "ask": ask,
          "dte": dte, "symbol": symbol, "type": "put"}
@@ -441,7 +441,7 @@ def _csp_evaluator(*, fundamentals=None, chain=None, spot=100.0, holdings=(),
                    config=None):
     fundamentals = fundamentals if fundamentals is not None else {"KO": _GOOD, "BAD": {**_GOOD, "pe_ratio": 90.0}}
     chain = chain if chain is not None else [
-        _short_put(strike=95.0, delta=-0.25, bid=1.90, ask=2.10),
+        _short_put(strike=95.0, delta=-0.25, bid=1.95, ask=2.05),
         _short_put(strike=92.0, delta=-0.18, bid=1.10, ask=1.20, symbol="KO    261106P00092000"),
         _short_put(strike=99.0, delta=-0.45, bid=3.50, ask=3.70),   # out of band
     ]
@@ -593,3 +593,52 @@ def test_earnings_policy_validated(monkeypatch):
     st, _ = _earnings_tool(monkeypatch, earnings_days=None, chains={35: [_short_put()]})
     with pytest.raises(ValueError, match="earnings_policy"):
         st.wheel_screen(["KO"], earnings_policy="yolo")
+
+
+# ---------------------------------------------------------------------------
+# Skill 29 liquidity gate on Wheel legs (added 2026-09-30)
+# ---------------------------------------------------------------------------
+
+from trading_agent.chain_scanner import REJECT_LEG_SPREAD_WIDE   # noqa: E402
+
+
+def test_csp_rejects_premarket_width_quote():
+    """Regression: BMY $60P 0.40/1.11 pre-market ranked #1 at a mid-based
+    21.8 % yield. 71¢ wide = 94 % of mid → fails both caps."""
+    res = _score_cash_secured_put_with_reason(
+        short_put=_short_put(strike=60.0, bid=0.40, ask=1.11, delta=-0.25, dte=23),
+        spot=63.17)
+    assert res == {"status": "rejected", "reason": REJECT_LEG_SPREAD_WIDE}
+
+
+@pytest.mark.parametrize("bid,ask", [
+    (0.98, 1.04),     # KO-style regular-hours quote: 6¢ ≤ 15¢
+    (0.05, 0.10),     # penny option: 100 % of mid but 5¢ ≤ 15¢ absolute
+    (4.00, 4.18),     # 18¢ > 15¢ but 4.4 % ≤ 5 % of mid
+])
+def test_csp_liquidity_gate_passes_tradeable_quotes(bid, ask):
+    res = _score_cash_secured_put_with_reason(
+        short_put=_short_put(bid=bid, ask=ask), spot=100.0)
+    assert res.get("reason") != REJECT_LEG_SPREAD_WIDE
+
+
+def test_liquidity_gate_reads_preset_thresholds():
+    class Loose:
+        max_leg_spread_cents = 1.00
+        max_leg_spread_pct_mid = 1.00
+    res = _score_cash_secured_put_with_reason(
+        short_put=_short_put(bid=0.40, ask=1.11), spot=100.0, preset=Loose())
+    assert res.get("reason") != REJECT_LEG_SPREAD_WIDE
+
+
+def test_covered_call_rejects_wide_quote():
+    res = _score_covered_call_with_reason(
+        short_call=_short_call(bid=1.00, ask=1.60), cost_basis=200.0,
+        preset=_StubPreset())
+    assert res == {"status": "rejected", "reason": REJECT_LEG_SPREAD_WIDE}
+
+
+def test_evaluator_reports_liquidity_rejects():
+    ev = _csp_evaluator(chain=[_short_put(bid=0.40, ask=1.11)])
+    assert ev.recommend(["KO"]) == []
+    assert "leg_spread_wide" in ev.last_diagnostics["KO"][0]

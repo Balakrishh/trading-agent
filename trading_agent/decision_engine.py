@@ -508,6 +508,19 @@ LT_REJECT_IV_RANK_TOO_LOW            = "iv_rank_too_low"
 LT_REJECT_QTY_BELOW_100              = "qty_below_100"
 
 
+def _lt_leg_too_wide(contract: Dict[str, Any], preset: Any) -> bool:
+    """Skill 29 per-leg liquidity gate applied to a single Wheel leg, with
+    the same preset thresholds the spread scanner uses. Pre-market
+    2026-09-30 the Wheel screen ranked BMY $60P at 0.40/1.11 (mid-based
+    21.8 % yield on an untradeable quote) because it had no such gate."""
+    return _leg_spread_too_wide(
+        float(contract.get("bid", 0.0) or 0.0),
+        float(contract.get("ask", 0.0) or 0.0),
+        float(getattr(preset, "max_leg_spread_cents", 0.15)),
+        float(getattr(preset, "max_leg_spread_pct_mid", 0.05)),
+    )
+
+
 def _score_covered_call(
     *,
     short_call: Dict[str, Any],
@@ -587,6 +600,9 @@ def _score_covered_call_with_reason(
     dte = int(short_call["dte"])
     if not (int(dte_band[0]) <= dte <= int(dte_band[1])):
         return {"status": "rejected", "reason": LT_REJECT_DTE_OUT_OF_BAND}
+
+    if _lt_leg_too_wide(short_call, preset):
+        return {"status": "rejected", "reason": REJECT_LEG_SPREAD_WIDE}
 
     credit = _quote_credit_single(
         bid=float(short_call.get("bid", 0.0)),
@@ -686,7 +702,9 @@ def _score_cash_secured_put_with_reason(
       capital_at_risk = collateral − credit
       pop_short_put   = 1 − |Δ_short|                     (skill 01)
     Gates: |Δ| ≤ csp_max_short_delta, dte ∈ csp_dte_band,
-    strike ∈ csp_strike_band × spot, credit > 0, iv_rank ≥ csp_min_iv_rank
+    strike ∈ csp_strike_band × spot, bid/ask not too wide (skill 29,
+    preset max_leg_spread_cents AND max_leg_spread_pct_mid), credit > 0,
+    iv_rank ≥ csp_min_iv_rank
     (fail-open when iv_rank is absent, same as covered calls),
     collateral ≤ max_collateral when supplied.
     """
@@ -711,6 +729,9 @@ def _score_cash_secured_put_with_reason(
     collateral = strike * 100.0
     if max_collateral is not None and collateral > float(max_collateral):
         return {"status": "rejected", "reason": LT_REJECT_COLLATERAL_OVER_BUDGET}
+
+    if _lt_leg_too_wide(short_put, preset):
+        return {"status": "rejected", "reason": REJECT_LEG_SPREAD_WIDE}
 
     credit = _quote_credit_single(
         bid=float(short_put.get("bid", 0.0)),
