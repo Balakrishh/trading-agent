@@ -208,12 +208,19 @@ def test_aggregate_snapshot_handles_empty_list():
 # §3.4, §3.5 — Next-session stubs are present but raise on use
 # ---------------------------------------------------------------------------
 
-def test_alpaca_stub_raises_not_implemented():
-    prov = AlpacaPositionsProvider(api_key="k", secret_key="s", base_url="b")
-    assert prov.source_label == "Alpaca (paper)"
-    with pytest.raises(NotImplementedError, match="next session"):
-        prov.snapshot()
-
+def test_alpaca_provider_parses_long_stock_only():
+    """2026-09-29: AlpacaPositionsProvider implemented (Wheel covered-call
+    leg). Only long us_equity rows become Positions."""
+    from trading_agent.positions_provider import parse_alpaca_stock_positions
+    rows = [
+        {"symbol": "BMY", "qty": "100", "avg_entry_price": "56.23",
+         "side": "long", "asset_class": "us_equity"},
+        {"symbol": "BMY261120P00057500", "qty": "-1", "avg_entry_price": "1.27",
+         "side": "short", "asset_class": "us_option"},
+    ]
+    got = parse_alpaca_stock_positions(rows)
+    assert [(p.ticker, p.qty, p.kind) for p in got] == [("BMY", 100, "stock")]
+    assert parse_alpaca_stock_positions({"not": "a list"}) == []
 
 def test_schwab_stub_raises_not_implemented():
     prov = SchwabPositionsProvider(account_id="123", oauth_session=None)

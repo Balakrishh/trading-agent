@@ -87,7 +87,7 @@ from trading_agent.telegram_notifier import TelegramNotifier
 from trading_agent.journal_reader import JournalReader
 from trading_agent.position_monitor import (
     PositionMonitor, ExitSignal, SpreadPosition, IMMEDIATE_EXIT_SIGNALS,
-    remark_positions_at_mid,
+    remark_positions_at_mid, attach_wheel_short_deltas,
 )
 from trading_agent.order_tracker import OrderTracker
 from trading_agent.llm_client import LLMClient, LLMConfig
@@ -1047,6 +1047,28 @@ class TradingAgent:
     # Stage 1: Position monitoring
     # ==================================================================
 
+    def _reconcile_wheel_expirations(self) -> None:
+        """Skill 40 §2.9 — once per day, journal expired Wheel legs as
+        assigned / called away / expired worthless (wheel_lifecycle)."""
+        try:
+            from pathlib import Path
+            from trading_agent.journal_reader import JournalReader
+            from trading_agent.positions_provider import AlpacaPositionsProvider
+            from trading_agent.wheel_lifecycle import reconcile
+            from zoneinfo import ZoneInfo
+
+            reconcile(
+                journal_reader=JournalReader(self.journal_kb.jsonl_path),
+                positions_provider=AlpacaPositionsProvider(
+                    self.config.alpaca.api_key, self.config.alpaca.secret_key,
+                    self.config.alpaca.base_url),
+                journal_kb=self.journal_kb,
+                today=datetime.now(ZoneInfo("America/New_York")).date(),
+                sentinel=Path(self.journal_kb.journal_dir) / ".wheel_reconcile_date",
+            )
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — reconcile is best-effort; retried next cycle
+            logger.warning("Wheel expiry reconcile failed: %s", exc)
+
     def _stage_monitor(self, account_balance: float) -> Dict:
         """
         Fetch positions, classify regimes, evaluate exit signals,
@@ -1064,6 +1086,7 @@ class TradingAgent:
         ``fetch_failed=False`` (clean slate), the latter
         ``fetch_failed=True`` (unknown state).
         """
+        self._reconcile_wheel_expirations()
         positions = self.position_monitor.fetch_open_positions()
 
         if positions is None:
@@ -1112,6 +1135,9 @@ class TradingAgent:
         if not spreads:
             logger.info("Could not match positions to any trade plans.")
             return {"total_spreads": 0, "positions": [], "closed": []}
+
+        # Skill 40 §2.9 — live |Δ| for Wheel legs so the CSP delta stop can fire.
+        attach_wheel_short_deltas(spreads, self.data_provider.fetch_option_chain)
 
         underlyings = {s.underlying for s in spreads}
         current_regimes: Dict = {}

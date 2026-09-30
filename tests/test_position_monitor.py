@@ -649,3 +649,26 @@ def test_remark_flat_condor_shows_near_zero_not_broker_noise():
     assert sum(p.unrealized_pl for p in legs) == pytest.approx(-160.0)
     out = remark_positions_at_mid(legs, quotes)
     assert sum(p.unrealized_pl for p in out) == pytest.approx(-8.0, abs=1.0)
+
+
+# ── Wheel exit rules (skill 40 §2.9, 2026-09-29) ─────────────────────────
+
+def _wheel(strategy="Cash-Secured Put", pl=0.0, delta=None, credit=1.27):
+    from trading_agent.position_monitor import SpreadPosition
+    return SpreadPosition(underlying="BMY", strategy_name=strategy, legs=[],
+                          original_credit=credit, max_loss=5623.0, spread_width=57.5,
+                          net_unrealized_pl=pl, expiration="2026-11-20",
+                          short_strikes=[57.5], contracts_open=1, short_delta=delta)
+
+
+@pytest.mark.parametrize("kw,signal", [
+    ({"pl": 64.0}, "profit_target"),
+    ({"pl": -300.0, "delta": -0.47}, "delta_stop"),
+    ({"pl": -300.0, "delta": None}, "hold"),                 # unknown delta → no stop
+    ({"pl": -300.0, "delta": -0.47, "strategy": "Covered Call"}, "hold"),
+    ({"pl": 10.0, "delta": -0.30}, "hold"),
+])
+def test_wheel_exit_rules(kw, signal):
+    s = _wheel(**kw)
+    got, _ = _monitor()._check_exit(s, {}, underlying_price=57.6)   # 0.2% from strike
+    assert got.value == signal

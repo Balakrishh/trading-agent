@@ -283,3 +283,222 @@ def run_scan(
         "per_ticker":    per_ticker,
         "top_n_summary": all_hits[:10],
     }
+
+
+def wheel_screen(
+    watchlist: Any,
+    target_dte: Any = 35,
+    max_collateral: Any = None,
+    earnings_policy: str = "avoid",
+) -> Dict[str, Any]:
+    """Screen a watchlist for Wheel entries (cash-secured puts), read-only.
+
+    Per ticker: fundamentals quality screen (skill 40 §2.7) → earnings gate
+    (§2.8) → put chain at the listed expiration nearest ``target_dte`` →
+    ``_score_cash_secured_put`` (§2.2). ``max_collateral`` (dollars) caps
+    strike × 100. ``earnings_policy="avoid"`` (default) only considers
+    expirations *before* the next earnings date; ``"allow"`` keeps them and
+    flags ``earnings_before_expiry``. Returns ranked recommendations with
+    take-profit / stop anchors plus a per-ticker ``diagnostics`` map
+    explaining every skip. Never places or stages orders.
+    """
+    from trading_agent.long_term_evaluator import EvaluatorConfig, LongTermEvaluator
+
+    if isinstance(watchlist, str):
+        watchlist = [t for t in watchlist.replace(" ", "").split(",") if t]
+    if not watchlist:
+        raise ValueError("watchlist must be a non-empty list of tickers")
+    try:
+        target_dte = int(target_dte)
+        cap = None if max_collateral in (None, "", "null") else float(max_collateral)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"target_dte must be an integer and max_collateral a number: {exc}") from exc
+    if earnings_policy not in ("avoid", "allow"):
+        raise ValueError("earnings_policy must be 'avoid' or 'allow'")
+    tickers = [str(t).upper() for t in watchlist]
+
+    today = date.today()
+    candidates = _wheel_expiration_candidates(today, target_dte)
+    used_expiration: Dict[tuple, str] = {}
+    earnings_in: Dict[str, Optional[int]] = {}
+    earnings_blocked: Dict[str, int] = {}
+
+    def put_chain(ticker: str) -> List[Dict[str, Any]]:
+        days = _earnings_days(ticker)          # None = unknown (lookup failed / none listed)
+        earnings_in[ticker] = days
+        exps = candidates
+        if earnings_policy == "avoid" and days is not None:
+            # Expire strictly before the report so the event can't assign us.
+            exps = [e for e in candidates if (date.fromisoformat(e) - today).days < days]
+            if not exps:
+                earnings_blocked[ticker] = days
+                return []
+        return _first_listed_chain(ticker, exps, "put")
+
+    def call_chain(ticker: str) -> List[Dict[str, Any]]:
+        # Covered calls sit on shares already owned — an earnings gap is
+        # the shares' risk either way, so no earnings filter; CC scorer
+        # needs ≥ 30 DTE (skill 40 §2.1).
+        return _first_listed_chain(
+            ticker, _wheel_expiration_candidates(today, target_dte, dte_min=30), "call")
+
+    def _first_listed_chain(ticker: str, exps: List[str],
+                            option_type: str) -> List[Dict[str, Any]]:
+        # Weeklies are not listed far out for many names (2026-09-29: KO
+        # had no 11/13 chain, 22 strikes on the 11/20 monthly) — take the
+        # first candidate expiration that actually returns contracts.
+        for exp in exps:
+            contracts = _chain_from_dataserver(ticker, exp, option_type) or []
+            if contracts:
+                used_expiration[(ticker, option_type)] = exp
+                dte = max(1, (date.fromisoformat(exp) - today).days)
+                return [{**c, "dte": dte, "type": option_type} for c in contracts]
+        return []
+
+    def spot(ticker: str) -> Optional[float]:
+        price = _market.get_quote(ticker).get("price")
+        return float(price) if price else None
+
+    def fundamentals(ticker: str) -> Optional[Dict[str, Any]]:
+        return _market.get_fundamentals(ticker).get("fundamentals") or None
+
+    evaluator = LongTermEvaluator(
+        positions_provider=_positions_provider(),   # held ≥100 → covered calls
+        call_chain_fetcher=call_chain,
+        preset=load_active_preset(),
+        config=EvaluatorConfig(csp_max_collateral=cap),
+        put_chain_fetcher=put_chain,
+        fundamentals_fetcher=fundamentals,
+        spot_fetcher=spot,
+    )
+    recs = evaluator.recommend(tickers)
+    diagnostics = dict(evaluator.last_diagnostics)
+    for tkr, days in earnings_blocked.items():
+        diagnostics[tkr] = [f"earnings_in_{days}d (no listed expiration ≥21d before it)"]
+
+    def _earnings_fields(ticker: str, option_type: str) -> Dict[str, Any]:
+        days = earnings_in.get(ticker)
+        exp = used_expiration.get((ticker, option_type))
+        dte_used = (date.fromisoformat(exp) - today).days if exp else None
+        return {
+            "earnings_in_days": days,
+            "earnings_known": days is not None,
+            "earnings_before_expiry": (days is not None and dte_used is not None
+                                       and days <= dte_used),
+        }
+
+    return {
+        "watchlist": tickers,
+        "expirations_tried": candidates,
+        "expiration_by_ticker": {tk: e for (tk, ot), e in used_expiration.items() if ot == "put"},
+        "max_collateral": cap,
+        "earnings_policy": earnings_policy,
+        "recommendations": [_wheel_rec_row(r, used_expiration, _earnings_fields)
+                            for r in recs],
+        "diagnostics": diagnostics,
+    }
+
+
+def _wheel_rec_row(r: Any, used_expiration: Dict[tuple, str],
+                   earnings_fields: Any) -> Dict[str, Any]:
+    """One recommendation → MCP row, including the stageable ``plan``
+    (SpreadPlan dict) that /propose writes to pending_orders/."""
+    from trading_agent.wheel_policy import (
+        CC_STRATEGY, CSP_STRATEGY, build_single_leg_plan)
+
+    option_type = "put" if r.strategy == "cash_secured_put" else "call"
+    expiration = used_expiration.get((r.ticker, option_type))
+    m = r.metrics
+    plan = build_single_leg_plan(
+        ticker=r.ticker,
+        strategy_name=CSP_STRATEGY if option_type == "put" else CC_STRATEGY,
+        symbol=r.legs[0].occ_symbol, strike=m["strike"], option_type=option_type,
+        delta=m["delta"], bid=m["bid"], ask=m["ask"],
+        expiration=expiration or "", reasoning=r.rationale,
+    ).to_dict() if expiration else None
+    return {
+        "ticker": r.ticker,
+        "strategy": r.strategy,
+        "occ_symbol": r.legs[0].occ_symbol,
+        "strike": _strike_from_occ(r.legs[0].occ_symbol),
+        "contracts": r.legs[0].qty,
+        "entry_credit": r.entry_limit,
+        "take_profit_btc": r.take_profit_limit,
+        "stop": {"kind": r.stop_kind, "trigger": r.stop_trigger},
+        "score": round(r.score, 4),
+        "expiration": expiration,
+        **earnings_fields(r.ticker, option_type),
+        "rationale": r.rationale,
+        "metrics": {k: round(v, 4) for k, v in m.items()},
+        "plan": plan,
+    }
+
+
+def _positions_provider() -> Any:
+    """Read-only Alpaca stock holdings for the covered-call leg; empty
+    provider when credentials are missing. Tests monkeypatch this."""
+    from types import SimpleNamespace
+
+    from trading_agent.config import load_config
+    from trading_agent.positions_provider import AlpacaPositionsProvider
+
+    try:
+        cfg = load_config()
+    except Exception:                                   # noqa: BLE001 — no creds → no holdings
+        return SimpleNamespace(snapshot=lambda: [])
+    if not (cfg.alpaca.api_key and cfg.alpaca.secret_key):
+        return SimpleNamespace(snapshot=lambda: [])
+    return AlpacaPositionsProvider(cfg.alpaca.api_key, cfg.alpaca.secret_key,
+                                   cfg.alpaca.base_url)
+
+
+_EARNINGS_CALENDAR = None
+
+
+def _earnings_days(ticker: str) -> Optional[int]:
+    """Days until the next earnings report (skill 40 §2.8), None when
+    unknown. One cached calendar per MCP process; tests monkeypatch this."""
+    global _EARNINGS_CALENDAR
+    if _EARNINGS_CALENDAR is None:
+        from trading_agent.earnings_calendar import EarningsCalendar
+        _EARNINGS_CALENDAR = EarningsCalendar(lookahead_days=60)
+    return _EARNINGS_CALENDAR.days_until_earnings(ticker)
+
+
+def _wheel_expiration_candidates(today: date, target_dte: int,
+                                 dte_min: int = 21, dte_max: int = 60) -> List[str]:
+    """Expirations to try for a CSP, closest to ``target_dte`` first: every
+    weekly Friday plus every standard monthly (third Friday; Thursday when
+    that Friday is a market holiday) with DTE in [dte_min, dte_max]. Not
+    all are listed for every ticker — the caller takes the first that
+    returns contracts."""
+    from trading_agent.calendar_utils import is_trading_day, next_weekly_expiration
+
+    found = {next_weekly_expiration(today, target_dte, dte_min, dte_max)}
+    # Every weekly (Friday, or Thursday on a holiday) in the window, so the
+    # earnings gate can pick an expiration that lands before the report.
+    d = today + timedelta(days=(4 - today.weekday()) % 7)
+    while (d - today).days <= dte_max:
+        exp = d if is_trading_day(d) else d - timedelta(days=1)
+        if (exp - today).days >= dte_min:
+            found.add(exp)
+        d += timedelta(days=7)
+    year, month = today.year, today.month
+    for _ in range(4):
+        first = date(year, month, 1)
+        third_friday = first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+        if not is_trading_day(third_friday):
+            third_friday -= timedelta(days=1)
+        if dte_min <= (third_friday - today).days <= dte_max:
+            found.add(third_friday)
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return [d.isoformat() for d in
+            sorted(found, key=lambda d: (abs((d - today).days - target_dte), d))]
+
+
+def _strike_from_occ(symbol: str) -> Optional[float]:
+    """OCC compact symbol → strike (last 8 digits / 1000)."""
+    try:
+        return int(symbol[-8:]) / 1000.0
+    except (TypeError, ValueError):
+        return None

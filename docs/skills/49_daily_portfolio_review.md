@@ -50,6 +50,7 @@ The brief is rendered as prose sections in this order:
 - **Alerts noise floor.** `get_recent_alerts(hours=24)` includes silenced dedups; render only rows the operator hasn't already seen (compare against yesterday's brief if the state file exists).
 - **No writes.** This skill NEVER invokes `promote.py`, writes to `pending_orders/`, or calls a slash command that does. Read-only end-to-end.
 - **`morning` skill interop.** The desktop-app `morning` skill renders a styled HTML brief; this playbook renders prose in the Claude Code terminal. They share the same tool calls but different output surfaces — do not conflate.
+- **Wheel assignments (2026-09-29).** When `list_recent_trades` shows an `exit_signal` of `assigned`, call `wheel_screen(watchlist=[ticker])` — the shares now appear in Alpaca holdings, so the tool returns covered-call recommendations (never below cost basis, skill 40 §2.1). `called_away` / `expired_worthless` need no follow-up.
 
 ## 5. Cross-References
 

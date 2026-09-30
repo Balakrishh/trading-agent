@@ -45,16 +45,45 @@ For each (held_ticker, candidate_short_call):
 
 `annualised_static × pop_short_call` is the *risk-adjusted yield*: high pop_short_call means low assignment probability (you keep the premium AND the stock), high annualised static return rewards income density. A 60-DTE call at Δ=0.25 with 1.5% credit beats a 30-DTE Δ=0.40 call with 2.0% credit on the same risk-adjusted yield because the latter's assignment probability triples.
 
-### 2.2 Cash-secured put (NEXT SESSION)
+### 2.2 Cash-secured put — Wheel entry (implemented 2026-09-29)
 
 ```text
-[Next session — section reserved]
+For each (watchlist_ticker passing §2.7, candidate_short_put):
+  credit          = single-leg quote credit × 100              [dollars per contract]
+  collateral      = strike × 100                               [cash held for assignment]
+  capital_at_risk = collateral − credit
+  static_return   = credit / capital_at_risk
+  annualised      = (1 + static_return)^(365 / dte) − 1
+  pop_short_put   = 1 − |Δ_short|                              [skill 01]
+  effective_entry = strike − credit / 100                      [cost basis if assigned]
 
-score ≈ annualised_premium_yield × pop_short_put
-      where pop_short_put = 1 − |Δ_short|
-      capital_at_risk = strike × 100 − premium     [collateral held for assignment]
-      gate: strike between [0.85 × spot, 0.97 × spot]   (room to fall to your entry)
+  score = annualised × pop_short_put
+          subject to:
+            strike         ∈ [0.85 × spot, 0.97 × spot]   (csp_strike_band)
+            |Δ_short|      ≤ 0.30                         (csp_max_short_delta)
+            dte            ∈ [21, 60]                     (csp_dte_band)
+            collateral     ≤ max_collateral               (when supplied)
+            credit         > 0
+            iv_rank        ≥ 0.25 when supplied           (csp_min_iv_rank; fail-open if absent)
 ```
+
+The Wheel: CSP on a §2.7-screened ticker → if assigned, the shares flow into the §2.1 covered-call leg (the evaluator routes tickers held ≥ 100 shares to covered calls and everything else on the watchlist to CSPs).
+
+### 2.7 Fundamentals quality screen — "willing to own" (implemented 2026-09-29)
+
+`trading_agent/fundamentals_screen.py` gates CSP candidates on the skill-47 `/fundamentals` block **before** any chain fetch. Pass/fail only — ranking stays in the scorer (invariant 2).
+
+| Field | Pass when | Default |
+|---|---|---|
+| `market_cap` | ≥ min | $10B |
+| `pe_ratio` | 0 < P/E ≤ max | 40 |
+| `eps_ttm` | > min | 0 |
+| `net_profit_margin_ttm` (%) | ≥ min | 8 |
+| `roe` (%) | ≥ min | 10 |
+| `beta` | ≤ max | 1.6 |
+| `vol_avg_10d` | ≥ min (0.0 = unknown) | 1M shares |
+
+Missing / `None` / non-numeric → `missing:<field>` → **fail closed**. Every failing reason is returned, not just the first.
 
 ### 2.3 LEAPS call as synthetic stock (NEXT SESSION)
 
@@ -107,6 +136,29 @@ Bull call debit spread:
 | Vertical debit | STC at 80% of max profit | At 50% of debit paid | Spread-mid-based |
 
 The OCO bracket the order layer submits encodes these anchors as: `take_profit` = limit order at the TP price, `stop_loss` = stop-limit order at the SL trigger with a `stop_limit_offset` (default 5% of stop trigger) to avoid getting gapped through. The two children are linked under `orderStrategyType: "OCO"` so filling either cancels the other.
+
+### 2.8 Earnings gate (implemented 2026-09-29)
+
+A scheduled earnings report inside the option's life is a known gap risk: the premium is richer because the market prices the move, and a miss can drive the stock straight through the strike. `wheel_screen` looks up days-to-earnings via `EarningsCalendar` (yfinance, cached 12 h) and applies `earnings_policy`:
+
+| Policy | Behaviour |
+|---|---|
+| `avoid` (default) | Only expirations with DTE **<** days-to-earnings are tried. If none of the listed expirations in [21, 60] DTE lands before the report → skip with `earnings_in_<N>d (no listed expiration ≥21d before it)`. |
+| `allow` | All expirations tried; each recommendation carries `earnings_before_expiry: true/false`. |
+
+Unknown earnings date (lookup failed / none listed) → **not excluded**, flagged `earnings_known: false` so the operator checks manually. Candidate expirations are every weekly Friday plus each monthly (third Friday) in [21, 60] DTE, nearest to `target_dte` first; the first one with a listed chain wins.
+
+### 2.9 Wheel trade lifecycle — stage, submit, manage, expire (implemented 2026-09-29)
+
+`trading_agent/wheel_policy.py` is the single source for the constants every stage uses (`TAKE_PROFIT_PCT_OF_CREDIT=0.50`, `CSP_STOP_ABS_DELTA=0.45`, `MAX_CSP_COLLATERAL_PCT_OF_EQUITY=0.40`, strategy names, exit-signal names).
+
+| Stage | Where | Rule |
+|---|---|---|
+| Screen | MCP `wheel_screen` | CSPs for watchlist names held < 100 shares; covered calls for names held ≥ 100 (Alpaca holdings). Each row carries a stageable `plan` (`build_single_leg_plan`). |
+| Stage | `/propose` → `pending_orders/` | Operator approval, unchanged (skill 51). |
+| Submit | `executor_promote._submit_wheel` | `check_wheel_order`: CSP collateral ≤ options buying power (unknown → reject) and ≤ 40 % of equity; covered call requires ≥ 100 × qty shares (never naked). Then `OrderExecutor.execute_single_leg`: sell-to-open limit at mid, then halfway mid→bid; journal `submitted` **only on a confirmed fill**. |
+| Manage | `PositionMonitor._check_wheel_exit` (5-min cycle) | `PROFIT_TARGET` at 50 % of credit; CSP `DELTA_STOP` when \|Δ\| ≥ 0.45 (debounced 3 cycles; Δ from the chain via `attach_wheel_short_deltas`). No hard stop, strike-proximity, DTE-safety or regime-shift exits — assignment is the plan. Closes use a single-leg limit order (`close_spread` → `_close_spread_mleg`). |
+| Expire | `wheel_lifecycle.reconcile` (once per day) | Expired CSP + ≥ 100 × contracts shares → `assigned`, else `expired_worthless`; expired CC + shares gone → `called_away`, else `expired_worthless`. Journals a `closed` row (premium kept) so the trade leaves `open_positions`. |
 
 ## 3. Reference Python Implementation
 
@@ -244,6 +296,21 @@ def render_long_term_evaluator() -> None:
     # _render_portfolio_gaps(...)    # next session
 ```
 
+### 3.5 Cash-secured put scorer + Wheel path (2026-09-29)
+
+```python
+    capital_at_risk = max(0.01, collateral - credit)
+    static_return = credit / capital_at_risk
+    annualised_return = (1.0 + static_return) ** (365.0 / max(1, dte)) - 1.0
+    pop = _pop_from_delta(float(short_put["delta"]))   # skill 01
+    effective_entry = strike - credit / 100.0          # cost basis if assigned
+```
+
+- `decision_engine._score_cash_secured_put[_with_reason]` — reject taxonomy adds `LT_REJECT_STRIKE_OUT_OF_BAND`, `LT_REJECT_COLLATERAL_OVER_BUDGET`.
+- `LongTermEvaluator(..., put_chain_fetcher=, fundamentals_fetcher=, spot_fetcher=)` — CSP path runs only when all three are supplied; `EvaluatorConfig.csp_*` holds TP (50 % of credit), stop (|Δ| ≥ 0.45, `stop_kind="delta_threshold"`), `csp_max_collateral`, and `wheel_screen: WheelScreenConfig`. `evaluator.last_diagnostics[ticker]` explains every skip.
+- MCP `wheel_screen(watchlist, target_dte=35, max_collateral=None)` (skill 48) — read-only; picks the weekly expiration nearest `target_dte` via `calendar_utils.next_weekly_expiration`.
+- Tunables follow the covered-call precedent: `getattr(preset, "csp_*", default)` until the PresetConfig wiring of §3.3 lands.
+
 ## 4. Edge Cases / Guardrails
 
 - **Read-only contract.** `LongTermEvaluator.recommend()` never writes, never submits an order. The order layer (Phase 5, dedicated session) is the only thing that talks to Schwab Trader API. Conformance: `test_skill_40_evaluator_does_not_submit_orders` asserts no `_submit_*` calls are reachable from the evaluator's import graph.
@@ -257,6 +324,21 @@ def render_long_term_evaluator() -> None:
 - **OCO bracket constraints, single-leg vs multi-leg.** Single-leg tickets (CC, CSP, LEAPS) submit native Schwab OCO. Multi-leg tickets (PMCC, debit spread) use a two-step pattern: entry submits as a multi-leg order, the agent submits the closing OCO **only after the entry fill is confirmed**, gated by an `entry_fill_observed` flag in the journal. Phase 5 owns this branching; this skill documents the contract.
 - **Preset hot-reload survives evaluator instances.** The evaluator captures `preset` at construction (same caveat as skill 36's `TickerFilters`). The Streamlit consumer recreates the evaluator each render so a preset edit is picked up on the next refresh.
 
+- **CSP collateral vs account size** — a CSP ties up strike × 100 in cash. On a $30k account, `max_collateral` keeps a single $300 strike from consuming the whole book; over-budget contracts are rejected with `collateral_over_budget` and surfaced in `last_diagnostics`.
+- **Fundamentals missing or zero-volume** — screen fails closed (`missing:<field>`); `vol_avg_10d == 0.0` counts as missing (Schwab returned 0.0 for unmapped volume on 2026-09-29).
+- **Tiny credit** — when 50 % of the credit rounds to 0 or to the entry in cents, the contract is skipped (a `Recommendation` with TP ≥ entry would raise).
+- **Held ≥ 100 shares** — no CSP; the ticker is on the covered-call leg of the wheel.
+- **Fetcher failure** — contained per ticker (`data_unavailable`); other tickers still evaluate.
+- **No iv_rank in chain** — the MCP chain carries no `iv_rank`, so the IV gate is fail-open there; low-IV names can pass and should be judged on the yield shown.
+
+- **Earnings inside every candidate expiration** — during earnings season `avoid` can empty the list (2026-09-29: all 9 candidates reported before the 11/20 monthly; PEP in 9 days). That is the gate working; use `allow` only with an explicit decision to hold through the report.
+- **Earnings date unknown** — flagged, not excluded (`earnings_known: false`); yfinance outages must not silently hide or silently approve.
+- **Unfilled open order** — `execute_single_leg` cancels after each attempt and returns `unfilled` / `unresolved`; nothing is journalled, so the reconciler can never book the credit of a trade that never existed.
+- **Delta unavailable** — `short_delta=None`; the CSP delta stop cannot fire that cycle (profit target still works). Logged as a warning.
+- **Holdings unavailable at expiry** — reconcile is skipped and the day-sentinel not written, so it retries next cycle instead of booking every put as worthless.
+- **Pre-existing shares** — a CSP on a ticker already held ≥ 100 shares would reconcile as `assigned` even if it expired worthless. The screen never proposes CSPs for such tickers.
+- **Manually placed Wheel legs** (no trade plan) are still inferred as `Naked Short` and get spread exits — always stage through `/propose`.
+
 ## 5. Cross-References
 
 - `41_positions_provider.md` — the holdings-input contract (`PositionsProvider` ABC + `ManualPositionsProvider`).
@@ -268,4 +350,4 @@ def render_long_term_evaluator() -> None:
 
 ---
 
-*Last verified against repo HEAD on 2026-07-06.*
+*Last verified against repo HEAD on 2026-09-29.*
