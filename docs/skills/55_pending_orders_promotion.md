@@ -93,7 +93,7 @@ The CLI always prints the proposal diff first, then runs the gate. If the operat
 - **`OrderExecutor` import lives at the call site.** Not module-top. This lets the conformance test verify (a) the module *does* import it — so submission actually happens — and (b) *only* this file and `executor.py` import it.
 - **`.gitignore` must include `pending_orders/`.** Proposals carry live account context; they must never enter version control.
 - **Auto-promote emits an INFO to ExceptionMonitor.** The operator's Telegram channel gets a "Claude auto-promoted trade X" line (visibility without a manual gate). Auto-promote *failures* (any of the 7 predicates failing) log a WARNING with the field name.
-- **Wheel proposals (2026-09-29).** A plan whose `strategy` is `Cash-Secured Put` or `Covered Call` skips `RiskManager` (spread C/W and width rules don't apply to one short option) and goes through `check_wheel_order` + `OrderExecutor.execute_single_leg` (skill 40 §2.9). Exit codes: 0 filled / dry-run, 6 check rejected, 8 unfilled, 7 other (incl. unresolved cancel). `params.contracts` sets qty (default 1).
+- **Wheel proposals (2026-09-29).** A plan whose `strategy` is `Cash-Secured Put` or `Covered Call` skips `RiskManager` (spread C/W and width rules don't apply to one short option) and goes through `check_wheel_order` + `OrderExecutor.execute_single_leg` (skill 40 §2.9): up to three sell-to-open attempts — mid, halfway to bid, bid (the last only if the live quote passes the preset width gate). Exit codes: 0 filled / dry-run, 6 check rejected, 8 unfilled, 7 other (incl. unresolved cancel). `params.contracts` sets qty (default 1).
 
 ## 5. Cross-References
 
@@ -104,4 +104,4 @@ The CLI always prints the proposal diff first, then runs the gate. If the operat
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-09-30.*

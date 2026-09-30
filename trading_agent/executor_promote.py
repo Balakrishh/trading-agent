@@ -356,7 +356,16 @@ def _submit_wheel(plan, *, qty: int, dry_run: bool) -> Dict[str, Any]:
         api_key=cfg.alpaca.api_key, secret_key=cfg.alpaca.secret_key,
         base_url=cfg.alpaca.base_url, dry_run=dry_run, data_provider=data_provider,
     )
-    result = executor.execute_single_leg(plan, qty=qty, account_balance=equity)
+    from trading_agent.strategy_presets import load_active_preset   # noqa: PLC0415
+    try:
+        preset = load_active_preset()
+    except Exception:                                           # noqa: BLE001 — defaults below
+        preset = None
+    result = executor.execute_single_leg(
+        plan, qty=qty, account_balance=equity,
+        max_leg_spread_cents=float(getattr(preset, "max_leg_spread_cents", 0.15)),
+        max_leg_spread_pct_mid=float(getattr(preset, "max_leg_spread_pct_mid", 0.05)),
+    )
     if result.get("status") == "filled":
         _journal_wheel_open(plan, result, qty)
     return result
