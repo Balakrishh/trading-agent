@@ -380,13 +380,15 @@ def _journal_wheel_open(plan, result: Dict[str, Any], qty: int) -> None:
     cfg = load_config()
     journal_dir = (cfg.intelligence.journal_dir
                    if cfg.intelligence and cfg.intelligence.journal_dir else "trade_journal")
-    credit = float(result.get("limit_price") or plan.net_credit)
+    credit = float(result.get("fill_price") or result.get("limit_price") or plan.net_credit)
     leg = plan.legs[0]
     JournalKB(journal_dir, run_mode="live").log_signal(
         ticker=plan.ticker, action="submitted", price=0.0,
         raw_signal={
             "strategy": plan.strategy_name, "net_credit": credit,
-            "max_loss": plan.max_loss, "spread_width": plan.spread_width,
+            "max_loss": (round((plan.spread_width - credit) * 100, 2)
+                         if plan.max_loss > 0 else 0.0),
+            "spread_width": plan.spread_width,
             "expiration": plan.expiration, "order_id": result.get("order_id"),
             "run_id": result.get("run_id"), "contracts": qty,
             "short_symbol": leg.symbol, "short_strike": leg.strike,

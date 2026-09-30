@@ -68,4 +68,4 @@ The playbook then tells the operator: "Proposal written to `pending_orders/<uuid
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-09-30.*

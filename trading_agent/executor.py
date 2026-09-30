@@ -796,12 +796,84 @@ class OrderExecutor:
                 return last
             status = self._await_fill(last["order_id"])
             if status == "filled":
+                fill = self._order_fill_price(last["order_id"]) or price
+                self._record_fill_credit(plan_path, run_id, plan, fill)
                 return {**last, "status": "filled", "limit_price": price,
-                        "qty": qty, "plan_file": plan_path, "run_id": run_id}
+                        "fill_price": fill, "qty": qty,
+                        "plan_file": plan_path, "run_id": run_id}
             if status not in _ORDER_TERMINAL_FAIL:
                 return {**last, "status": "unresolved", "order_state": status,
                         "plan_file": plan_path, "run_id": run_id}
+        self._mark_run_unfilled(plan_path, run_id)
         return {**last, "status": "unfilled", "plan_file": plan_path, "run_id": run_id}
+
+    def _order_fill_price(self, order_id: str) -> Optional[float]:
+        """``filled_avg_price`` of a filled order; None if unavailable."""
+        try:
+            resp = requests.get(f"{self.base_url}/orders/{order_id}",
+                                headers=self._headers(), timeout=ALPACA_TIMEOUT_LONG)
+            resp.raise_for_status()
+            raw = resp.json().get("filled_avg_price")
+            return float(raw) if raw not in (None, "") else None
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            logger.warning("Fill price lookup for %s failed: %s", order_id, exc)
+            return None
+
+    @staticmethod
+    def _update_run_trade_plan(plan_path: str, run_id: str, mutate) -> bool:
+        """Apply ``mutate(trade_plan_dict)`` to this run's state_history entry
+        and write the file atomically (temp+rename). Best-effort: returns
+        False on any failure — the broker state is the source of truth."""
+        from pathlib import Path
+        try:
+            fp = Path(plan_path)
+            doc = json.loads(fp.read_text())
+            entry = next((e for e in reversed(doc.get("state_history", []))
+                          if e.get("run_id") == run_id), None)
+            if entry is None or not isinstance(entry.get("trade_plan"), dict):
+                logger.warning("No trade-plan entry %s in %s to update", run_id, plan_path)
+                return False
+            mutate(entry["trade_plan"])
+            doc["last_updated"] = datetime.now(timezone.utc).isoformat()
+            tmp = fp.with_suffix(fp.suffix + ".tmp")
+            tmp.write_text(json.dumps(doc, indent=2))
+            tmp.replace(fp)
+            return True
+        except (OSError, ValueError) as exc:
+            logger.error("Failed to update trade plan %s run %s: %s", plan_path, run_id, exc)
+            return False
+
+    @classmethod
+    def _record_fill_credit(cls, plan_path: str, run_id: str, plan: SpreadPlan,
+                            fill: float) -> bool:
+        """Rewrite the run's trade-plan economics from the actual fill.
+
+        The plan is saved before submission with the *estimated* credit;
+        the position monitor reads ``net_credit`` from this entry for the
+        50 % profit target. 2026-09-30: VZ $43P filled at 0.21 but the
+        monitor used the 0.26 estimate (target $13 instead of $10.50).
+        """
+        def mutate(tp):
+            width = float(tp.get("spread_width") or plan.spread_width or 0.0)
+            tp["estimated_net_credit"] = tp.get("net_credit")
+            tp["net_credit"] = round(fill, 2)
+            tp["credit_to_width_ratio"] = round(fill / width, 4) if width else 0.0
+            if float(tp.get("max_loss") or 0.0) > 0:
+                tp["max_loss"] = round((width - fill) * 100, 2)
+        return cls._update_run_trade_plan(plan_path, run_id, mutate)
+
+    @classmethod
+    def _mark_run_unfilled(cls, plan_path: str, run_id: str) -> bool:
+        """Invalidate a run whose every attempt was cancelled unfilled.
+
+        ``group_into_spreads`` walks entries oldest-first and skips
+        ``valid is False``. Without this, an earlier unfilled run for the
+        same contract claims the live position's legs with its estimate
+        (2026-09-30: VZ run 20260930_135925 shadowed the filled run)."""
+        def mutate(tp):
+            tp["valid"] = False
+            tp["rejection_reason"] = "unfilled: all sell-to-open attempts cancelled"
+        return cls._update_run_trade_plan(plan_path, run_id, mutate)
 
     # ------------------------------------------------------------------
     # Close positions
