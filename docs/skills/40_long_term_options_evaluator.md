@@ -157,7 +157,7 @@ Unknown earnings date (lookup failed / none listed) → **not excluded**, flagge
 |---|---|---|
 | Screen | MCP `wheel_screen` | CSPs for watchlist names held < 100 shares; covered calls for names held ≥ 100 (Alpaca holdings). Each row carries a stageable `plan` (`build_single_leg_plan`). |
 | Stage | `/propose` → `pending_orders/` | Operator approval, unchanged (skill 51). |
-| Submit | `executor_promote._submit_wheel` | `check_wheel_order`: CSP collateral ≤ options buying power (unknown → reject) and ≤ 40 % of equity; covered call requires ≥ 100 × qty shares (never naked). Then `OrderExecutor.execute_single_leg`: sell-to-open limit at mid, then halfway mid→bid; journal `submitted` **only on a confirmed fill**. |
+| Submit | `executor_promote._submit_wheel` | `check_wheel_order`: CSP collateral ≤ options buying power (unknown → reject) and ≤ 40 % of equity; covered call requires ≥ 100 × qty shares (never naked). Then `OrderExecutor.execute_single_leg`: sell-to-open limit at mid, then halfway mid→bid, then **at the bid** — the bid attempt only while the live quote still passes the skill-29 width gate (preset `max_leg_spread_*`); journal `submitted` **only on a confirmed fill**. |
 | Manage | `PositionMonitor._check_wheel_exit` (5-min cycle) | `PROFIT_TARGET` at 50 % of credit; CSP `DELTA_STOP` when \|Δ\| ≥ 0.45 (debounced 3 cycles; Δ from the chain via `attach_wheel_short_deltas`). No hard stop, strike-proximity, DTE-safety or regime-shift exits — assignment is the plan. Closes use a single-leg limit order (`close_spread` → `_close_spread_mleg`). |
 | Expire | `wheel_lifecycle.reconcile` (once per day) | Expired CSP + ≥ 100 × contracts shares → `assigned`, else `expired_worthless`; expired CC + shares gone → `called_away`, else `expired_worthless`. Journals a `closed` row (premium kept) so the trade leaves `open_positions`. |
 
@@ -341,6 +341,8 @@ def render_long_term_evaluator() -> None:
 - **Manually placed Wheel legs** (no trade plan) are still inferred as `Naked Short` and get spread exits — always stage through `/propose`.
 
 - **Wide or pre-market quotes (2026-09-30)** — both Wheel scorers apply the skill-29 per-leg gate with the preset's `max_leg_spread_cents` / `max_leg_spread_pct_mid`. Pre-market BMY $60P at 0.40/1.11 had ranked first on a mid-based 21.8 % yield; it now rejects as `leg_spread_wide` and shows in `last_diagnostics`.
+
+- **Final attempt at the bid (2026-09-30)** — VZ $43P 0.21/0.36 went unfilled at 0.28 and 0.25 on the paper account (Alpaca's paper simulator rarely fills inside the spread). A third attempt sells at the bid, but is skipped when the live quote has widened past the width gate since screening, so the premium is never given away on a wide quote.
 
 ## 5. Cross-References
 

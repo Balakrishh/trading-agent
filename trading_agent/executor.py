@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import requests
 
+from trading_agent.chain_scanner import _leg_spread_too_wide
 from trading_agent.market_data import ALPACA_TIMEOUT_LONG
 from trading_agent.strategy import SpreadPlan
 from trading_agent.risk_manager import RiskVerdict
@@ -724,13 +725,21 @@ class OrderExecutor:
     # ------------------------------------------------------------------
 
     def execute_single_leg(self, plan: SpreadPlan, *, qty: int = 1,
-                           account_balance: float = 0.0) -> Dict:
+                           account_balance: float = 0.0,
+                           max_leg_spread_cents: float = 0.15,
+                           max_leg_spread_pct_mid: float = 0.05) -> Dict:
         """Sell-to-open one option with a limit order and wait for the fill.
 
         Caller (``executor_promote``) has already run the Wheel checks
         (collateral / share coverage). Prices from live quotes: first at
-        mid, then halfway mid→bid; each attempt waits up to
-        ``CLOSE_FILL_WAIT_S`` and is cancelled if unfilled. Returns
+        mid, then halfway mid→bid, then at the bid. The bid attempt runs
+        only while the live quote still passes the skill-29 width gate
+        (``max_leg_spread_*``, same thresholds as the screener) — on a
+        quote that widened after screening, conceding to the bid would
+        give away a large share of the premium (2026-09-30: VZ $43P
+        0.21/0.36 went unfilled at 0.28 and 0.25 on the paper account).
+        Each attempt waits up to ``CLOSE_FILL_WAIT_S`` and is cancelled
+        if unfilled. Returns
         ``status="filled"`` only on a confirmed fill — an unfilled day
         order must never be journalled as an open position (the
         expiry reconciler would later book its credit as profit).
@@ -763,6 +772,11 @@ class OrderExecutor:
                     "plan_file": plan_path, "run_id": run_id}
         mid = (bid + ask) / 2
         prices = [round(mid, 2), round((mid + bid) / 2, 2)]
+        if _leg_spread_too_wide(bid, ask, max_leg_spread_cents, max_leg_spread_pct_mid):
+            logger.warning("[%s] Live quote %.2f/%.2f too wide — skipping the bid attempt",
+                           plan.ticker, bid, ask)
+        else:
+            prices.append(round(bid, 2))
         intent = "sell_to_open"
         last: Dict = {}
         for i, price in enumerate(dict.fromkeys(prices)):     # dedupe, keep order

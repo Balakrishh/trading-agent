@@ -107,7 +107,7 @@ def _open(tmp_path, statuses, quotes=None):
     dp = MagicMock()
     dp.fetch_option_quotes.return_value = quotes or {SYM: {"bid": 1.20, "ask": 1.30}}
     ex = OrderExecutor("k", "s", trade_plan_dir=str(tmp_path), dry_run=False, data_provider=dp)
-    posts = iter([_resp({"id": "o1"}), _resp({"id": "o2"})])
+    posts = iter([_resp({"id": "o1"}), _resp({"id": "o2"}), _resp({"id": "o3"})])
     gets = iter([_resp({"status": s}) for s in statuses])
     with patch.object(executor_mod.requests, "post", side_effect=lambda *a, **k: next(posts)) as post, \
          patch.object(executor_mod.requests, "get", side_effect=lambda *a, **k: next(gets)), \
@@ -123,11 +123,27 @@ def test_single_leg_fills_at_mid(tmp_path, fast):
     assert "order_class" not in body and body["symbol"] == SYM
 
 
-def test_single_leg_concedes_toward_bid_then_reports_unfilled(tmp_path, fast):
-    res, post = _open(tmp_path, ["new", "canceled", "new", "canceled"])
+def test_single_leg_concedes_to_bid_then_reports_unfilled(tmp_path, fast):
+    res, post = _open(tmp_path, ["new", "canceled"] * 3)
     prices = [float(c.kwargs["json"]["limit_price"]) for c in post.call_args_list]
-    # bid 1.20 / ask 1.30: mid 1.25 first, then halfway mid→bid (1.225 → cent)
-    assert prices[0] == 1.25 and 1.20 < prices[1] < 1.25
+    # bid 1.20 / ask 1.30: mid 1.25, halfway mid→bid (1.225 → cent), then the bid
+    assert prices[0] == 1.25 and 1.20 < prices[1] < 1.25 and prices[2] == 1.20
+    assert res["status"] == "unfilled"
+
+
+def test_single_leg_fills_at_bid_on_final_attempt(tmp_path, fast):
+    res, post = _open(tmp_path, ["new", "canceled", "new", "canceled", "filled"])
+    assert res["status"] == "filled" and res["limit_price"] == 1.20
+    assert post.call_count == 3
+
+
+def test_single_leg_skips_bid_attempt_on_wide_live_quote(tmp_path, fast):
+    """Quote widened after screening (0.21/0.60: 39¢, 96 % of mid) — never
+    concede to the bid; stop after mid and halfway."""
+    res, post = _open(tmp_path, ["new", "canceled"] * 2,
+                      quotes={SYM: {"bid": 0.21, "ask": 0.60}})
+    prices = [float(c.kwargs["json"]["limit_price"]) for c in post.call_args_list]
+    assert post.call_count == 2 and 0.21 not in prices
     assert res["status"] == "unfilled"
 
 
