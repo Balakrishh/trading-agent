@@ -543,27 +543,61 @@ def aggregate_snapshot(
 # Stubs for next-session implementations
 # ---------------------------------------------------------------------------
 
-class AlpacaPositionsProvider(PositionsProvider):  # pragma: no cover — next session
-    """Pulls positions from the paper Alpaca account.
+class AlpacaPositionsProvider(PositionsProvider):
+    """Long stock holdings from an Alpaca account (read-only GET /positions).
 
-    NOT IMPLEMENTED THIS SESSION. The class exists so importers can
-    reference it; ``snapshot()`` raises ``NotImplementedError``.
+    Implemented 2026-09-29 for the Wheel: shares delivered by an assigned
+    cash-secured put must flow into the covered-call leg (skill 40 §2.9).
+    Options are skipped — the evaluator only needs stock lots. On any
+    HTTP / parse failure ``snapshot()`` logs a warning and returns ``[]``
+    (callers then simply see no holdings; nothing is submitted here).
     """
 
     def __init__(self, api_key: str, secret_key: str, base_url: str) -> None:
         self._api_key = api_key
         self._secret_key = secret_key
         self._base_url = base_url
+        # Sentinel (skill 00): True only after a successful fetch, so
+        # callers can tell "no holdings" from "could not ask".
+        self.last_fetch_ok: bool = False
 
     @property
     def source_label(self) -> str:
-        return "Alpaca (paper)"
+        return "Alpaca (paper)" if "paper" in self._base_url else "Alpaca"
 
     def snapshot(self) -> List[Position]:
-        raise NotImplementedError(
-            "AlpacaPositionsProvider lands next session. Use "
-            "ManualPositionsProvider for now."
-        )
+        import urllib.request                                  # noqa: PLC0415
+
+        self.last_fetch_ok = False
+        req = urllib.request.Request(f"{self._base_url.rstrip('/')}/positions")
+        req.add_header("APCA-API-KEY-ID", self._api_key)
+        req.add_header("APCA-API-SECRET-KEY", self._secret_key)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                rows = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:                               # noqa: BLE001 — degrade to "no holdings"
+            logger.warning("Alpaca positions fetch failed (%s) — no holdings.", exc)
+            return []
+        self.last_fetch_ok = True
+        return parse_alpaca_stock_positions(rows)
+
+
+def parse_alpaca_stock_positions(rows: Any) -> List[Position]:
+    """Alpaca ``/v2/positions`` rows → long-stock ``Position`` list."""
+    out: List[Position] = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict) or r.get("asset_class") != "us_equity":
+            continue
+        if r.get("side") != "long":
+            continue
+        try:
+            qty = int(float(r.get("qty", 0)))
+            out.append(Position(ticker=str(r.get("symbol", "")), qty=qty,
+                                avg_cost=float(r.get("avg_entry_price", 0.0)),
+                                kind="stock", account="alpaca"))
+        except (TypeError, ValueError) as exc:
+            logger.debug("Skipping unparseable Alpaca position %r: %s", r, exc)
+    return out
 
 
 class SchwabPositionsProvider(PositionsProvider):  # pragma: no cover — next session

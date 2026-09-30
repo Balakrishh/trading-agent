@@ -21,13 +21,16 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import requests
 
 from trading_agent.calendar_utils import is_last_trading_day_before
 from trading_agent.market_data import ALPACA_TIMEOUT
 from trading_agent.regime import Regime
+from trading_agent.wheel_policy import (
+    CSP_STOP_ABS_DELTA, CSP_STRATEGY, TAKE_PROFIT_PCT_OF_CREDIT, WHEEL_STRATEGIES,
+)
 
 
 # ── Position-fetch retry policy ─────────────────────────────────────────────
@@ -52,6 +55,7 @@ class ExitSignal(Enum):
     STRIKE_PROXIMITY = "strike_proximity"  # underlying within 1% of short strike
     DTE_SAFETY = "dte_safety"        # Thursday before expiry ≥ 15:30 ET
     EXPIRED = "expired"
+    DELTA_STOP = "delta_stop"        # Wheel CSP |Δ| ≥ CSP_STOP_ABS_DELTA (debounced)
 
 
 # Signals that bypass the 3-cycle debounce — close immediately
@@ -164,6 +168,36 @@ class SpreadPosition:
     # entry. Empty string means "no known submit time" (inferred
     # spreads, legacy positions) — grace gate is skipped in that case.
     opened_at: str = ""
+    # Append-only (2026-09-29): live |Δ| of the short leg for Wheel positions,
+    # filled by the agent from the option chain. None = unknown → the delta
+    # stop cannot fire (profit target still works).
+    short_delta: Optional[float] = None
+
+
+def attach_wheel_short_deltas(spreads: List[SpreadPosition],
+                              fetch_chain: Callable[[str, str, str], Optional[List[Dict]]]
+                              ) -> None:
+    """Fill ``short_delta`` on single-leg Wheel positions from the option
+    chain (quotes carry no greeks). ``fetch_chain(underlying, expiration,
+    option_type)`` is the market-data provider's ``fetch_option_chain``.
+    A failed or missing lookup leaves ``short_delta=None`` (sentinel) so
+    the CSP delta stop simply cannot fire that cycle.
+    """
+    for s in spreads:
+        if s.strategy_name not in WHEEL_STRATEGIES or len(s.legs) != 1:
+            continue
+        occ = PositionMonitor._parse_occ(s.legs[0].symbol)
+        if not occ:
+            continue
+        try:
+            chain = fetch_chain(occ["underlying"], occ["expiration"], occ["type"]) or []
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — delta unknown this cycle
+            logger.warning("[%s] Wheel delta lookup failed (%s)", s.underlying, exc)
+            continue
+        for c in chain:
+            if c.get("symbol") == s.legs[0].symbol and c.get("delta") not in (None, 0):
+                s.short_delta = float(c["delta"])
+                break
 
 
 class PositionMonitor:
@@ -615,6 +649,23 @@ class PositionMonitor:
     # Evaluate exit signals
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_wheel_exit(spread: SpreadPosition):
+        """Profit target at TAKE_PROFIT_PCT_OF_CREDIT; CSP delta stop at
+        CSP_STOP_ABS_DELTA; otherwise hold (assignment accepted)."""
+        contracts = max(1, spread.contracts_open)
+        credit_position = spread.original_credit * 100 * contracts
+        target = credit_position * TAKE_PROFIT_PCT_OF_CREDIT
+        if spread.net_unrealized_pl >= target > 0:
+            return (ExitSignal.PROFIT_TARGET,
+                    f"Wheel: profit ${spread.net_unrealized_pl:.2f} ≥ "
+                    f"{TAKE_PROFIT_PCT_OF_CREDIT:.0%} of credit ${credit_position:.2f}")
+        if (spread.strategy_name == CSP_STRATEGY and spread.short_delta is not None
+                and abs(spread.short_delta) >= CSP_STOP_ABS_DELTA):
+            return (ExitSignal.DELTA_STOP,
+                    f"Wheel CSP: |Δ| {abs(spread.short_delta):.2f} ≥ {CSP_STOP_ABS_DELTA}")
+        return (ExitSignal.HOLD, "Wheel: holding — assignment accepted")
+
     def evaluate(self, spreads: List[SpreadPosition],
                  current_regimes: Dict[str, Regime],
                  underlying_prices: Optional[Dict[str, float]] = None
@@ -696,6 +747,13 @@ class PositionMonitor:
             except (ValueError, TypeError):
                 # Malformed timestamp — fall through, don't crash.
                 pass
+
+        # --- Wheel legs (CSP / covered call) — skill 40 §2.9 ------------
+        # Assignment is part of the plan, so the spread rules that close
+        # near the strike or before expiry (strike proximity, DTE safety,
+        # regime shift, credit-multiple hard stop) must not run here.
+        if spread.strategy_name in WHEEL_STRATEGIES:
+            return self._check_wheel_exit(spread)
 
         # ---------------------------------------------------------------
         # Per-position economics (contract-count-scaled).

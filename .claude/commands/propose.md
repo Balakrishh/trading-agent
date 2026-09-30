@@ -38,6 +38,22 @@ Steps:
 6. Tell the operator: *"Proposal `<uuid>` written to `pending_orders/`. Run
    `python -m trading_agent.executor_promote <uuid>` to review and submit."*
 
+### Wheel legs — `cash_secured_put` / `covered_call`
+
+When the strategy is `cash_secured_put` or `covered_call` (skill 40 §2.9),
+replace steps 2–4 with:
+
+2. `wheel_screen(watchlist=[<underlying>], max_collateral=<cap>)`. Pick the
+   row whose `strategy` matches (and `occ_symbol`, if the operator named
+   one). If there is no row, report the ticker's `diagnostics` entry and stop.
+3. If the row has `earnings_before_expiry: true` or `earnings_known: false`,
+   say so explicitly and get the operator's confirmation before staging.
+4. Skip the `risk-reviewer` subagent (it scores spreads). The promote CLI
+   runs the Wheel checks (cash-secured collateral, ≤ 40 % of equity,
+   covered calls only against ≥ 100 held shares).
+5. Write with `verdict={"plan": row["plan"]}`, `strategy=<cash_secured_put|covered_call>`,
+   `params={"contracts": 1}`.
+
 Do NOT call `trading_agent.executor.*`. Do NOT run the promote CLI
 automatically. This command only stages; the operator (or auto-promote,
 inside the promote CLI itself) owns the submission decision.

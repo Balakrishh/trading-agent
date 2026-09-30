@@ -625,6 +625,127 @@ def _score_covered_call_with_reason(
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Cash-secured put scoring — skill 40 §2.2 (Wheel entry leg).
+# ---------------------------------------------------------------------------
+# Same fallback pattern as the covered-call scorer: PresetConfig may
+# override via csp_* attrs once the preset wiring lands.
+_CSP_DEFAULT_MAX_SHORT_DELTA: float = 0.30
+_CSP_DEFAULT_DTE_BAND:        Tuple[int, int] = (21, 60)
+_CSP_DEFAULT_MIN_IV_RANK:     float = 0.25
+# Strike must sit 3–15 % below spot: room to fall to your entry, but not
+# so far OTM that the premium is noise (skill 40 §2.2).
+_CSP_DEFAULT_STRIKE_BAND:     Tuple[float, float] = (0.85, 0.97)
+
+LT_REJECT_STRIKE_OUT_OF_BAND        = "strike_out_of_band"
+LT_REJECT_COLLATERAL_OVER_BUDGET    = "collateral_over_budget"
+
+
+def _score_cash_secured_put(
+    *,
+    short_put: Dict[str, Any],
+    spot: float,
+    preset: Any = None,
+    max_collateral: Optional[float] = None,
+) -> Optional[Tuple[float, Dict[str, float], str]]:
+    """Score one cash-secured-put candidate. Skill 40 §2.2.
+
+    ``short_put`` carries ``strike``, ``delta`` (signed), ``bid``, ``ask``,
+    ``dte`` and optional ``iv_rank``. ``spot`` is the underlying price.
+    ``max_collateral`` (dollars) caps ``strike × 100`` — the cash the
+    broker holds against assignment. Returns ``(score, metrics, "")`` on
+    accept, ``None`` on reject; use the ``_with_reason`` sibling for the
+    reject taxonomy.
+    """
+    result = _score_cash_secured_put_with_reason(
+        short_put=short_put, spot=spot, preset=preset,
+        max_collateral=max_collateral,
+    )
+    if result["status"] != "accepted":
+        return None
+    return (
+        float(result["score"]),
+        {k: float(v) for k, v in result["metrics"].items()},
+        "",
+    )
+
+
+def _score_cash_secured_put_with_reason(
+    *,
+    short_put: Dict[str, Any],
+    spot: float,
+    preset: Any = None,
+    max_collateral: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Verbose sibling of :func:`_score_cash_secured_put`.
+
+    score = annualised_return × pop_short_put, where
+      credit          = single-leg quote credit × 100
+      collateral      = strike × 100
+      capital_at_risk = collateral − credit
+      pop_short_put   = 1 − |Δ_short|                     (skill 01)
+    Gates: |Δ| ≤ csp_max_short_delta, dte ∈ csp_dte_band,
+    strike ∈ csp_strike_band × spot, credit > 0, iv_rank ≥ csp_min_iv_rank
+    (fail-open when iv_rank is absent, same as covered calls),
+    collateral ≤ max_collateral when supplied.
+    """
+    max_delta = float(getattr(preset, "csp_max_short_delta", _CSP_DEFAULT_MAX_SHORT_DELTA))
+    dte_band = tuple(getattr(preset, "csp_dte_band", _CSP_DEFAULT_DTE_BAND))
+    min_iv_rank = float(getattr(preset, "csp_min_iv_rank", _CSP_DEFAULT_MIN_IV_RANK))
+    strike_band = tuple(getattr(preset, "csp_strike_band", _CSP_DEFAULT_STRIKE_BAND))
+
+    strike = float(short_put["strike"])
+    spot = float(spot)
+    if spot <= 0 or not (strike_band[0] * spot <= strike <= strike_band[1] * spot):
+        return {"status": "rejected", "reason": LT_REJECT_STRIKE_OUT_OF_BAND}
+
+    delta_abs = abs(float(short_put["delta"]))
+    if delta_abs > max_delta:
+        return {"status": "rejected", "reason": LT_REJECT_SHORT_DELTA_TOO_HIGH}
+
+    dte = int(short_put["dte"])
+    if not (int(dte_band[0]) <= dte <= int(dte_band[1])):
+        return {"status": "rejected", "reason": LT_REJECT_DTE_OUT_OF_BAND}
+
+    collateral = strike * 100.0
+    if max_collateral is not None and collateral > float(max_collateral):
+        return {"status": "rejected", "reason": LT_REJECT_COLLATERAL_OVER_BUDGET}
+
+    credit = _quote_credit_single(
+        bid=float(short_put.get("bid", 0.0)),
+        ask=float(short_put.get("ask", 0.0)),
+    ) * 100.0
+    if credit <= 0:
+        return {"status": "rejected", "reason": LT_REJECT_CREDIT_NON_POSITIVE_LT}
+
+    iv_rank = short_put.get("iv_rank")
+    if iv_rank is not None and float(iv_rank) < min_iv_rank:
+        return {"status": "rejected", "reason": LT_REJECT_IV_RANK_TOO_LOW}
+
+    capital_at_risk = max(0.01, collateral - credit)
+    static_return = credit / capital_at_risk
+    annualised_return = (1.0 + static_return) ** (365.0 / max(1, dte)) - 1.0
+    pop = _pop_from_delta(float(short_put["delta"]))   # skill 01
+    effective_entry = strike - credit / 100.0          # cost basis if assigned
+
+    return {
+        "status": "accepted",
+        "score": annualised_return * pop,
+        "metrics": {
+            "credit": credit,
+            "collateral": collateral,
+            "capital_at_risk": capital_at_risk,
+            "static_return": static_return,
+            "annualised_return": annualised_return,
+            "pop": pop,
+            "effective_entry": effective_entry,
+            "discount_to_spot": 1.0 - effective_entry / spot,
+            "dte": float(dte),
+            "short_delta_abs": delta_abs,
+        },
+    }
+
 __all__ = [
     "ChainSlice",
     "DecisionInput",
@@ -642,4 +763,9 @@ __all__ = [
     "LT_REJECT_CREDIT_NON_POSITIVE_LT",
     "LT_REJECT_IV_RANK_TOO_LOW",
     "LT_REJECT_QTY_BELOW_100",
+    # Cash-secured put (skill 40 §2.2)
+    "_score_cash_secured_put",
+    "_score_cash_secured_put_with_reason",
+    "LT_REJECT_STRIKE_OUT_OF_BAND",
+    "LT_REJECT_COLLATERAL_OVER_BUDGET",
 ]

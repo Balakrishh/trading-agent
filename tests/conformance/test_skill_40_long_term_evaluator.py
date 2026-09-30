@@ -337,3 +337,259 @@ def test_rationale_includes_strategy_signature():
     rec = ev.recommend(["AAPL"])[0]
     for token in ("CC @", "d)", "|Δ|=", "ann. yield", "POP"):
         assert token in rec.rationale
+
+
+# ---------------------------------------------------------------------------
+# §2.2 — cash-secured put scorer (Wheel entry, added 2026-09-29)
+# ---------------------------------------------------------------------------
+
+from trading_agent.decision_engine import (   # noqa: E402
+    LT_REJECT_COLLATERAL_OVER_BUDGET,
+    LT_REJECT_STRIKE_OUT_OF_BAND,
+    _score_cash_secured_put,
+    _score_cash_secured_put_with_reason,
+)
+from trading_agent.fundamentals_screen import (   # noqa: E402
+    WheelScreenConfig,
+    screen_fundamentals,
+)
+
+
+def _short_put(*, strike=95.0, delta=-0.25, bid=1.90, ask=2.10, dte=35,
+               iv_rank=None, symbol="KO    261106P00095000"):
+    d = {"strike": strike, "delta": delta, "bid": bid, "ask": ask,
+         "dte": dte, "symbol": symbol, "type": "put"}
+    if iv_rank is not None:
+        d["iv_rank"] = iv_rank
+    return d
+
+
+def test_csp_happy_path_math():
+    res = _score_cash_secured_put_with_reason(short_put=_short_put(), spot=100.0)
+    assert res["status"] == "accepted"
+    m = res["metrics"]
+    assert m["collateral"] == 9500.0
+    assert m["capital_at_risk"] == pytest.approx(9500.0 - m["credit"])
+    assert m["pop"] == pytest.approx(0.75)
+    assert m["effective_entry"] == pytest.approx(95.0 - m["credit"] / 100.0)
+    assert res["score"] == pytest.approx(m["annualised_return"] * m["pop"])
+    assert _score_cash_secured_put(short_put=_short_put(), spot=100.0) is not None
+
+
+@pytest.mark.parametrize("put,spot,cap,reason", [
+    (_short_put(strike=98.0), 100.0, None, LT_REJECT_STRIKE_OUT_OF_BAND),   # < 3% OTM
+    (_short_put(strike=80.0), 100.0, None, LT_REJECT_STRIKE_OUT_OF_BAND),   # > 15% OTM
+    (_short_put(delta=-0.35), 100.0, None, LT_REJECT_SHORT_DELTA_TOO_HIGH),
+    (_short_put(dte=10), 100.0, None, LT_REJECT_DTE_OUT_OF_BAND),
+    (_short_put(), 100.0, 9000.0, LT_REJECT_COLLATERAL_OVER_BUDGET),
+    (_short_put(bid=0.0, ask=0.0), 100.0, None, LT_REJECT_CREDIT_NON_POSITIVE_LT),
+    (_short_put(iv_rank=0.10), 100.0, None, LT_REJECT_IV_RANK_TOO_LOW),
+])
+def test_csp_gates(put, spot, cap, reason):
+    res = _score_cash_secured_put_with_reason(short_put=put, spot=spot, max_collateral=cap)
+    assert res == {"status": "rejected", "reason": reason}
+
+
+def test_csp_missing_iv_rank_fails_open():
+    assert _score_cash_secured_put_with_reason(
+        short_put=_short_put(iv_rank=None), spot=100.0)["status"] == "accepted"
+
+
+def test_csp_scorer_lives_in_decision_engine():
+    import trading_agent.decision_engine as de
+    assert de._score_cash_secured_put.__module__ == "trading_agent.decision_engine"
+
+
+# ---------------------------------------------------------------------------
+# §2.7 — fundamentals quality screen
+# ---------------------------------------------------------------------------
+
+_GOOD = {"market_cap": 2.5e11, "pe_ratio": 22.0, "eps_ttm": 3.1,
+         "net_profit_margin_ttm": 22.0, "roe": 38.0, "beta": 0.6,
+         "vol_avg_10d": 14_000_000.0}
+
+
+def test_screen_passes_quality_large_cap():
+    assert screen_fundamentals("KO", _GOOD).passed
+
+
+def test_screen_reports_every_failure():
+    bad = {**_GOOD, "pe_ratio": -5.0, "beta": 2.3, "roe": 4.0}
+    r = screen_fundamentals("X", bad)
+    assert not r.passed and len(r.reasons) == 3
+
+
+@pytest.mark.parametrize("patch,reason", [
+    ({"roe": None}, "missing:roe"),
+    ({"vol_avg_10d": 0.0}, "missing:vol_avg_10d"),      # 0.0 volume = unmapped
+    ({"market_cap": "n/a"}, "missing:market_cap"),
+])
+def test_screen_missing_data_fails_closed(patch, reason):
+    r = screen_fundamentals("X", {**_GOOD, **patch})
+    assert not r.passed and reason in r.reasons
+
+
+def test_screen_empty_block():
+    assert screen_fundamentals("X", None).reasons == ["missing:fundamentals"]
+
+
+# ---------------------------------------------------------------------------
+# §3 — LongTermEvaluator CSP path
+# ---------------------------------------------------------------------------
+
+def _csp_evaluator(*, fundamentals=None, chain=None, spot=100.0, holdings=(),
+                   config=None):
+    fundamentals = fundamentals if fundamentals is not None else {"KO": _GOOD, "BAD": {**_GOOD, "pe_ratio": 90.0}}
+    chain = chain if chain is not None else [
+        _short_put(strike=95.0, delta=-0.25, bid=1.90, ask=2.10),
+        _short_put(strike=92.0, delta=-0.18, bid=1.10, ask=1.20, symbol="KO    261106P00092000"),
+        _short_put(strike=99.0, delta=-0.45, bid=3.50, ask=3.70),   # out of band
+    ]
+    return LongTermEvaluator(
+        positions_provider=ManualPositionsProvider.from_dicts(list(holdings)),
+        call_chain_fetcher=lambda _t: [],
+        config=config,
+        put_chain_fetcher=lambda t: chain,
+        fundamentals_fetcher=lambda t: fundamentals.get(t),
+        spot_fetcher=lambda t: spot,
+    )
+
+
+def test_evaluator_csp_ranks_and_anchors_exits():
+    ev = _csp_evaluator()
+    recs = ev.recommend(["KO", "BAD"])
+    assert [r.ticker for r in recs] == ["KO", "KO"]
+    assert recs[0].score >= recs[1].score
+    r = recs[0]
+    assert r.strategy == "cash_secured_put" and r.entry_kind == "credit"
+    assert 0 < r.take_profit_limit < r.entry_limit
+    assert r.stop_kind == "delta_threshold" and r.stop_trigger == 0.45
+    assert ev.last_diagnostics["BAD"] == ["pe_ratio∉(0,40]"]
+
+
+def test_evaluator_csp_skips_tickers_held_100_plus():
+    ev = _csp_evaluator(holdings=[{"ticker": "KO", "qty": 100, "avg_cost": 60.0, "kind": "stock"}])
+    assert [r for r in ev.recommend(["KO"]) if r.strategy == "cash_secured_put"] == []
+
+
+def test_evaluator_csp_collateral_cap_reported():
+    ev = _csp_evaluator(config=EvaluatorConfig(csp_max_collateral=5_000.0))
+    assert ev.recommend(["KO"]) == []
+    assert "collateral_over_budget" in ev.last_diagnostics["KO"][0]
+
+
+def test_evaluator_csp_tiny_credit_skipped_not_raised():
+    ev = _csp_evaluator(chain=[_short_put(bid=0.01, ask=0.01)])
+    assert ev.recommend(["KO"]) == []
+
+
+def test_evaluator_csp_fetcher_failure_is_contained():
+    ev = _csp_evaluator()
+    ev.put_chain_fetcher = lambda t: (_ for _ in ()).throw(RuntimeError("boom"))
+    assert ev.recommend(["KO"]) == []
+    assert ev.last_diagnostics["KO"] == ["data_unavailable"]
+
+
+def test_evaluator_csp_disabled_without_fetchers():
+    ev = LongTermEvaluator(positions_provider=ManualPositionsProvider.from_dicts([]),
+                           call_chain_fetcher=lambda _t: [])
+    assert ev.recommend(["KO"]) == [] and ev.last_diagnostics == {}
+
+
+def test_wheel_screen_mcp_tool(monkeypatch):
+    """Read-only MCP surface: string watchlist, string numbers, output shape."""
+    import trading_agent.mcp.tools.strategy as st
+    monkeypatch.setattr(st, "_positions_provider", lambda: ManualPositionsProvider.from_dicts([]))
+    monkeypatch.setattr(st, "_earnings_days", lambda t: None)
+    monkeypatch.setattr(st._market, "get_quote", lambda t: {"price": 100.0})
+    monkeypatch.setattr(st._market, "get_fundamentals",
+                        lambda t: {"fundamentals": _GOOD if t == "KO" else {}})
+    monkeypatch.setattr(st, "_chain_from_dataserver",
+                        lambda t, e, o: [_short_put()] if t == "KO" else None)
+    out = st.wheel_screen("KO, ZZZ", target_dte="35", max_collateral="12000")
+    assert out["watchlist"] == ["KO", "ZZZ"] and out["max_collateral"] == 12000.0
+    assert len(out["recommendations"]) == 1
+    rec = out["recommendations"][0]
+    assert rec["strike"] == 95.0 and rec["strategy"] == "cash_secured_put"
+    assert out["diagnostics"]["ZZZ"] == ["missing:fundamentals"]
+
+
+def test_wheel_screen_falls_back_to_monthly_expiration(monkeypatch):
+    """Regression 2026-09-29: the weekly (11/13) had no KO chain; the 11/20
+    monthly did. The tool must try the next candidate, not report no_chain."""
+    import trading_agent.mcp.tools.strategy as st
+    monkeypatch.setattr(st, "_positions_provider", lambda: ManualPositionsProvider.from_dicts([]))
+    monkeypatch.setattr(st, "_earnings_days", lambda t: None)
+    monkeypatch.setattr(st, "_wheel_expiration_candidates",
+                        lambda today, dte, **kw: ["2026-11-13", "2026-11-20"])
+    monkeypatch.setattr(st._market, "get_quote", lambda t: {"price": 100.0})
+    monkeypatch.setattr(st._market, "get_fundamentals", lambda t: {"fundamentals": _GOOD})
+    monkeypatch.setattr(st, "_chain_from_dataserver",
+                        lambda t, e, o: [_short_put()] if e == "2026-11-20" else None)
+    out = st.wheel_screen(["KO"], max_collateral=12000)
+    assert out["expiration_by_ticker"] == {"KO": "2026-11-20"}
+    assert len(out["recommendations"]) == 1
+
+
+def test_wheel_expiration_candidates_include_monthlies():
+    from datetime import date
+    from trading_agent.mcp.tools.strategy import _wheel_expiration_candidates
+    got = _wheel_expiration_candidates(date(2026, 9, 29), 35)
+    assert "2026-11-20" in got                      # third Friday of November
+    assert all(21 <= (date.fromisoformat(d) - date(2026, 9, 29)).days <= 60 for d in got)
+
+
+# ---------------------------------------------------------------------------
+# §2.8 — earnings gate (added 2026-09-29)
+# ---------------------------------------------------------------------------
+
+def _earnings_tool(monkeypatch, *, earnings_days, chains):
+    """Wire wheel_screen to fixtures. ``chains`` maps expiration → contracts."""
+    from datetime import date, timedelta
+    import trading_agent.mcp.tools.strategy as st
+    today = date.today()
+    exps = {k: (today + timedelta(days=k)).isoformat() for k in chains}
+    monkeypatch.setattr(st, "_wheel_expiration_candidates",
+                        lambda _d, _t, **kw: [exps[k] for k in sorted(chains, key=lambda k: abs(k - 35))])
+    monkeypatch.setattr(st, "_positions_provider", lambda: ManualPositionsProvider.from_dicts([]))
+    monkeypatch.setattr(st, "_earnings_days", lambda t: earnings_days)
+    monkeypatch.setattr(st._market, "get_quote", lambda t: {"price": 100.0})
+    monkeypatch.setattr(st._market, "get_fundamentals", lambda t: {"fundamentals": _GOOD})
+    by_exp = {exps[k]: v for k, v in chains.items()}
+    monkeypatch.setattr(st, "_chain_from_dataserver", lambda t, e, o: by_exp.get(e))
+    return st, exps
+
+
+def test_earnings_avoid_picks_expiration_before_report(monkeypatch):
+    st, exps = _earnings_tool(monkeypatch, earnings_days=30,
+                              chains={35: [_short_put()], 24: [_short_put()]})
+    out = st.wheel_screen(["KO"])
+    assert out["expiration_by_ticker"]["KO"] == exps[24]          # 35d would straddle the report
+    rec = out["recommendations"][0]
+    assert rec["earnings_in_days"] == 30 and rec["earnings_before_expiry"] is False
+
+
+def test_earnings_avoid_blocks_when_no_expiration_fits(monkeypatch):
+    st, _ = _earnings_tool(monkeypatch, earnings_days=9, chains={35: [_short_put()]})
+    out = st.wheel_screen(["KO"])
+    assert out["recommendations"] == []
+    assert out["diagnostics"]["KO"][0].startswith("earnings_in_9d")
+
+
+def test_earnings_allow_keeps_and_flags(monkeypatch):
+    st, exps = _earnings_tool(monkeypatch, earnings_days=9, chains={35: [_short_put()]})
+    out = st.wheel_screen(["KO"], earnings_policy="allow")
+    rec = out["recommendations"][0]
+    assert rec["earnings_before_expiry"] is True and rec["expiration"] == exps[35]
+
+
+def test_earnings_unknown_is_flagged_not_excluded(monkeypatch):
+    st, _ = _earnings_tool(monkeypatch, earnings_days=None, chains={35: [_short_put()]})
+    rec = st.wheel_screen(["KO"])["recommendations"][0]
+    assert rec["earnings_known"] is False and rec["earnings_before_expiry"] is False
+
+
+def test_earnings_policy_validated(monkeypatch):
+    st, _ = _earnings_tool(monkeypatch, earnings_days=None, chains={35: [_short_put()]})
+    with pytest.raises(ValueError, match="earnings_policy"):
+        st.wheel_screen(["KO"], earnings_policy="yolo")

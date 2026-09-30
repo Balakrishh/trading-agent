@@ -28,6 +28,7 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_risk_report",
     "run_scan",
     "score_candidate",
+    "wheel_screen",
     "get_chain",
     "get_quote",
     "get_market_status",

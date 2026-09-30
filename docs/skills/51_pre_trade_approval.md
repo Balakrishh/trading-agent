@@ -57,6 +57,7 @@ The playbook then tells the operator: "Proposal written to `pending_orders/<uuid
 - **`pending_orders/` must be `.gitignore`d.** Proposals contain live account context; they must never enter version control.
 - **UUID collision guard.** The writer uses `uuid4()` + a millisecond suffix; the promote CLI refuses to run on a UUID that doesn't match one file exactly.
 - **Auto-promote is opt-in per proposal.** The proposal JSON carries an `auto_promote_requested: bool` flag Claude Code sets only when the user explicitly asks for it. The promote CLI still has final say — it re-checks the master switch + all `AutoPromoteConfig` caps.
+- **Wheel legs (2026-09-29).** For `cash_secured_put` / `covered_call`, the plan comes from a `wheel_screen` row (`row["plan"]`) instead of `score_candidate`; the spread `risk-reviewer` subagent is skipped (its tools score spreads), and the promote CLI runs `check_wheel_order` instead.
 
 ## 5. Cross-References
 
@@ -67,4 +68,4 @@ The playbook then tells the operator: "Proposal written to `pending_orders/<uuid
 
 ---
 
-*Last verified against repo HEAD on 2026-09-28.*
+*Last verified against repo HEAD on 2026-09-29.*

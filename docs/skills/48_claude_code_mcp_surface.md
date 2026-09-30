@@ -28,6 +28,8 @@ get_risk_report()                               — current risk posture
 run_scan(watchlist, preset_name=None,           — scanner entry
          backtest=False)
 score_candidate(underlying, strategy, params)   — routes to decide()
+wheel_screen(watchlist, target_dte=35,          — CSP / Wheel entries (skill 40 §2.2, §2.7)
+             max_collateral=None)
 get_chain(underlying, expiration=None,          — skill-47 passthrough
           option_type=None)
 get_quote(symbol)                               — skill-47 passthrough
@@ -60,6 +62,7 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_risk_report",
     "run_scan",
     "score_candidate",
+    "wheel_screen",
     "get_chain",
     "get_quote",
     "get_market_status",

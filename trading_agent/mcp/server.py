@@ -33,6 +33,7 @@ _HANDLERS: Dict[str, Callable[..., Any]] = {
     "get_risk_report":    _strategy.get_risk_report,
     "run_scan":           _strategy.run_scan,
     "score_candidate":    _strategy.score_candidate,
+    "wheel_screen":       _strategy.wheel_screen,
     "get_chain":          _market.get_chain,
     "get_quote":          _market.get_quote,
     "get_market_status":  _market.get_market_status,

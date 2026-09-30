@@ -720,6 +720,76 @@ class OrderExecutor:
         return round(total_credit, 2)
 
     # ------------------------------------------------------------------
+    # Single-leg open — Wheel CSP / covered call (skill 40 §2.9)
+    # ------------------------------------------------------------------
+
+    def execute_single_leg(self, plan: SpreadPlan, *, qty: int = 1,
+                           account_balance: float = 0.0) -> Dict:
+        """Sell-to-open one option with a limit order and wait for the fill.
+
+        Caller (``executor_promote``) has already run the Wheel checks
+        (collateral / share coverage). Prices from live quotes: first at
+        mid, then halfway mid→bid; each attempt waits up to
+        ``CLOSE_FILL_WAIT_S`` and is cancelled if unfilled. Returns
+        ``status="filled"`` only on a confirmed fill — an unfilled day
+        order must never be journalled as an open position (the
+        expiry reconciler would later book its credit as profit).
+        """
+        if len(plan.legs) != 1 or plan.legs[0].action != "sell":
+            raise ValueError("execute_single_leg expects exactly one sell leg")
+        leg = plan.legs[0]
+        verdict = RiskVerdict(
+            approved=True, plan=plan, account_balance=account_balance,
+            max_allowed_loss=plan.max_loss * qty,
+            checks_passed=["wheel promote checks"], checks_failed=[],
+            summary=f"{plan.strategy_name} single-leg open",
+        )
+        plan_path, run_id = self._save_plan(plan, verdict)
+        if self.dry_run:
+            return {"status": "dry_run", "plan_file": plan_path, "run_id": run_id,
+                    "plan": plan.to_dict()}
+
+        bid, ask = leg.bid, leg.ask
+        if self.data_provider is not None:
+            try:
+                q = (self.data_provider.fetch_option_quotes([leg.symbol]) or {}).get(leg.symbol)
+                if q and float(q.get("bid", 0)) > 0 and float(q.get("ask", 0)) >= float(q["bid"]):
+                    bid, ask = float(q["bid"]), float(q["ask"])
+            except Exception as exc:                          # noqa: BLE001, skill-34-exempt — stale plan quote is the fallback
+                logger.warning("[%s] Live quote refresh failed (%s) — using plan quote",
+                               plan.ticker, exc)
+        if bid <= 0:
+            return {"status": "rejected", "reason": f"no bid for {leg.symbol}",
+                    "plan_file": plan_path, "run_id": run_id}
+        mid = (bid + ask) / 2
+        prices = [round(mid, 2), round((mid + bid) / 2, 2)]
+        intent = "sell_to_open"
+        last: Dict = {}
+        for i, price in enumerate(dict.fromkeys(prices)):     # dedupe, keep order
+            cid = f"ta-{run_id[:8]}-{uuid.uuid4().hex[:12]}"
+            payload = {
+                "symbol": leg.symbol, "qty": str(qty), "side": "sell",
+                "type": "limit", "limit_price": f"{price:.2f}",
+                "time_in_force": "day", "position_intent": intent,
+                "client_order_id": cid,
+            }
+            logger.info("[%s] Submitting %s sell-to-open %s @ %.2f (attempt %d)",
+                        plan.ticker, plan.strategy_name, leg.symbol, price, i + 1)
+            last = self._submit_order_with_idempotency(
+                plan=plan, plan_path=plan_path, run_id=run_id,
+                order_payload=payload, client_order_id=cid)
+            if last.get("status") != "submitted":
+                return last
+            status = self._await_fill(last["order_id"])
+            if status == "filled":
+                return {**last, "status": "filled", "limit_price": price,
+                        "qty": qty, "plan_file": plan_path, "run_id": run_id}
+            if status not in _ORDER_TERMINAL_FAIL:
+                return {**last, "status": "unresolved", "order_state": status,
+                        "plan_file": plan_path, "run_id": run_id}
+        return {**last, "status": "unfilled", "plan_file": plan_path, "run_id": run_id}
+
+    # ------------------------------------------------------------------
     # Close positions
     # ------------------------------------------------------------------
 
@@ -797,7 +867,7 @@ class OrderExecutor:
         closes whatever remains.
         """
         legs = list(getattr(spread, "legs", []) or [])
-        if self.data_provider is None or len(legs) < 2:
+        if self.data_provider is None or not legs:
             return None
         qtys = {abs(int(getattr(leg, "qty", 0) or 0)) for leg in legs}
         if len(qtys) != 1 or 0 in qtys:
@@ -891,15 +961,30 @@ class OrderExecutor:
 
     def _submit_close_order(self, spread, legs_payload, qty: int,
                             price: float) -> Optional[Dict]:
-        payload = {
-            "type": "limit",
-            "time_in_force": "day",
-            "order_class": "mleg",
-            "qty": str(qty),
-            "limit_price": f"{price:.2f}",
-            "client_order_id": f"ta-close-{uuid.uuid4().hex[:12]}",
-            "legs": legs_payload,
-        }
+        if len(legs_payload) == 1:
+            # Single-leg (Wheel CSP / covered call): plain limit order —
+            # Alpaca's mleg class needs ≥ 2 legs. Same debit-positive price.
+            leg = legs_payload[0]
+            payload = {
+                "symbol": leg["symbol"],
+                "qty": str(qty),
+                "side": leg["side"],
+                "type": "limit",
+                "limit_price": f"{price:.2f}",
+                "time_in_force": "day",
+                "position_intent": leg["position_intent"],
+                "client_order_id": f"ta-close-{uuid.uuid4().hex[:12]}",
+            }
+        else:
+            payload = {
+                "type": "limit",
+                "time_in_force": "day",
+                "order_class": "mleg",
+                "qty": str(qty),
+                "limit_price": f"{price:.2f}",
+                "client_order_id": f"ta-close-{uuid.uuid4().hex[:12]}",
+                "legs": legs_payload,
+            }
         try:
             resp = requests.post(f"{self.base_url}/orders", headers=self._headers(),
                                  json=payload, timeout=ALPACA_TIMEOUT_LONG)

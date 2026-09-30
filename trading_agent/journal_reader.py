@@ -104,6 +104,7 @@ class OpenedTrade:
     # "open" | "expired_unrecorded" (expiration passed, no close row —
     # e.g. the agent was down through expiry). Only set by open_trades().
     status: str = "open"
+    contracts: int = 1          # Wheel rows record it; spread rows default 1
 
 
 @dataclass(frozen=True)
@@ -326,6 +327,7 @@ class JournalReader:
             max_loss=float(rs.get("max_loss") or 0.0),
             run_id=str(rs.get("run_id", "") or ""),
             order_id=str(rs.get("order_id", "") or ""),
+            contracts=int(rs.get("contracts") or 1),
         )
 
     def stuck_positions(self) -> List[StuckPosition]:

@@ -260,6 +260,134 @@ def _submit_via_executor(
 
 
 # ---------------------------------------------------------------------------
+# Wheel single-leg submission — CSP / covered call (skill 40 §2.9)
+# ---------------------------------------------------------------------------
+
+def check_wheel_order(plan, *, qty: int, equity: float,
+                      options_buying_power: Optional[float],
+                      shares_held: int) -> List[str]:
+    """Pre-submit checks for a Wheel leg. Returns failure reasons; empty
+    means OK. Pure so it is unit-testable without a broker.
+
+    * CSP: cash must actually secure the put (strike × 100 × qty ≤
+      options buying power — unknown buying power fails closed) and one
+      put may not tie up more than MAX_CSP_COLLATERAL_PCT_OF_EQUITY.
+    * Covered call: ≥ 100 × qty shares must already be held — otherwise
+      the "covered" call is naked and must never be sent.
+    """
+    from trading_agent.wheel_policy import (                    # noqa: PLC0415
+        CC_STRATEGY, CSP_STRATEGY, MAX_CSP_COLLATERAL_PCT_OF_EQUITY)
+
+    fails: List[str] = []
+    if len(plan.legs) != 1 or plan.legs[0].action != "sell":
+        return ["Wheel plan must be exactly one sell leg"]
+    leg = plan.legs[0]
+    if qty < 1:
+        fails.append(f"qty {qty} < 1")
+    if plan.strategy_name == CSP_STRATEGY:
+        if leg.option_type != "put":
+            fails.append("Cash-Secured Put leg is not a put")
+        collateral = leg.strike * 100 * qty
+        if options_buying_power is None:
+            fails.append("options buying power unknown — cannot confirm the put is cash-secured")
+        elif collateral > options_buying_power:
+            fails.append(f"collateral ${collateral:,.0f} > options buying power "
+                         f"${options_buying_power:,.0f}")
+        cap = MAX_CSP_COLLATERAL_PCT_OF_EQUITY * equity
+        if equity <= 0 or collateral > cap:
+            fails.append(f"collateral ${collateral:,.0f} > "
+                         f"{MAX_CSP_COLLATERAL_PCT_OF_EQUITY:.0%} of equity (${cap:,.0f})")
+    elif plan.strategy_name == CC_STRATEGY:
+        if leg.option_type != "call":
+            fails.append("Covered Call leg is not a call")
+        if shares_held < 100 * qty:
+            fails.append(f"not covered: {shares_held} shares held < {100 * qty} required")
+    else:
+        fails.append(f"not a Wheel strategy: {plan.strategy_name!r}")
+    return fails
+
+
+def _alpaca_account() -> Optional[Dict[str, Any]]:
+    """GET /account on the configured Alpaca endpoint; None on failure."""
+    try:
+        from trading_agent.config import load_config            # noqa: PLC0415
+        import urllib.request                                   # noqa: PLC0415
+        cfg = load_config()
+        req = urllib.request.Request(f"{cfg.alpaca.base_url}/account")
+        req.add_header("APCA-API-KEY-ID", cfg.alpaca.api_key)
+        req.add_header("APCA-API-SECRET-KEY", cfg.alpaca.secret_key)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("Could not fetch Alpaca account (%s).", exc)
+        return None
+
+
+def _submit_wheel(plan, *, qty: int, dry_run: bool) -> Dict[str, Any]:
+    """Wheel checks → OrderExecutor.execute_single_leg → journal on fill."""
+    from trading_agent.config import load_config                # noqa: PLC0415
+    from trading_agent.executor import OrderExecutor            # noqa: PLC0415
+    from trading_agent.positions_provider import AlpacaPositionsProvider  # noqa: PLC0415
+
+    cfg = load_config()
+    account = _alpaca_account() or {}
+    equity = float(account.get("equity") or 0.0)
+    obp_raw = account.get("options_buying_power")
+    obp = float(obp_raw) if obp_raw not in (None, "") else None
+    shares = sum(p.qty for p in AlpacaPositionsProvider(
+        cfg.alpaca.api_key, cfg.alpaca.secret_key, cfg.alpaca.base_url).snapshot()
+        if p.ticker == plan.ticker)
+
+    fails = check_wheel_order(plan, qty=qty, equity=equity,
+                              options_buying_power=obp, shares_held=shares)
+    if fails:
+        return {"status": "risk_rejected", "reason": "; ".join(fails)}
+
+    data_provider = None
+    try:
+        from trading_agent.market_data_factory import build_market_data_provider  # noqa: PLC0415
+        data_provider = build_market_data_provider(
+            alpaca_api_key=cfg.alpaca.api_key, alpaca_secret_key=cfg.alpaca.secret_key,
+            alpaca_data_url=cfg.alpaca.data_url, alpaca_base_url=cfg.alpaca.base_url)
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("No live quote provider (%s) — pricing from the proposal.", exc)
+
+    executor = OrderExecutor(
+        api_key=cfg.alpaca.api_key, secret_key=cfg.alpaca.secret_key,
+        base_url=cfg.alpaca.base_url, dry_run=dry_run, data_provider=data_provider,
+    )
+    result = executor.execute_single_leg(plan, qty=qty, account_balance=equity)
+    if result.get("status") == "filled":
+        _journal_wheel_open(plan, result, qty)
+    return result
+
+
+def _journal_wheel_open(plan, result: Dict[str, Any], qty: int) -> None:
+    """Write the ``submitted`` row JournalReader.open_trades pairs with the
+    later close / assignment row (skill 19). Only called on a confirmed fill."""
+    from trading_agent.config import load_config                # noqa: PLC0415
+    from trading_agent.journal_kb import JournalKB              # noqa: PLC0415
+
+    cfg = load_config()
+    journal_dir = (cfg.intelligence.journal_dir
+                   if cfg.intelligence and cfg.intelligence.journal_dir else "trade_journal")
+    credit = float(result.get("limit_price") or plan.net_credit)
+    leg = plan.legs[0]
+    JournalKB(journal_dir, run_mode="live").log_signal(
+        ticker=plan.ticker, action="submitted", price=0.0,
+        raw_signal={
+            "strategy": plan.strategy_name, "net_credit": credit,
+            "max_loss": plan.max_loss, "spread_width": plan.spread_width,
+            "expiration": plan.expiration, "order_id": result.get("order_id"),
+            "run_id": result.get("run_id"), "contracts": qty,
+            "short_symbol": leg.symbol, "short_strike": leg.strike,
+            "option_type": leg.option_type, "source": "executor_promote",
+        },
+        notes=f"submitted: {plan.strategy_name} {leg.symbol} ×{qty} @ {credit:.2f}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -385,6 +513,14 @@ def promote(
                   "Re-run /propose with a live data server so scoring "
                   "produces a full plan.")
         return 5
+
+    from trading_agent.wheel_policy import WHEEL_STRATEGIES     # noqa: PLC0415
+    if plan.strategy_name in WHEEL_STRATEGIES:
+        qty = int(proposal.get("params", {}).get("contracts", 1) or 1)
+        result = _submit_wheel(plan, qty=qty, dry_run=False)
+        log.info("Wheel executor result: %s", json.dumps(result, default=str))
+        return {"filled": 0, "dry_run": 0, "risk_rejected": 6,
+                "unfilled": 8}.get(result.get("status"), 7)
 
     account_balance = _resolve_account_balance()
     result = _submit_via_executor(

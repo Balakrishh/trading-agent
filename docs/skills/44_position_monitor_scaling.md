@@ -140,6 +140,7 @@ Called by `agent.py` right after `fetch_open_positions()` and before `group_into
 - **Stale broker marks (2026-09-29 SPY IC)** — Alpaca's `current_price` is often the last trade. Summed over 4 legs × 16 contracts, a flat condor (≈ −$8 at mid) showed −$160, and with wide quotes the natural-price view was −$336. Re-marking at mid removes that noise from stop decisions.
 - **No usable quote** — missing symbol, bid ≤ 0, or crossed (ask < bid): the leg keeps the broker mark (`mark_source="broker"`). Mixed marks within one spread are allowed; better than dropping the leg.
 - **Quote RPC fails** — the whole re-mark is skipped with a WARNING; broker marks are used for that cycle.
+- **Wheel legs bypass spread exits (2026-09-29).** `SpreadPosition.strategy_name ∈ WHEEL_STRATEGIES` routes to `_check_wheel_exit` (skill 40 §2.9): profit target at 50 % of `original_credit × 100 × contracts_open`, CSP `DELTA_STOP` from the append-only `short_delta` field, otherwise HOLD. `ExitSignal.DELTA_STOP` is debounced (not in `IMMEDIATE_EXIT_SIGNALS`).
 
 ## 5. Cross-References
 

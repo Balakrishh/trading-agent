@@ -106,24 +106,17 @@ Three operator-facing affordances on the panel:
 - **Parse & save** — clicking the button validates the JSON, runs it through `ManualPositionsProvider.from_json_text`, and (on success) atomically writes the raw paste back to disk with a fresh `saved_at` timestamp.
 - **Reset saved** — calls `clear_holdings()` to delete the file, clears the session-state cache, and reruns so the textarea returns to the placeholder text.
 
-### 3.5 `AlpacaPositionsProvider` (next session — stub here for design completeness)
+### 3.5 `AlpacaPositionsProvider` (implemented 2026-09-29 — long stock only)
 
 ```python
-# trading_agent/positions_provider.py — next session
-class AlpacaPositionsProvider(PositionsProvider):
-    """Pulls positions from the paper Alpaca account.
-
-    Reuses the same TradingClient the credit-spread executor uses; we
-    construct a thin wrapper rather than depending on the executor so
-    the evaluator's import graph stays narrow.
-    """
-    def __init__(self, api_key: str, secret_key: str, base_url: str):
-        self._client = alpaca_py.trading.client.TradingClient(api_key, secret_key, paper=True)
-
     def snapshot(self) -> List[Position]:
-        raw = self._client.get_all_positions()
-        return [_position_from_alpaca(p) for p in raw]
+        import urllib.request                                  # noqa: PLC0415
+
+        self.last_fetch_ok = False
+        req = urllib.request.Request(f"{self._base_url.rstrip('/')}/positions")
 ```
+
+Read-only `GET /v2/positions` via `urllib` (no `alpaca-py` dependency, keeps the MCP import graph read-only). `parse_alpaca_stock_positions()` keeps long `us_equity` rows only — options are skipped because the Wheel's covered-call leg needs share lots. Built for skill 40 §2.9: assigned shares must reach the covered-call scorer.
 
 ### 3.6 `SchwabPositionsProvider` (next session — stub here for design completeness)
 
@@ -161,6 +154,8 @@ class SchwabPositionsProvider(PositionsProvider):
 - **No write methods.** This provider is read-only by design. There is no `add_position()` or `close_position()` on the ABC. The order-placement layer (Phase 5) talks to brokerage APIs directly; positions are eventually re-read on the next `snapshot()`.
 - **Idempotence.** Repeated calls to `snapshot()` within a few seconds must return equal lists (modulo broker-side fills). Conformance: `test_skill_41_snapshot_is_idempotent`.
 
+- **Alpaca fetch failure (sentinel).** `snapshot()` returns `[]` and leaves `last_fetch_ok=False`. Callers that act on holdings (the Wheel expiry reconciler) must check the flag — an empty list alone cannot distinguish "no shares" from "could not ask", and treating it as "no shares" would book every expired put as worthless.
+
 ## 5. Cross-References
 
 - `40_long_term_options_evaluator.md` — the sole consumer; the evaluator's `recommend()` method takes a `PositionsProvider`.
@@ -169,4 +164,4 @@ class SchwabPositionsProvider(PositionsProvider):
 
 ---
 
-*Last verified against repo HEAD on 2026-06-16.*
+*Last verified against repo HEAD on 2026-09-29.*
