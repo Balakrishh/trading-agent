@@ -175,6 +175,8 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 - **`OpenedTrade` append-only fields** — `spread_width`, `max_loss`, `run_id`, `order_id`, `status` (defaults keep old constructors valid).
 - **Test hygiene** — tests that pin `JournalReader._today_et` by assignment are restored by the autouse fixture in `tests/conftest.py`; prefer `monkeypatch` in new tests.
 
+- **Backfills need `as_of` (2026-09-30).** `JournalReader(as_of=date)` pins the ET "today" used by every `*_today` query. Without it a past-date review silently reads the current session.
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — run_mode split rationale, journal-as-source-of-truth principle.
@@ -186,4 +188,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-09-30.*

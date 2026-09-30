@@ -498,3 +498,20 @@ def test_closes_since_honours_window_and_dry_run_skip() -> None:
         assert [c.ticker for c in r.closes_since(7)] == ["SPY", "QQQ"]
         assert [c.ticker for c in r.closes_since(0)] == ["SPY"]
         assert [c.ticker for c in r.closes_today()] == ["SPY"]
+
+
+def test_as_of_pins_today_for_backfills() -> None:
+    """2026-09-30: daily_reviewer --date reviewed the current day because
+    every *_today query used the wall clock. ``as_of`` pins it."""
+    from trading_agent.journal_reader import JournalReader
+    past = datetime.now(_ET).date() - timedelta(days=3)
+    rows = [_sub(_et_iso_now(past), "SPY", "Iron Condor", "2099-01-01"),
+            _close(_et_iso_now(past), "QQQ", "IC", "x", 42.0)]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "j.jsonl"
+        _write_fixture_journal(rows, p)
+        assert JournalReader(str(p)).opens_today() == []
+        pinned = JournalReader(str(p), as_of=past)
+        assert [o.ticker for o in pinned.opens_today()] == ["SPY"]
+        assert pinned.realized_pl_today() == 42.0
+        assert JournalReader(str(p)).opens_today() == []      # no class-level leak

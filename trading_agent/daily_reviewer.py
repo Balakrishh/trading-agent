@@ -118,7 +118,8 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
     from trading_agent.strategy_presets import load_active_preset # noqa: PLC0415
     from dataclasses import asdict, is_dataclass
 
-    reader = JournalReader()
+    reader = JournalReader(
+        as_of=date.fromisoformat(review_date) if review_date else None)
     preset = load_active_preset()
     preset_dict = asdict(preset) if is_dataclass(preset) else dict(vars(preset))
 
