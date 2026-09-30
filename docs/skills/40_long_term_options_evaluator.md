@@ -344,6 +344,9 @@ def render_long_term_evaluator() -> None:
 
 - **Final attempt at the bid (2026-09-30)** — VZ $43P 0.21/0.36 went unfilled at 0.28 and 0.25 on the paper account (Alpaca's paper simulator rarely fills inside the spread). A third attempt sells at the bid, but is skipped when the live quote has widened past the width gate since screening, so the premium is never given away on a wide quote.
 
+- **Fill price vs estimate (2026-09-30)** — the trade plan is saved before submission with the estimated credit, and the monitor's 50 % target reads `net_credit` from it. On a confirmed fill `execute_single_leg` reads `filled_avg_price` (falls back to the limit) and `_record_fill_credit` rewrites that run's `net_credit`, `max_loss` and `credit_to_width_ratio` (keeping `estimated_net_credit`), atomically; promote journals the fill price. VZ $43P: estimate 0.26, fill 0.21 → target corrected from $13 to $10.50.
+- **Unfilled runs shadowing a fill (2026-09-30)** — `group_into_spreads` walks trade-plan entries oldest-first and the first entry containing the legs claims them. An earlier run whose attempts all cancelled unfilled still carried the same contract and the estimate, so it claimed the live position. `execute_single_leg` now calls `_mark_run_unfilled` (sets `valid=False`) when every attempt is confirmed cancelled; an `unresolved` cancel is left valid because it may still fill. Both updates go through `_update_run_trade_plan` (atomic temp+rename).
+
 ## 5. Cross-References
 
 - `41_positions_provider.md` — the holdings-input contract (`PositionsProvider` ABC + `ManualPositionsProvider`).

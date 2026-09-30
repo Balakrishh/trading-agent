@@ -103,12 +103,17 @@ def fast(monkeypatch):
     monkeypatch.setattr(executor_mod.time, "sleep", lambda s: None)
 
 
-def _open(tmp_path, statuses, quotes=None):
+def _open(tmp_path, statuses, quotes=None, fill_avg=None):
+    """``statuses`` feed the fill polls; when the last one is "filled" the
+    executor makes one more GET for ``filled_avg_price`` (``fill_avg``)."""
     dp = MagicMock()
     dp.fetch_option_quotes.return_value = quotes or {SYM: {"bid": 1.20, "ask": 1.30}}
     ex = OrderExecutor("k", "s", trade_plan_dir=str(tmp_path), dry_run=False, data_provider=dp)
     posts = iter([_resp({"id": "o1"}), _resp({"id": "o2"}), _resp({"id": "o3"})])
-    gets = iter([_resp({"status": s}) for s in statuses])
+    bodies = [{"status": s} for s in statuses]
+    if statuses and statuses[-1] == "filled":
+        bodies.append({"status": "filled", "filled_avg_price": fill_avg})
+    gets = iter([_resp(b) for b in bodies])
     with patch.object(executor_mod.requests, "post", side_effect=lambda *a, **k: next(posts)) as post, \
          patch.object(executor_mod.requests, "get", side_effect=lambda *a, **k: next(gets)), \
          patch.object(executor_mod.requests, "delete", return_value=_resp({})):
@@ -129,6 +134,29 @@ def test_single_leg_concedes_to_bid_then_reports_unfilled(tmp_path, fast):
     # bid 1.20 / ask 1.30: mid 1.25, halfway mid→bid (1.225 → cent), then the bid
     assert prices[0] == 1.25 and 1.20 < prices[1] < 1.25 and prices[2] == 1.20
     assert res["status"] == "unfilled"
+
+
+def _plan_entry(tmp_path):
+    import json
+    doc = json.loads((tmp_path / "trade_plan_BMY.json").read_text())
+    return doc["state_history"][-1]["trade_plan"]
+
+
+def test_fill_price_rewrites_trade_plan_credit(tmp_path, fast):
+    """Regression 2026-09-30: VZ filled at 0.21 but the plan kept the 0.26
+    estimate, so the monitor's 50 % target used the wrong credit."""
+    res, _ = _open(tmp_path, ["filled"], fill_avg="1.23")
+    tp = _plan_entry(tmp_path)
+    assert res["fill_price"] == 1.23
+    assert tp["net_credit"] == 1.23 and tp["estimated_net_credit"] == _csp_plan().net_credit
+    assert tp["max_loss"] == pytest.approx((57.5 - 1.23) * 100)
+    assert tp["credit_to_width_ratio"] == pytest.approx(1.23 / 57.5, abs=1e-4)
+
+
+def test_fill_price_falls_back_to_limit_when_unreported(tmp_path, fast):
+    res, _ = _open(tmp_path, ["filled"], fill_avg=None)
+    assert res["fill_price"] == res["limit_price"] == 1.25
+    assert _plan_entry(tmp_path)["net_credit"] == 1.25
 
 
 def test_single_leg_fills_at_bid_on_final_attempt(tmp_path, fast):
@@ -269,3 +297,17 @@ def test_reconcile_journals_and_runs_once_per_day(tmp_path):
 def test_reconcile_skips_when_holdings_unknown(tmp_path):
     out, kb, sentinel = _reconcile(tmp_path, fetch_ok=False)
     assert out == [] and not kb.log_signal.called and not sentinel.exists()
+
+
+def test_unfilled_run_is_invalidated_so_it_cannot_shadow_a_later_fill(tmp_path, fast):
+    """Regression 2026-09-30: VZ's unfilled 10:00 run (estimate 0.26) was
+    matched to the position before the filled 10:14 run (fill 0.21)."""
+    _open(tmp_path, ["new", "canceled"] * 3)                 # run 1: unfilled
+    tp = _plan_entry(tmp_path)
+    assert tp["valid"] is False and tp["rejection_reason"].startswith("unfilled")
+
+
+def test_unresolved_run_is_not_invalidated(tmp_path, fast):
+    """A cancel that wasn't confirmed may still fill — keep the entry valid."""
+    _open(tmp_path, ["new", "pending_cancel"])
+    assert _plan_entry(tmp_path).get("valid", True) is True
