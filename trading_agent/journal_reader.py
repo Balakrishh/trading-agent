@@ -143,11 +143,18 @@ class JournalReader:
     one named method per question an operator asks the dashboard.
     """
 
-    def __init__(self, jsonl_path: str = DEFAULT_LIVE_JOURNAL):
+    def __init__(self, jsonl_path: str = DEFAULT_LIVE_JOURNAL,
+                 as_of: Optional[date] = None):
         """``jsonl_path`` is the file to read. Defaults to the live
         journal; tests and the optional dry-run dashboard pass an
-        explicit alternate path."""
+        explicit alternate path.
+
+        ``as_of`` pins the ET "today" every ``*_today`` query uses, so
+        the daily reviewer can backfill a past session (2026-09-30: a
+        ``--date`` backfill silently reviewed the current day instead)."""
         self.jsonl_path = jsonl_path
+        if as_of is not None:
+            self._today_et = lambda: as_of          # shadows the staticmethod
 
     # ------------------------------------------------------------------
     # Internal walk — every public query goes through this.

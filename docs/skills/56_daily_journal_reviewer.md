@@ -132,6 +132,8 @@ LLM and checks the parsed output.
 - **`save_active_preset` callers are CI-restricted.** Only `apply_preset_update.py`, `strategy_presets.py` itself, and Streamlit surfaces may import it. A new scheduled task or MCP tool cannot silently mutate live config — enforced by `test_skill_56_save_active_preset_callers_restricted`.
 - **`pending_preset_updates/` + `daily_reviews/` must be `.gitignore`d.** Both may contain live PnL and account context.
 
+- **`--date` backfill (fixed 2026-09-30).** `assemble_context(review_date)` builds `JournalReader(as_of=review_date)`; before the fix a backfill labelled the current day's (often empty) data with the requested date.
+
 ## 5. Cross-References
 
 - `30_profit_target_management.md` + `31_defensive_roll_evaluator.md` — the numeric-threshold layer this reviewer runs alongside. Real-time exits happen there; this skill is retrospective tuning.
@@ -142,4 +144,4 @@ LLM and checks the parsed output.
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-09-30.*
