@@ -101,6 +101,8 @@ Both fields are appended at the end of `PresetConfig` (frozen dataclass, default
 
 - **Interaction with the C/W floor.** The C/W floor (skill 03) is necessary but not sufficient. The 2026-05-15 GLD candidate passed C/W (0.39 > 0.30) and was still a bad trade. The leg-liquidity gate is the second guardrail that the C/W floor alone misses.
 
+- **Reused by the Wheel scorers (2026-09-30).** `decision_engine._lt_leg_too_wide` calls `_leg_spread_too_wide` for the single short leg in `_score_cash_secured_put_with_reason` and `_score_covered_call_with_reason`, same preset thresholds, same `leg_spread_wide` reason.
+
 ## 5. Cross-References
 
 - `03_credit_to_width_floor.md` — paired risk gate, fires later in the same chain on different signal.

@@ -63,6 +63,7 @@ For each (watchlist_ticker passing §2.7, candidate_short_put):
             |Δ_short|      ≤ 0.30                         (csp_max_short_delta)
             dte            ∈ [21, 60]                     (csp_dte_band)
             collateral     ≤ max_collateral               (when supplied)
+            bid/ask        not wide: > 15¢ AND > 5% of mid fails  (skill 29; preset max_leg_spread_*)
             credit         > 0
             iv_rank        ≥ 0.25 when supplied           (csp_min_iv_rank; fail-open if absent)
 ```
@@ -339,6 +340,8 @@ def render_long_term_evaluator() -> None:
 - **Pre-existing shares** — a CSP on a ticker already held ≥ 100 shares would reconcile as `assigned` even if it expired worthless. The screen never proposes CSPs for such tickers.
 - **Manually placed Wheel legs** (no trade plan) are still inferred as `Naked Short` and get spread exits — always stage through `/propose`.
 
+- **Wide or pre-market quotes (2026-09-30)** — both Wheel scorers apply the skill-29 per-leg gate with the preset's `max_leg_spread_cents` / `max_leg_spread_pct_mid`. Pre-market BMY $60P at 0.40/1.11 had ranked first on a mid-based 21.8 % yield; it now rejects as `leg_spread_wide` and shows in `last_diagnostics`.
+
 ## 5. Cross-References
 
 - `41_positions_provider.md` — the holdings-input contract (`PositionsProvider` ABC + `ManualPositionsProvider`).
@@ -350,4 +353,4 @@ def render_long_term_evaluator() -> None:
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-09-30.*
