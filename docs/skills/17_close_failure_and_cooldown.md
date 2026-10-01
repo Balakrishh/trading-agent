@@ -265,6 +265,8 @@ attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
 - **Cancel unconfirmed (`mleg_unresolved`)** — if the post-cancel status is not terminal (e.g. `pending_cancel`, poll failure), the order may still be live. The executor returns `all_closed=False` and does **not** fall back: a per-leg DELETE plus a late mleg fill would double-close and open a reversed position. The agent records it as a partial close (feeds the cooldown streak) and retries next cycle.
 - **Partial qty fill then cancel** — mleg fills keep legs at equal remaining qty, so the per-leg fallback closes a still-hedged remainder.
 
+- **Realized P&L from the close fill (2026-10-01)** — on a filled atomic close, `_close_spread_mleg` reads `filled_avg_price` and `realized_pl_from_close(legs, fill_debit)` computes (Σ short `avg_entry_price` − Σ long) − debit, × 100 × contracts, from the broker's entry prices. The agent journals that as `net_unrealized_pl` (the field `JournalReader` reports as realized), keeps the exit-signal mark as `signal_mark_pl`, and tags `pl_source` = `fill` | `signal_mark` (per-leg fallback or missing entry prices). SPY IC: mark −$64 vs real −$176 (entry 0.48, close 0.59 at the natural price, 16 contracts).
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — journal action enumeration; dedup-bypass rules.
@@ -279,4 +281,4 @@ Alongside `MAX_POSITIONS_PER_TICKER = 1`, the agent now also enforces `MAX_POSIT
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-01.*

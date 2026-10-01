@@ -619,6 +619,22 @@ def _resp(body):
 
 
 class TestAtomicClose:
+    fill_avg = None     # filled_avg_price returned by the post-fill lookup
+
+    def test_close_result_carries_fill_and_realized(self, tmp_path):
+        ex = self._ex(tmp_path)
+        spread = _ic_spread()
+        for leg, avg in zip(spread.legs, (4.94, 4.76, 4.41, 4.11)):
+            leg.avg_entry_price = avg
+        posts = iter([_resp({"id": "o1"})])
+        gets = iter([_resp({"status": "filled"}),
+                     _resp({"status": "filled", "filled_avg_price": "0.66"})])
+        with patch.object(executor_mod.requests, "post", side_effect=lambda *a, **k: next(posts)), \
+             patch.object(executor_mod.requests, "get", side_effect=lambda *a, **k: next(gets)), \
+             patch.object(executor_mod.requests, "delete", return_value=_resp({})):
+            res = ex.close_spread(spread)
+        assert res["fill_debit"] == 0.66
+        assert res["realized_pl"] == round((0.48 - 0.66) * 100 * 16, 2)
 
     @pytest.fixture(autouse=True)
     def _fast(self, monkeypatch):
@@ -637,7 +653,10 @@ class TestAtomicClose:
         """Each POST returns a new order id; GETs return ``get_statuses``
         in order. Returns (result, post_mock, delete_mock)."""
         posts = iter([_resp({"id": "o1"}), _resp({"id": "o2"})])
-        gets = iter([_resp({"status": s}) for s in get_statuses])
+        bodies = [{"status": s} for s in get_statuses]
+        if get_statuses and get_statuses[-1] == "filled":   # fill-price lookup
+            bodies.append({"status": "filled", "filled_avg_price": self.fill_avg})
+        gets = iter([_resp(b) for b in bodies])
         with patch.object(executor_mod.requests, "post", side_effect=lambda *a, **k: next(posts)) as p, \
              patch.object(executor_mod.requests, "get", side_effect=lambda *a, **k: next(gets)), \
              patch.object(executor_mod.requests, "delete", return_value=_resp({})) as d:
@@ -686,3 +705,33 @@ class TestAtomicClose:
             res = ex.close_spread(_ic_spread(qtys))
         post.assert_not_called()
         assert res["close_method"] == "per_leg"
+
+
+
+# ── Realized P&L from the actual close fill (2026-10-01) ─────────────────
+
+from trading_agent.executor import realized_pl_from_close   # noqa: E402
+
+
+def _broker_leg(symbol, qty, avg):
+    return SimpleNamespace(symbol=symbol, qty=qty, avg_entry_price=avg)
+
+
+def test_realized_pl_matches_spy_condor_close():
+    """Regression: SPY IC entered at 0.48 credit (4.94+4.41−4.76−4.11),
+    closed at 0.59 debit, 16 contracts → −$176 (journal had said −$64)."""
+    legs = [_broker_leg("P752", -16, 4.94), _broker_leg("P751", 16, 4.76),
+            _broker_leg("C780", -16, 4.41), _broker_leg("C781", 16, 4.11)]
+    assert realized_pl_from_close(legs, 0.59) == -176.0
+
+
+def test_realized_pl_single_short_leg():
+    assert realized_pl_from_close([_broker_leg("VZ", -1, 0.21)], 0.10) == 11.0
+
+
+@pytest.mark.parametrize("legs", [
+    [SimpleNamespace(symbol="X", qty=-1)],                                 # no entry price
+    [_broker_leg("A", -16, 1.0), _broker_leg("B", 10, 0.5)],               # partial qty
+])
+def test_realized_pl_unknown_returns_none(legs):
+    assert realized_pl_from_close(legs, 0.5) is None
