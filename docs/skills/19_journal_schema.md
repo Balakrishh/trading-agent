@@ -177,6 +177,8 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 - **Backfills need `as_of` (2026-09-30).** `JournalReader(as_of=date)` pins the ET "today" used by every `*_today` query. Without it a past-date review silently reads the current session.
 
+- **Close rows carry the fill-based P&L (2026-10-01).** `raw_signal.net_unrealized_pl` on a `closed` row is the realized P&L from the actual close fill when known (`pl_source: "fill"`), else the exit-signal mark (`pl_source: "signal_mark"`). The mark is always kept as `signal_mark_pl`; `close_fill_debit` records the fill. Rows written before 2026-10-01 have no `pl_source` and hold the mark.
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — run_mode split rationale, journal-as-source-of-truth principle.
@@ -188,4 +190,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-09-30.*
+*Last verified against repo HEAD on 2026-10-01.*
