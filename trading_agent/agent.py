@@ -1362,6 +1362,16 @@ class TradingAgent:
                     result = self.executor.close_spread(spread)
                     closed.append(result)
                     leg_results = result.get("leg_results", []) if isinstance(result, dict) else []
+                    # Realized P&L from the actual close fill when known;
+                    # the exit-signal mark is kept for comparison (skill 17).
+                    close_context["signal_mark_pl"] = close_context["net_unrealized_pl"]
+                    realized = result.get("realized_pl") if isinstance(result, dict) else None
+                    if realized is not None:
+                        close_context["net_unrealized_pl"] = float(realized)
+                        close_context["close_fill_debit"] = result.get("fill_debit")
+                        close_context["pl_source"] = "fill"
+                    else:
+                        close_context["pl_source"] = "signal_mark"
                     fill_status = (
                         "complete" if (isinstance(result, dict) and result.get("all_closed"))
                         else "partial"

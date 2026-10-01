@@ -91,6 +91,34 @@ MAX_HISTORY = 200   # max state_history entries kept per ticker
 # drift.  ``OrderExecutor._calculate_qty`` now delegates here.  This
 # keeps the live↔backtest sizing parity invariant honest by construction
 # — there is one definition, period.
+def realized_pl_from_close(legs, fill_debit: float) -> Optional[float]:
+    """Realized P&L of a fully closed position from broker entry prices.
+
+    entry credit (per share) = Σ short-leg avg_entry − Σ long-leg avg_entry
+    realized = (entry credit − close debit) × 100 × contracts
+
+    Uses the broker's ``avg_entry_price`` per leg (signed by qty), so it
+    reflects the actual entry fill, not the trade plan's estimate.
+    Returns None when any leg lacks an entry price — the caller then
+    keeps the signal-time mark. 2026-10-01: SPY IC journalled −$64 (mid
+    mark at the exit signal) while the real result was −$176 (entry 0.48
+    credit, close 0.59 debit, 16 contracts).
+    """
+    try:
+        qtys = {abs(int(leg.qty)) for leg in legs}
+        if len(qtys) != 1 or 0 in qtys:
+            return None
+        credit = 0.0
+        for leg in legs:
+            avg = getattr(leg, "avg_entry_price", None)
+            if avg is None:
+                return None
+            credit += float(avg) if int(leg.qty) < 0 else -float(avg)
+        return round((credit - float(fill_debit)) * 100 * qtys.pop(), 2)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def calculate_position_qty(plan: SpreadPlan, account_balance: float,
                            max_risk_pct: float,
                            live_credit: Optional[float] = None) -> int:
@@ -1003,9 +1031,15 @@ class OrderExecutor:
                 continue
             status = self._await_fill(order["id"])
             if status == "filled":
-                logger.info("[%s] Spread CLOSED atomically (%s) %s @ %.2f debit",
+                fill_debit = self._order_fill_price(order["id"])
+                if fill_debit is None:
+                    fill_debit = price
+                realized = realized_pl_from_close(legs, fill_debit)
+                logger.info("[%s] Spread CLOSED atomically (%s) %s @ %.2f debit "
+                            "(fill %.2f, realized %s)",
                             spread.underlying, spread.exit_signal.value,
-                            method, price)
+                            method, price, fill_debit,
+                            "n/a" if realized is None else f"${realized:.2f}")
                 return {
                     "action": "close_spread",
                     "underlying": spread.underlying,
@@ -1019,6 +1053,8 @@ class OrderExecutor:
                     "limit_price": price,
                     "mid_debit": round(mid, 4),
                     "natural_debit": round(natural, 4),
+                    "fill_debit": fill_debit,
+                    "realized_pl": realized,
                 }
             if status not in _ORDER_TERMINAL_FAIL:
                 # Cancel unconfirmed — the order may still be live. Any
