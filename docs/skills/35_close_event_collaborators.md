@@ -131,6 +131,8 @@ class CloseJournalWriter:
 - **`dry_run_close` is a distinct action from `closed`.** The writer never tags a synthetic close as `action="closed"` — this is the bug from commit 9cc5636 (-$2,976 phantom-loss recap) hard-pinned by test_skill_35_writer_writes_dry_run_close_distinct_from_closed.
 - **Public method names retained on TradingAgent.** `_close_failed_streak_within_window`, `_close_cooldown_minutes_remaining`, `_record_partial_close`, `_clear_close_cooldown`, `_pdt_blocked_today_tickers` are kept as one-line shims. External call sites in `_stage_monitor` and `streamlit/components.py` don't have to change.
 
+- **Payload fields from the close result (2026-10-01).** `CloseJournalWriter` copies the whole close context, so `signal_mark_pl`, `pl_source` and `close_fill_debit` (set by `agent.py` from `close_spread`'s `realized_pl` / `fill_debit`) land in the journal row; `net_unrealized_pl` is already the realized value when `pl_source == "fill"` (skill 17 §4).
+
 ## 5. Cross-References
 
 - `17_pdt_reactive_block.md` — semantic origin of the `pdt_blocked_today` marker; this skill is the implementation host.
@@ -140,4 +142,4 @@ class CloseJournalWriter:
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-01.*

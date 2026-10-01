@@ -189,7 +189,10 @@ def test_fetch_option_chain_requests_wide_strike_window(adapter, monkeypatch):
 
 
 def test_fetch_option_chain_caches(adapter, monkeypatch):
-    """Second call within OPTION_CHAIN_TTL must reuse the cached list."""
+    """Second call within OPTION_CHAIN_TTL must reuse the cached list
+    (cache enabled — it is off by default since 29bb020)."""
+    import trading_agent.market_data_schwab as ms
+    monkeypatch.setattr(ms, "OPTION_CHAIN_TTL", 180)
     calls = {"n": 0}
 
     def fake_get(*_a, **_kw):
@@ -520,3 +523,20 @@ def test_factory_legacy_re_export_still_works():
         build_market_data_provider as legacy,
     )
     assert legacy is canonical
+
+
+
+def test_fetch_option_chain_uncached_by_default(adapter, monkeypatch):
+    """SCHWAB_API_CACHE_ENABLED off (default) → every call goes live."""
+    import trading_agent.market_data_schwab as ms
+    monkeypatch.setattr(ms, "OPTION_CHAIN_TTL", 0)
+    calls = {"n": 0}
+
+    def fake_get(*_a, **_kw):
+        calls["n"] += 1
+        return SAMPLE_CHAIN_RESPONSE
+
+    monkeypatch.setattr(adapter, "_get", fake_get)
+    adapter.fetch_option_chain("XLF", "2026-05-29", "call")
+    adapter.fetch_option_chain("XLF", "2026-05-29", "call")
+    assert calls["n"] == 2

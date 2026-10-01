@@ -206,6 +206,8 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 - **Dashboard banner is journal-derived, not agent-process-derived.** A dashboard restart, a stopped agent, or a fresh Streamlit reload still sees the banner if the journal carries today's markers. Single source of truth.
 - **Banner suppressed on clean state.** When no `pdt_blocked_today` markers exist and no `close_cooldown_until` is in the future, `_render_stuck_position_banner` returns before emitting any HTML. No empty placeholder, no scrollbar churn.
 
+- **Close alert P&L (2026-10-01).** `notify_position_closed` receives `realized_pl` from the close context's `net_unrealized_pl`, which is now the fill-based realized P&L when available (skill 17 §4) rather than the exit-signal mark.
+
 ## 5. Cross-References
 
 - `17_close_failure_and_cooldown.md` — `pdt_blocked_today` marker (§4) + `close_cooldown_until` (§1) are written there; this skill consumes them.
@@ -214,4 +216,4 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-01.*
