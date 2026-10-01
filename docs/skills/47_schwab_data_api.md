@@ -151,7 +151,7 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 - **Cache is per-instance, not module-global.** `TTLCache` instances live on the app object so two apps in the same process don't share state. Matters for parallel pytest runs.
 - **Schwab upstream failures map to 502, NOT 500.** `SchwabAuthError` → 502 with `{"error": "schwab_auth"}`; any other requests-side exception → 502 with `{"error": "schwab_upstream"}`. 500 is reserved for genuine bugs in the server layer itself.
 - **Empty batch body → 400, not 200 with empty response.** POST /quotes with `{"symbols": []}` is a client bug (no work asked for). Reject at request-validation time with 400. Same for /snapshots.
-- **Ticker parameter validation.** Accept `^[A-Z][A-Z0-9.-]{0,9}$` — uppercase alphanumeric plus `.` (BRK.B) and `-` (rare). Reject anything else at 400. Prevents `../` path traversal and shell-injection footguns even though we never shell out.
+- **Ticker parameter validation.** The ticker is stripped and **uppercased first** (so `spy` is served as `SPY`), then must match `^[A-Z][A-Z0-9.-]{0,9}$` — alphanumeric plus `.` (BRK.B) and `-` (rare). Reject anything else at 400. Prevents `../` path traversal and shell-injection footguns even though we never shell out.
 - **Access log never contains the API key.** The `Authorization` header is redacted before logging. Failed auth attempts log `<AUTH_FAILED>` in the auth field, not the attempted value.
 - **/health has no auth.** Liveness probes from launchd or an external uptime service must work without a key. `/ready` also has no auth — it reveals only Schwab-token validity (a boolean), not any market data.
 - **CORS is off by default.** No `Access-Control-Allow-Origin` header. If a browser-side consumer ever appears, add it explicitly then. Curl and Python `requests` don't care about CORS.
@@ -168,4 +168,4 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-01.*

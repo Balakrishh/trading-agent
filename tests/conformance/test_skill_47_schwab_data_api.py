@@ -203,13 +203,17 @@ class _FakeProvider:
         return True
 
 
-def _client(*, api_key=None):
-    """Return a FastAPI TestClient with a FakeProvider and optional auth."""
+def _client(*, api_key=None, cache_enabled=False):
+    """Return a FastAPI TestClient with a FakeProvider and optional auth.
+    Caching is off by default since 29bb020 (SCHWAB_API_CACHE_ENABLED)."""
     from fastapi.testclient import TestClient
     from trading_agent.data_server.app import build_app
-    from trading_agent.data_server.config import ServerConfig
+    from trading_agent.data_server.config import CacheTTLs, ServerConfig
     provider = _FakeProvider()
-    cfg = ServerConfig(api_key=api_key)
+    # Direct construction defaults ttls to 0; from_env() only fills the
+    # real TTLs when the master switch is on — mirror that here.
+    cfg = ServerConfig(api_key=api_key, cache_enabled=cache_enabled,
+                       ttls=CacheTTLs() if cache_enabled else CacheTTLs(0, 0))
     app = build_app(provider=provider, config=cfg)
     return TestClient(app), provider
 
@@ -237,7 +241,7 @@ def test_ready_returns_ok_when_provider_healthy():
 
 
 def test_price_endpoint_returns_provider_price():
-    client, provider = _client()
+    client, provider = _client(cache_enabled=True)
     r = client.get("/price/SPY")
     assert r.status_code == 200
     body = r.json()
@@ -246,6 +250,14 @@ def test_price_endpoint_returns_provider_price():
     r2 = client.get("/price/SPY")
     assert r2.status_code == 200
     assert provider.calls["price"] == 1
+
+
+def test_cache_disabled_by_default_every_request_is_live():
+    """29bb020: SCHWAB_API_CACHE_ENABLED defaults off — no caching."""
+    client, provider = _client()
+    client.get("/price/SPY")
+    client.get("/price/SPY")
+    assert provider.calls["price"] == 2
 
 
 def test_chain_endpoint_returns_contracts():
@@ -270,7 +282,7 @@ def test_quotes_endpoint_returns_batch():
 
 
 def test_snapshots_endpoint_returns_batch():
-    client, provider = _client()
+    client, provider = _client(cache_enabled=True)
     r = client.post("/snapshots", json={"tickers": ["SPY", "QQQ"]})
     assert r.status_code == 200
     body = r.json()
@@ -384,10 +396,18 @@ def test_health_stays_open_when_auth_configured():
 
 def test_price_rejects_invalid_ticker():
     client, _ = _client()
-    for bad in ("aapl", "SPY;DROP", "TOOLONGTICKER", "../etc", "", "spy"):
+    for bad in ("SPY;DROP", "TOOLONGTICKER", "../etc", "", "1SPY", "spy aapl"):
         r = client.get(f"/price/{bad}")
         # 404 acceptable when route parser rejects; 400 when handler rejects.
         assert r.status_code in (400, 404), f"{bad!r} → {r.status_code}"
+
+
+def test_price_normalises_lowercase_ticker():
+    """_validate_ticker has uppercased before matching since 4557be8:
+    'spy' is served as SPY (callers pass user input through MCP)."""
+    client, _ = _client()
+    r = client.get("/price/spy")
+    assert r.status_code == 200 and r.json()["ticker"] == "SPY"
 
 
 def test_chain_rejects_invalid_option_type():
