@@ -93,6 +93,9 @@ class TestTTLCaching:
 
     def test_option_chain_cache_hit(self, monkeypatch):
         import time
+        import trading_agent.market_data as md
+        # Chain cache is off unless SCHWAB_API_CACHE_ENABLED=true (29bb020).
+        monkeypatch.setattr(md, "OPTION_CHAIN_TTL", 180)
         provider = MarketDataProvider("k", "s")
         fake_chain = [{"symbol": "SPY250425P00480000", "bid": 1.2}]
         provider._option_cache["SPY_2025-04-25_put"] = (fake_chain, time.monotonic() - 30)
