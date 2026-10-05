@@ -24,7 +24,8 @@ same dedup set out. Trivially testable.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, Set, Tuple
+from datetime import date
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,41 @@ def register_open(
     return blocked
 
 
+def ladder_failure(ticker: str, expiration: str,
+                   open_expirations: Dict[str, List[str]],
+                   opened_today: Set[str], min_gap_days: int) -> Optional[str]:
+    """Backlog §6.7 laddering: a second position on a ticker is allowed
+    only on a later day than the first entry and only when its expiration
+    is ≥ ``min_gap_days`` from every open position's on that ticker.
+    Returns a ``ladder_*`` reason, or None when the entry is allowed."""
+    existing = open_expirations.get(ticker) or []
+    if not existing:
+        return None
+    if ticker in opened_today:
+        return "ladder_same_day_entry"
+    try:
+        new = date.fromisoformat(expiration)
+    except (TypeError, ValueError):
+        return "ladder_expiration_unknown"
+    for exp in existing:
+        try:
+            gap = abs((new - date.fromisoformat(exp)).days)
+        except (TypeError, ValueError):
+            return "ladder_expiration_unknown"
+        if gap < min_gap_days:
+            return f"ladder_gap_{gap}d_lt_{min_gap_days}d (open {exp})"
+    return None
+
+
+def open_expirations(monitor_results: Dict) -> Dict[str, List[str]]:
+    """underlying → expirations of its open positions (monitor summary)."""
+    out: Dict[str, List[str]] = {}
+    for sr in monitor_results.get("positions", []) or []:
+        if sr.get("underlying") and sr.get("expiration"):
+            out.setdefault(sr["underlying"], []).append(str(sr["expiration"]))
+    return out
+
+
 # Strategies excluded from the total-risk cap: Wheel legs carry their own
 # collateral limit (≤ 40 % of equity per CSP, skill 40 §2.9) and a CSP's
 # "max loss" is the whole strike, which would crowd out every spread.
@@ -144,4 +180,5 @@ def open_defined_risk(monitor_results: Dict) -> float:
 
 
 __all__ = ["compute_position_cap_dedup_set", "register_open",
-           "open_defined_risk", "TOTAL_RISK_EXCLUDED"]
+           "open_defined_risk", "TOTAL_RISK_EXCLUDED", "ladder_failure",
+           "open_expirations"]

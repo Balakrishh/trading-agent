@@ -864,7 +864,7 @@ class TradingAgent:
         ) = compute_position_cap_dedup_set(
             monitor_results, tickers,
             sector_for=sector_for,
-            max_positions_per_ticker=MAX_POSITIONS_PER_TICKER,
+            max_positions_per_ticker=self._max_per_ticker(),
             max_positions_per_sector=MAX_POSITIONS_PER_SECTOR,
         )
         if positions_per_ticker:
@@ -872,7 +872,7 @@ class TradingAgent:
                 "Open positions snapshot — %s (cap: %d/ticker, "
                 "%d/sector); sectors at cap: %s",
                 {t: n for t, n in sorted(positions_per_ticker.items())},
-                MAX_POSITIONS_PER_TICKER,
+                self._max_per_ticker(),
                 MAX_POSITIONS_PER_SECTOR,
                 sorted(sectors_at_cap) or "[]",
             )
@@ -971,6 +971,10 @@ class TradingAgent:
             }
 
         risk_used, risk_budget = self._total_risk_state(monitor_results, account_balance)
+        # Backlog §6.7 laddering inputs (read by the gate in _process_ticker).
+        from trading_agent.position_caps import open_expirations
+        self._open_expirations = open_expirations(monitor_results)
+        self._opened_today = self._tickers_opened_today()
 
         new_trade_results = []
         for ticker in tickers:
@@ -1030,6 +1034,9 @@ class TradingAgent:
                 new_trade_results.append(result)
                 if ((result or {}).get("execution") or {}).get("status") in ("submitted", "dry_run"):
                     risk_used += self._submitted_risk(result)
+                    self._open_expirations.setdefault(ticker, []).append(
+                        str(result.get("expiration", "")))
+                    self._opened_today.add(ticker)
                     tickers_with_positions |= self._register_open(
                         ticker, tickers, positions_per_ticker, positions_per_sector)
             except InsufficientDataError as exc:
@@ -2300,14 +2307,27 @@ class TradingAgent:
         out["rv_20d"] = round(sigma, 4) if sigma is not None else None
         return out
 
-    @staticmethod
-    def _register_open(ticker, tickers, per_ticker, per_sector):
+    def _max_per_ticker(self) -> int:
+        """PresetConfig.max_positions_per_ticker (§6.7), legacy constant fallback."""
+        return int(getattr(getattr(self, "preset", None), "max_positions_per_ticker",
+                           MAX_POSITIONS_PER_TICKER))
+
+    def _ladder_block(self, ticker: str, expiration: str) -> Optional[str]:
+        """Backlog §6.7: reason a 2nd+ position on ``ticker`` is not allowed
+        (same-day entry, or expiry within the ladder gap), else None."""
+        from trading_agent.position_caps import ladder_failure
+        return ladder_failure(ticker, expiration,
+                              getattr(self, "_open_expirations", {}) or {},
+                              getattr(self, "_opened_today", set()) or set(),
+                              int(getattr(self.preset, "ladder_min_gap_days", 7)))
+
+    def _register_open(self, ticker, tickers, per_ticker, per_sector):
         """Count a new position / pending order toward the per-ticker and
         per-sector caps; returns the tickers now blocked (skill 37)."""
         from trading_agent.position_caps import register_open
         return register_open(ticker, tickers, per_ticker, per_sector,
                              sector_for=sector_for,
-                             max_positions_per_ticker=MAX_POSITIONS_PER_TICKER,
+                             max_positions_per_ticker=self._max_per_ticker(),
                              max_positions_per_sector=MAX_POSITIONS_PER_SECTOR)
 
     def _total_risk_state(self, monitor_results: Dict, account_balance: float):
@@ -2415,15 +2435,16 @@ class TradingAgent:
         # (e.g. no new bull puts in CAUTION). Recorded as a failed check so
         # the journal reason reads "risk: market_state_<STATE>_blocks_…".
         if plan.valid and verdict.approved:
-            ms_block = market_state.gate_failure(
-                self._market_state, plan.strategy_name,
-                [l.option_type for l in plan.legs if l.action == "sell"])
-            if ms_block:
-                logger.info("[%s] %s", ticker, ms_block)
+            block = (market_state.gate_failure(
+                         self._market_state, plan.strategy_name,
+                         [l.option_type for l in plan.legs if l.action == "sell"])
+                     or self._ladder_block(ticker, plan.expiration))
+            if block:
+                logger.info("[%s] %s", ticker, block)
                 verdict = dataclasses.replace(
                     verdict, approved=False,
-                    checks_failed=list(verdict.checks_failed) + [ms_block],
-                    summary=f"{verdict.summary} | {ms_block}")
+                    checks_failed=list(verdict.checks_failed) + [block],
+                    summary=f"{verdict.summary} | {block}")
 
         # Resolve tiered sentiment pipeline result (earnings → cache →
         # FinGPT + verifier).  Timeout is 60s: news fetching adds
@@ -2554,6 +2575,7 @@ class TradingAgent:
             "plan_valid": plan.valid,
             "risk_approved": verdict.approved,
             "max_loss": plan.max_loss,          # per contract — total-risk cap
+            "expiration": plan.expiration,      # ladder gate (§6.7)
             "execution": exec_result,
             "analysis": self._analysis_dict(analysis),
         }
