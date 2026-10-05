@@ -237,16 +237,17 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 ```
 
 ```python
-# trading_agent/agent.py:2324-2332
-            ms_block = market_state.gate_failure(
-                self._market_state, plan.strategy_name,
-                [l.option_type for l in plan.legs if l.action == "sell"])
-            if ms_block:
-                logger.info("[%s] %s", ticker, ms_block)
+# trading_agent/agent.py:2438-2447
+            block = (market_state.gate_failure(
+                         self._market_state, plan.strategy_name,
+                         [l.option_type for l in plan.legs if l.action == "sell"])
+                     or self._ladder_block(ticker, plan.expiration))
+            if block:
+                logger.info("[%s] %s", ticker, block)
                 verdict = dataclasses.replace(
                     verdict, approved=False,
-                    checks_failed=list(verdict.checks_failed) + [ms_block],
-                    summary=f"{verdict.summary} | {ms_block}")
+                    checks_failed=list(verdict.checks_failed) + [block],
+                    summary=f"{verdict.summary} | {block}")
 ```
 
 ## 4. Edge Cases / Guardrails
@@ -257,7 +258,7 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 - **Process restarts every cycle** — the prior state (for RECOVERY and the CAUTION hysteresis) is read back from `trade_journal/market_state.json`, written atomically (temp + rename) each cycle.
 - **NORMAL↔CAUTION churn** — without hysteresis the 2019–2026 replay flipped 159 times (median CAUTION run 2 days); the exit margins cut total state changes from 34 to 26 per year.
 - **CAPITULATION** — Stage 2 returns early with `skipped_reason=market_state_CAPITULATION`; Stage 1 exits already ran. `get_market_state` adds a note rather than a hedge (puts are dearest then).
-- **Strategy blocked** — recorded as a failed risk check (`market_state_<STATE>_blocks_<strategy>`), so the journal reason reads `risk: market_state_…` and the reject histogram counts it.
+- **Strategy blocked** — (shares one check with the §6.7 ladder gate, skill 37) recorded as a failed risk check (`market_state_<STATE>_blocks_<strategy>`), so the journal reason reads `risk: market_state_…` and the reject histogram counts it.
 - **Size multiplier** — applied to both `RiskManager.max_risk_pct` and the executor's `max_risk_pct` every cycle from the preset base, so the validator and the sizer never disagree (CLAUDE.md invariant #4 discipline) and a multiplier never compounds.
 - **Wheel CSP pause** — `wheel_screen` drops CSP rows (diagnostic `market_state_<STATE>_pauses_new_csp`) and `executor_promote` refuses a staged CSP. A snapshot older than 4 days (agent not running) does not pause; covered calls are never paused.
 - **Overlay disabled** (`market_state_enabled=False`) — no snapshot is read or written by the gates, max_risk_pct stays at the preset value, behaviour is pre-2026-10-05.

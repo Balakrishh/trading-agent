@@ -2727,6 +2727,19 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "CSP tickers per sector", 0, 5, int(getattr(seed, "csp_max_per_sector", 1)), 1,
                 key="cust_csp_per_sector", help="0 = no sector limit.")
 
+        lad1, lad2 = st.columns(2)
+        with lad1:
+            max_per_ticker = st.number_input(
+                "Max positions per ticker (ladder)", 1, 4,
+                int(getattr(seed, "max_positions_per_ticker", 2)), 1,
+                key="cust_max_per_ticker",
+                help="1 = one position per underlying. ≥2 lets the agent ladder "
+                     "expirations: later day, expiry ≥ the gap below from the others.")
+        with lad2:
+            ladder_gap = st.number_input(
+                "Ladder min expiry gap (days)", 1, 60,
+                int(getattr(seed, "ladder_min_gap_days", 7)), 1, key="cust_ladder_gap")
+
         # ── Debit structures + bounce bull put (skill 59) ─────────────
         st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
         db_c1, db_c2, db_c3 = st.columns(3)
@@ -2842,6 +2855,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "cc_min_iv_rank":               iv_min,
         "csp_require_above_sma200":     csp_sma200,
         "csp_max_per_sector":           int(csp_per_sector),
+        "max_positions_per_ticker":     int(max_per_ticker),
+        "ladder_min_gap_days":          int(ladder_gap),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

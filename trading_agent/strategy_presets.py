@@ -323,6 +323,15 @@ class PresetConfig:
     csp_max_per_sector:                int   = 1
 
     # ------------------------------------------------------------------
+    # Laddering (added 2026-10-05 — backlog §6.7). Up to this many open
+    # positions per underlying; a 2nd+ entry must be on a later day than
+    # the ticker's last entry and expire ≥ ladder_min_gap_days from every
+    # open position on it. 1 = legacy single position per ticker.
+    # ------------------------------------------------------------------
+    max_positions_per_ticker:          int   = 2
+    ladder_min_gap_days:               int   = 7
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
@@ -386,6 +395,7 @@ class PresetConfig:
                 f"MarketState {'on' if self.market_state_enabled else 'off'} • "
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
+                f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
                 f"Max risk {self.max_risk_pct*100:.0f}% "
@@ -400,6 +410,7 @@ class PresetConfig:
             f"MarketState {'on' if self.market_state_enabled else 'off'} • "
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
+            f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
             f"Max risk {self.max_risk_pct*100:.0f}% "
