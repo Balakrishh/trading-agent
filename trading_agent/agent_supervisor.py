@@ -41,6 +41,27 @@ log = logging.getLogger("trading_agent.agent_supervisor")
 _MIN_SLEEP_SEC = 60
 _MAX_SLEEP_SEC = 12 * 60 * 60
 
+# Long waits are slept in slices of at most this many seconds, re-checked
+# against the wall clock. On macOS ``time.sleep`` does not advance while
+# the machine is asleep, so one 12-hour sleep can stretch by the whole
+# lid-closed time: 2026-10-03 the supervisor woke at 14:36 instead of
+# 04:05, and on 2026-10-05 it missed the 09:25 open entirely.
+_SLEEP_SLICE_SEC = 300
+
+
+def wall_clock_sleep(seconds: float, *, clock=time.time, sleep=time.sleep,
+                     slice_sec: float = _SLEEP_SLICE_SEC) -> None:
+    """Sleep until ``seconds`` of WALL-CLOCK time have passed, in slices
+    of at most ``slice_sec``, so system sleep delays a wake by at most one
+    slice after the machine wakes up."""
+    deadline = clock() + max(0.0, float(seconds))
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return
+        sleep(min(slice_sec, remaining))
+
+
 # Backoff after an unexpected agent crash. launchd's own ThrottleInterval
 # also applies at the process level; this is the in-supervisor throttle
 # for consecutive crashes inside one supervisor lifetime.
@@ -142,7 +163,7 @@ def _run_agent_once(env: Optional[dict] = None) -> int:
 def supervise(
     *,
     max_iterations: Optional[int] = None,
-    sleep_fn=time.sleep,
+    sleep_fn=wall_clock_sleep,
     now_fn=None,
 ) -> int:
     """Run the supervisor loop.
