@@ -99,6 +99,10 @@ def round_trips(rows: Iterable[Dict[str, Any]], *,
         key = (rec.get("ticker"), rs.get("strategy"), rs.get("expiration"))
         if action == "submitted" and rec.get("ticker"):
             pending.setdefault(key, []).append(rec)
+        elif action == "position_reconciled":
+            # P&L unknown (journal_reconcile.py): close the open, no round trip.
+            if pending.get(key):
+                pending[key].pop(0)
         elif action == "closed" and rs.get("fill_status") != "dry_run":
             queue = pending.get(key)
             if not queue:

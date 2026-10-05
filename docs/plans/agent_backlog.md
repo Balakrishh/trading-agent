@@ -79,7 +79,7 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 ## 5. Operator actions (not code)
 
 - [ ] Add Telegram bot tokens to `.env` so outages and errors page you.
-- [ ] Reconcile the July XLE iron condor P&L from the old paper account's order history.
+- [x] Reconcile the July XLE iron condor P&L from the old paper account's order history. *(2026-10-05: history unreachable (account replaced; strikes and size not in the journal, trade plan rotated) → `position_reconciled` row with P&L unknown via `trading_agent/journal_reconcile.py`; if you recover the P&L from the old account, append the real close with `--realized-pl`.)*
 - [ ] Refresh the June holdings paste in the dashboard.
 - [ ] Confirm the rotated data-server token is the only valid one.
 

@@ -70,6 +70,11 @@ _ET = ZoneInfo("US/Eastern")
 # pass this explicitly; tests pass a tempdir path.
 DEFAULT_LIVE_JOURNAL = "trade_journal/signals_live.jsonl"
 
+# A journal open whose broker close was never recorded and whose P&L cannot
+# be recovered (journal_reconcile.py). Pairs with the open in
+# ``open_trades``; never a close, never in realized P&L.
+RECONCILED_ACTION = "position_reconciled"
+
 
 # ---------------------------------------------------------------------------
 # Result dataclasses — explicit shape so consumers don't depend on dict
@@ -305,7 +310,7 @@ class JournalReader:
                 key = (o.ticker, o.strategy, o.expiration)
                 pending.setdefault(key, []).append(o)
                 order.append(key)
-            elif self._is_real_close(rec):
+            elif self._is_real_close(rec) or action == RECONCILED_ACTION:
                 c = self._closed_from_row(rec)
                 queue = pending.get((c.ticker, c.strategy, c.expiration))
                 if queue:
