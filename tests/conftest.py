@@ -175,3 +175,12 @@ def _restore_journal_reader_today():
     original = JournalReader.__dict__["_today_et"]
     yield
     JournalReader._today_et = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_market_state(tmp_path, monkeypatch):
+    """Skill 58: agent-cycle tests must not fetch live VIX levels or write
+    trade_journal/market_state.json in the repo."""
+    from trading_agent import market_state
+    monkeypatch.setattr(market_state, "STATE_PATH", tmp_path / "market_state.json")
+    monkeypatch.setattr(market_state, "yfinance_level", lambda symbol: None)

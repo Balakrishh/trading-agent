@@ -48,6 +48,7 @@ The TradingAgent class is a thin orchestrator over those modules.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import glob
 import json
 import logging
@@ -111,6 +112,7 @@ from trading_agent.daily_state import (
     tally_exit_vote,
 )
 from trading_agent.thesis_builder import build_thesis
+from trading_agent import market_state
 from trading_agent import shutdown as _shutdown
 
 logger = logging.getLogger(__name__)
@@ -273,6 +275,10 @@ class TradingAgent:
         max_delta        = self.preset.max_delta
         min_credit_ratio = self.preset.min_credit_ratio
         max_risk_pct     = self.preset.max_risk_pct
+        # Skill 58: the market risk-state size multiplier scales this base
+        # each cycle on BOTH RiskManager and the executor's sizer.
+        self._base_max_risk_pct = max_risk_pct
+        self._market_state = None
 
         # ── .env-vs-preset mismatch warning ──────────────────────────────
         # Pre-2026-05-06 the executor read ``config.trading.max_risk_pct``
@@ -930,6 +936,27 @@ class TradingAgent:
                     "open_orders": {"total": 0},
                     "recent_fills": {"total": 0},
                     "skipped_reason": "stage2_skipped_position_fetch_failed",
+                },
+            }
+
+        # ── Market risk state (skill 58) ────────────────────────────────
+        # Whole-market overlay computed once per cycle. CAPITULATION
+        # (size multiplier 0) blocks every new entry; exits ran in Stage 1.
+        self._update_market_state(tickers, account_balance)
+        ms_state = self._market_state
+        if ms_state is not None and ms_state.gate.size_multiplier <= 0:
+            logger.warning(
+                "STAGE 2 SKIPPED — market state %s (%s). No new entries.",
+                ms_state.state, "; ".join(ms_state.reasons))
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "account_balance": account_balance,
+                "monitor": monitor_results,
+                "new_trades": [],
+                "order_summary": {
+                    "open_orders": {"total": 0},
+                    "recent_fills": {"total": 0},
+                    "skipped_reason": f"market_state_{ms_state.state}",
                 },
             }
 
@@ -2178,6 +2205,56 @@ class TradingAgent:
     # Stage 2: New trade entry
     # ==================================================================
 
+    def _update_market_state(self, tickers, account_balance: float = 0.0) -> None:
+        """Skill 58: classify the market once per cycle, scale max_risk_pct
+        on the RiskManager and the executor, and persist the snapshot read
+        by the MCP ``get_market_state`` tool and ``wheel_screen``. The
+        previous state is read back from the snapshot (the process restarts
+        every cycle), which is what lets RECOVERY follow DEFENSIVE."""
+        if not getattr(self.preset, "market_state_enabled", False):
+            self._market_state = None
+            self._apply_risk_multiplier(1.0)
+            return
+        prior = market_state.read_state()
+        prior_state = prior.get("state") if prior else None
+        try:
+            inputs = market_state.compute_inputs(
+                lambda t: self.data_provider.fetch_historical_prices(t, period_days=200),
+                market_state.breadth_universe(tickers),
+                market_state.yfinance_level,
+            )
+            result = market_state.classify_market_state(inputs, prior_state)
+        except Exception as exc:
+            logger.warning("Market state unavailable (%s) — failing safe to CAUTION", exc)
+            self._exception_monitor.record(
+                source="agent._update_market_state", exc=exc,
+                message="market state classification failed — CAUTION fallback")
+            result = market_state.classify_market_state(
+                market_state.MarketInputs(), prior_state)
+        self._market_state = result
+        self._apply_risk_multiplier(result.gate.size_multiplier)
+        logger.info("MARKET STATE: %s (size ×%.1f) — %s", result.state,
+                    result.gate.size_multiplier, "; ".join(result.reasons))
+        try:
+            market_state.write_state(result, extra={"account_balance": account_balance})
+        except OSError as exc:
+            logger.warning("Market state snapshot write failed: %s", exc)
+        if result.state != prior_state:
+            try:
+                self.journal_kb.log_signal(
+                    ticker="__market__", action="market_state",
+                    price=result.inputs.spy_price or 0.0,
+                    raw_signal={**result.to_dict(), "prior_state": prior_state},
+                )
+            except Exception as exc:  # noqa: skill-34-exempt — state-change journal row is best-effort; snapshot already written
+                logger.warning("Market state journal row failed: %s", exc)
+
+    def _apply_risk_multiplier(self, mult: float) -> None:
+        pct = self._base_max_risk_pct * mult
+        self.risk_manager.max_risk_pct = pct
+        if hasattr(self.executor, "max_risk_pct"):
+            self.executor.max_risk_pct = pct
+
     def _process_ticker(self, ticker: str, balance: float,
                         buying_power: float,
                         acct_type: str, market_open: bool) -> Dict:
@@ -2240,6 +2317,19 @@ class TradingAgent:
             underlying_bid_ask=underlying_bid_ask,
             account_buying_power=buying_power,
         )
+        # Skill 58: the market risk state may forbid this strategy family
+        # (e.g. no new bull puts in CAUTION). Recorded as a failed check so
+        # the journal reason reads "risk: market_state_<STATE>_blocks_…".
+        if plan.valid and verdict.approved:
+            ms_block = market_state.gate_failure(
+                self._market_state, plan.strategy_name,
+                [l.option_type for l in plan.legs if l.action == "sell"])
+            if ms_block:
+                logger.info("[%s] %s", ticker, ms_block)
+                verdict = dataclasses.replace(
+                    verdict, approved=False,
+                    checks_failed=list(verdict.checks_failed) + [ms_block],
+                    summary=f"{verdict.summary} | {ms_block}")
 
         # Resolve tiered sentiment pipeline result (earnings → cache →
         # FinGPT + verifier).  Timeout is 60s: news fetching adds
@@ -2534,6 +2624,18 @@ class TradingAgent:
             "run_id": exec_result.get("run_id") if exec_result else None,
             "thesis": thesis,
         }
+
+        # Skill 58: whole-market state + the playbook this ticker's trend ×
+        # volatility × RSI calls for (implemented=False → a tool we lack).
+        ms_state = getattr(self, "_market_state", None)
+        if ms_state is not None:
+            raw["market_state"] = ms_state.state
+            raw["market_size_multiplier"] = ms_state.gate.size_multiplier
+        pb = market_state.playbook_for(
+            analysis.regime.value, getattr(analysis, "iv_rank", None),
+            analysis.rsi_14)
+        raw["playbook"] = pb.name
+        raw["playbook_implemented"] = pb.implemented
 
         # Adaptive-scan diagnostics: top-K candidates + selected pick. Only
         # set when the planner ran the scanner this cycle; static mode emits

@@ -255,6 +255,7 @@ Read this list as "if you're about to touch X, you must understand Y first."
 | Choosing between simple and grid-scan planning | [14 Adaptive vs static scan modes](14_adaptive_vs_static_scan_modes.md) |
 | Backtester / live-parity changes | [15 Backtest↔live parity](15_backtest_live_parity.md) |
 | Adding a market-data provider, OAuth flow, or per-surface routing | [16 Market-data provider routing](16_market_data_provider_routing.md) |
+| Market-wide risk state, entry gating by state, the playbook table | [58 Market risk state & playbook](58_market_state_playbook.md) |
 
 ## 8. Edge Cases / Guardrails
 

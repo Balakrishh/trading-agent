@@ -31,6 +31,7 @@ recent         = list_recent_trades(days=7)
 preset         = get_preset()
 market         = get_market_status()
 alerts         = get_recent_alerts(hours=24)
+market_state   = get_market_state()        # skill 58 — leads the Macro section
 ```
 
 The brief is rendered as prose sections in this order:
@@ -47,6 +48,7 @@ The brief is rendered as prose sections in this order:
 - **Market closed → no live macro fetch.** If `get_market_status()` returns `{"open": false}`, skip any tool call that would touch Schwab quotes; render the "positions as of last close" caveat.
 - **Empty positions.** Render an explicit "no open positions" line — the operator needs to see the absence confirmed, not infer it from silence.
 - **Data server unreachable.** `get_quote`/`get_chain` may return `{"source": "unavailable"}`. Playbook skips those sections rather than failing the whole brief.
+- **Market risk state (2026-10-05).** `get_market_state()` leads the Macro section: state, top reasons, size multiplier, CSP pause, and any `hedge_suggestion` (an idea for `/propose`, never an order). `source: unavailable` → say the agent has not written a snapshot yet.
 - **Alerts noise floor.** `get_recent_alerts(hours=24)` includes silenced dedups; render only rows the operator hasn't already seen (compare against yesterday's brief if the state file exists).
 - **No writes.** This skill NEVER invokes `promote.py`, writes to `pending_orders/`, or calls a slash command that does. Read-only end-to-end.
 - **`morning` skill interop.** The desktop-app `morning` skill renders a styled HTML brief; this playbook renders prose in the Claude Code terminal. They share the same tool calls but different output surfaces — do not conflate.

@@ -124,6 +124,16 @@ class PresetConfig:
     fill_model:              str   = "natural"
 
     # ------------------------------------------------------------------
+    # Market risk-state overlay (added 2026-10-05 — backlog §1/§6.2,
+    # skill 58). When True the agent classifies the whole market once per
+    # cycle (NORMAL / CAUTION / DEFENSIVE / CAPITULATION / RECOVERY) and
+    # gates new entries by it: size multiplier on max_risk_pct, allowed
+    # strategies, and the Wheel cash-secured-put pause. Exits are never
+    # gated. False = legacy behaviour (per-ticker regime only).
+    # ------------------------------------------------------------------
+    market_state_enabled:    bool  = True
+
+    # ------------------------------------------------------------------
     # Profit-target management (added 2026-05-19 — see skill 30).
     # Close any position whose unrealized P&L ≥ profit_target_pct × initial
     # credit. The 50% default is the industry-standard early-exit rule
@@ -298,6 +308,7 @@ class PresetConfig:
                 f"LegSpread ≤ ${self.max_leg_spread_cents:.2f}/"
                 f"{self.max_leg_spread_pct_mid:.0%}mid • "
                 f"Fills @ {self.fill_model} • "
+                f"MarketState {'on' if self.market_state_enabled else 'off'} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
                 f"Max risk {self.max_risk_pct*100:.0f}%"
@@ -308,6 +319,7 @@ class PresetConfig:
             f"IC@{self.dte_iron_condor}d • MR@{self.dte_mean_reversion}d • "
             f"C/W ≥ {self.min_credit_ratio} • "
             f"Fills @ {self.fill_model} • "
+            f"MarketState {'on' if self.market_state_enabled else 'off'} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
             f"Max risk {self.max_risk_pct*100:.0f}%"
@@ -601,6 +613,13 @@ def load_active_preset(path: Optional[Path] = None) -> PresetConfig:
         logger.warning("Invalid fill_model %r — keeping profile default %r",
                        fill_model, preset.fill_model)
 
+    market_state_enabled = data.get("market_state_enabled")
+    if isinstance(market_state_enabled, bool):
+        overlay["market_state_enabled"] = market_state_enabled
+    elif market_state_enabled is not None:
+        logger.warning("Invalid market_state_enabled %r — keeping profile default %r",
+                       market_state_enabled, preset.market_state_enabled)
+
     defensive_roll_enabled = data.get("defensive_roll_enabled")
     if isinstance(defensive_roll_enabled, bool):
         overlay["defensive_roll_enabled"] = defensive_roll_enabled
@@ -623,6 +642,7 @@ def save_active_preset(profile: ProfileName,
                        max_leg_spread_cents: Optional[float] = None,
                        defensive_roll_enabled: Optional[bool] = None,
                        fill_model: Optional[str] = None,
+                       market_state_enabled: Optional[bool] = None,
                        path: Optional[Path] = None) -> Path:
     """
     Persist the active preset selection to ``STRATEGY_PRESET.json``.
@@ -661,6 +681,8 @@ def save_active_preset(profile: ProfileName,
         if fill_model not in FILL_MODELS:
             raise ValueError(f"fill_model must be one of {FILL_MODELS}")
         payload["fill_model"] = fill_model
+    if market_state_enabled is not None:
+        payload["market_state_enabled"] = bool(market_state_enabled)
     if profile == "custom" and custom:
         # Only persist the dataclass-known keys.
         valid = {f.name for f in PresetConfig.__dataclass_fields__.values()}

@@ -2606,6 +2606,15 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                  "account actually fills at (week 1: 3 of 3 fills). mid = "
                  "legacy NBBO mid minus a 2¢ haircut (optimistic).",
         )
+        market_state_enabled = st.checkbox(
+            "Market risk-state gates (skill 58)",
+            value=bool(getattr(seed, "market_state_enabled", True)),
+            key="cust_market_state_enabled",
+            help="Classify the whole market each cycle (NORMAL / CAUTION / "
+                 "DEFENSIVE / CAPITULATION / RECOVERY) and gate new entries: "
+                 "position-size multiplier, allowed strategies, Wheel CSP "
+                 "pause. Exits are never gated.",
+        )
 
         # ── Profit-target management (skill 30, added 2026-05-19) ──────
         # Close any position once unrealized P&L ≥ X × initial credit.
@@ -2689,6 +2698,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "max_leg_spread_cents":   max_leg_spread_cents,
         "max_leg_spread_pct_mid": max_leg_spread_pct_mid,
         "fill_model":             fill_model,
+        "market_state_enabled":   market_state_enabled,
         "profit_target_pct":  profit_target_pct,
         # Iron Butterfly knobs (skill 45).
         "iron_butterfly_enabled":       ib_enabled,
