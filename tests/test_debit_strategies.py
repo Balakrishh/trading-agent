@@ -412,3 +412,20 @@ def test_bounce_confirmed_sells_put_below_recent_low():
     sold = [l.strike for l in p.legs if l.action == "sell"]
     assert sold and max(sold) < recent_low                      # never the 92 put
     assert p.reasoning.startswith("Bounce: price 96.00 reclaimed")
+
+
+@pytest.mark.parametrize("name,regime,expected", [
+    (PUT_DEBIT_STRATEGY, Regime.SIDEWAYS, ExitSignal.HOLD),       # drift, not reversal
+    (PUT_DEBIT_STRATEGY, Regime.MEAN_REVERSION, ExitSignal.HOLD),
+    (PUT_DEBIT_STRATEGY, Regime.BULLISH, ExitSignal.REGIME_SHIFT),
+    (CALL_DEBIT_STRATEGY, Regime.SIDEWAYS, ExitSignal.HOLD),
+    (CALL_DEBIT_STRATEGY, Regime.BEARISH, ExitSignal.REGIME_SHIFT),
+    (CALENDAR_STRATEGY, Regime.BULLISH, ExitSignal.REGIME_SHIFT),  # a trend threatens a calendar
+])
+def test_debit_regime_exit_only_on_reversal(name, regime, expected):
+    """2026-10-05: IWM put debit voted to close one cycle after filling when
+    the regime flickered bearish → sideways."""
+    width = 0.0 if name == CALENDAR_STRATEGY else 5.0
+    sig, _ = mon()._check_exit(_pos(name, -2.0, width, 0.0), {"SPY": regime},
+                               underlying_price=103.0)
+    assert sig == expected
