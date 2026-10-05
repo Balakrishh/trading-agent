@@ -1,0 +1,400 @@
+<title>Trading Day Flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Figtree:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; the day strip first, then one decision cycle as a vertical pipeline, then the market state, the strategy table and exit rules, then the Wheel loop as a diagram. */
+:root {
+  color-scheme: light;
+  --ink: #16202b;          /* text */
+  --muted: #56636f;        /* secondary text */
+  --paper: #f5f7f8;        /* page */
+  --panel: #ffffff;        /* raised surfaces */
+  --line: #d6dde2;         /* rules, borders */
+  --accent: #0f6e8c;       /* agent / primary flow */
+  --accent-soft: #e0f0f5;
+  --go: #1d7a4c;           /* trade opened / held */
+  --go-soft: #e2f3ea;
+  --gate: #9a6200;         /* filters that skip */
+  --gate-soft: #fbf0db;
+  --stop: #b3372e;         /* exits / closes */
+  --stop-soft: #f9e4e2;
+  --wheel: #6a4bb5;        /* options wheel lane */
+  --wheel-soft: #eee9f8;
+  --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Figtree", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ink: #e4ebf0; --muted: #9aa8b3; --paper: #0f161c; --panel: #16212a; --line: #2a3843;
+    --accent: #52b7d6; --accent-soft: #123341;
+    --go: #5cc88f; --go-soft: #133226;
+    --gate: #e3ab4a; --gate-soft: #3a2b10;
+    --stop: #f08079; --stop-soft: #3c1d1b;
+    --wheel: #b39cf0; --wheel-soft: #2a2143;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ink: #e4ebf0; --muted: #9aa8b3; --paper: #0f161c; --panel: #16212a; --line: #2a3843;
+  --accent: #52b7d6; --accent-soft: #123341;
+  --go: #5cc88f; --go-soft: #133226;
+  --gate: #e3ab4a; --gate-soft: #3a2b10;
+  --stop: #f08079; --stop-soft: #3c1d1b;
+  --wheel: #b39cf0; --wheel-soft: #2a2143;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 16px/1.55 var(--f-body);
+  padding-block: 32px 64px;
+  padding-inline: 20px;
+}
+.wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 48px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -0.01em; line-height: 1.1; }
+h2 { font-size: 24px; font-weight: 700; }
+h3 { font-size: 16px; font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font: 500 12px/1 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { color: var(--muted); font-size: 17px; }
+.note-p { font-size: 14px; color: var(--muted); }
+header { display: grid; gap: 12px; }
+section { display: grid; gap: 18px; }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+
+/* legend */
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+/* ── day strip ── */
+.day { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px 20px 18px; overflow-x: auto; }
+.strip { position: relative; min-width: 640px; height: 132px; margin: 0 56px; }
+.bar { position: absolute; left: 0; right: 0; top: 58px; height: 18px; border-radius: 4px; background: var(--line); }
+.session { position: absolute; top: 58px; height: 18px; left: 5.56%; width: 88.88%;
+  background: repeating-linear-gradient(90deg, var(--accent) 0 1px, var(--accent-soft) 1px 3px);
+  border-radius: 3px; }
+.mark { position: absolute; top: 0; transform: translateX(-50%); display: grid; justify-items: center; gap: 4px; text-align: center; width: 120px; }
+.mark .t { font: 500 13px var(--f-mono); }
+.mark .d { font-size: 12px; color: var(--muted); line-height: 1.3; }
+.mark .tick { width: 2px; height: 22px; background: var(--ink); margin-top: 2px; }
+.mark.below { top: 80px; }
+.mark.below .tick { order: -1; margin: 0 0 2px; height: 10px; }
+.axis { position: absolute; top: 116px; left: 0; right: 0; display: flex; justify-content: space-between; font: 400 11px var(--f-mono); color: var(--muted); }
+.day-note { margin-top: 10px; font-size: 14px; color: var(--muted); }
+
+/* ── cycle pipeline ── */
+.cycle { display: grid; gap: 14px; }
+.stage { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 18px 16px; display: grid; gap: 12px; }
+.stage-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.tag { font: 500 11px/1 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; padding: 5px 8px; border-radius: 4px; }
+.tag.acc { background: var(--accent-soft); color: var(--accent); }
+.steps { display: grid; gap: 8px; }
+.step { display: grid; grid-template-columns: 34px 1fr; gap: 12px; align-items: start; }
+.step .n { font: 500 13px/1 var(--f-mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 50%; width: 30px; height: 30px; display: grid; place-items: center; }
+.step .n.g { color: var(--gate); border-color: var(--gate); }
+.step .n.x { color: var(--stop); border-color: var(--stop); }
+.step .n.w { color: var(--wheel); border-color: var(--wheel); }
+.step .n.o { color: var(--go); border-color: var(--go); }
+.step b { font-weight: 600; }
+.step p { font-size: 15px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip { font: 400 12px/1.2 var(--f-mono); padding: 4px 7px; border-radius: 4px; border: 1px solid var(--line); color: var(--ink); background: var(--paper); }
+.chip.g { border-color: var(--gate); color: var(--gate); background: var(--gate-soft); }
+.chip.x { border-color: var(--stop); color: var(--stop); background: var(--stop-soft); }
+.chip.o { border-color: var(--go); color: var(--go); background: var(--go-soft); }
+.chip.w { border-color: var(--wheel); color: var(--wheel); background: var(--wheel-soft); }
+.down { justify-self: center; font: 500 13px var(--f-mono); color: var(--muted); }
+.phases { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.phase { border-top: 3px solid var(--accent); background: var(--paper); border-radius: 0 0 6px 6px; padding: 10px 10px 12px; display: grid; gap: 4px; align-content: start; }
+.phase .pn { font: 500 11px var(--f-mono); color: var(--accent); letter-spacing: 0.05em; }
+.phase .pt { font: 700 14px var(--f-display); }
+.phase .pd { font-size: 13px; color: var(--muted); line-height: 1.4; }
+@media (max-width: 760px) { .phases { grid-template-columns: repeat(2, 1fr); } }
+
+/* ── tables ── */
+.tbl-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; }
+th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 11px var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); background: var(--paper); }
+tr:last-child td { border-bottom: 0; }
+td .s { font-weight: 600; }
+td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.band td { background: var(--paper); font: 500 11px var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding-block: 7px; }
+.pill { display: inline-block; font: 500 12px/1.2 var(--f-mono); padding: 3px 7px; border-radius: 999px; white-space: nowrap; }
+.pill.o { background: var(--go-soft); color: var(--go); }
+.pill.g { background: var(--gate-soft); color: var(--gate); }
+.pill.x { background: var(--stop-soft); color: var(--stop); }
+.pill.w { background: var(--wheel-soft); color: var(--wheel); }
+.pill.a { background: var(--accent-soft); color: var(--accent); }
+.three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+@media (max-width: 860px) { .three { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 10px; align-content: start; }
+.rule { display: grid; grid-template-columns: 74px 1fr; gap: 10px; align-items: baseline; font-size: 14px; }
+.rule .pill { justify-self: start; }
+.rule .note { color: var(--muted); }
+
+/* ── wheel diagram ── */
+.diagram { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.diagram svg { display: block; width: 100%; min-width: 720px; height: auto; }
+svg .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+svg .box.w { fill: var(--wheel-soft); stroke: var(--wheel); }
+svg .box.a { fill: var(--accent-soft); stroke: var(--accent); }
+svg .ttl { fill: var(--ink); font: 700 15px var(--f-display); }
+svg .sub { fill: var(--muted); font: 400 12.5px var(--f-body); }
+svg .lbl { fill: var(--muted); font: 500 11.5px var(--f-mono); }
+svg .lbl.w { fill: var(--wheel); }
+svg .lbl.o { fill: var(--go); }
+svg .edge { fill: none; stroke: var(--muted); stroke-width: 1.6; }
+svg .edge.w { stroke: var(--wheel); }
+svg .edge.o { stroke: var(--go); }
+svg .head { fill: var(--muted); }
+svg .head.w { fill: var(--wheel); }
+svg .head.o { fill: var(--go); }
+svg .lane { fill: none; stroke: var(--line); stroke-dasharray: 4 5; }
+svg .lanet { fill: var(--muted); font: 500 11px var(--f-mono); letter-spacing: 0.08em; }
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">trading-agent · paper account</span>
+  <h1>Trading Day Flow</h1>
+  <p class="lede">What the agent does from the opening window to the close. About every 75 seconds a decision cycle manages open positions, rates the whole market, then plans each ticker: a credit spread when premium pays, a debit spread or calendar when it doesn't. The options Wheel runs alongside, staged by you and managed by the same cycle.</p>
+  <div class="legend">
+    <span><i class="sw" style="background:var(--accent)"></i>Agent flow</span>
+    <span><i class="sw" style="background:var(--gate)"></i>Filter that skips</span>
+    <span><i class="sw" style="background:var(--go)"></i>Trade opened / held</span>
+    <span><i class="sw" style="background:var(--stop)"></i>Exit / close</span>
+    <span><i class="sw" style="background:var(--wheel)"></i>Options Wheel</span>
+  </div>
+</header>
+
+<!-- ── DAY ── -->
+<section aria-labelledby="day-h">
+  <span class="eyebrow">The session · Eastern time</span>
+  <h2 id="day-h">One trading day</h2>
+  <div class="day">
+    <div class="strip" role="img" aria-label="Timeline from 09:00 to 16:30 ET. The agent window runs 09:25 to 16:05 with a decision cycle about every 75 seconds.">
+      <div class="bar"></div>
+      <div class="session"></div>
+      <div class="mark" style="left:5.56%"><span class="t">09:25</span><span class="d">Supervisor starts<br>the agent</span><i class="tick"></i></div>
+      <div class="mark below" style="left:6.67%"><i class="tick"></i><span class="t">09:30</span><span class="d">Opening bell</span></div>
+      <div class="mark" style="left:46%"><span class="t">every ~75 s</span><span class="d">Decision cycle<br>(≈300 per day)</span><i class="tick"></i></div>
+      <div class="mark" style="left:86.67%"><span class="t">15:30</span><span class="d">Expiry-eve<br>safety exits</span><i class="tick"></i></div>
+      <div class="mark below" style="left:94.44%"><i class="tick"></i><span class="t">16:05</span><span class="d">Shutdown +<br>end-of-day summary</span></div>
+      <div class="axis"><span>09:00</span><span>10:30</span><span>12:00</span><span>13:30</span><span>15:00</span><span>16:30</span></div>
+    </div>
+    <p class="day-note">Each cycle runs about 15 seconds, then the supervisor waits 60 seconds and starts the next. Outside the window it sleeps until the next trading day, checking the wall clock every 5 minutes so a sleeping laptop can't make it miss the open. The first cycle of each day also settles any Wheel options that expired.</p>
+  </div>
+</section>
+
+<!-- ── CYCLE ── -->
+<section aria-labelledby="cyc-h">
+  <span class="eyebrow">Repeats about every 75 seconds · 270-second budget</span>
+  <h2 id="cyc-h">Inside one decision cycle</h2>
+
+  <div class="cycle">
+    <div class="stage">
+      <div class="stage-head"><span class="tag acc">Stage 1</span><h3>Manage what's already open</h3></div>
+      <div class="steps">
+        <div class="step"><span class="n w">1</span><div><b>Settle expired Wheel options</b> <span class="mono" style="color:var(--muted);font-size:13px">(once a day)</span><p>Checks share holdings and records each expired put or call as assigned, called away, or expired worthless.</p></div></div>
+        <div class="step"><span class="n">2</span><div><b>Load positions and value them</b><p>Legs are priced at mid, and also at what it would cost to close right now (buy at the ask, sell at the bid). Wheel legs also get their live delta from the option chain.</p></div></div>
+        <div class="step"><span class="n x">3</span><div><b>Check exit rules and close</b><p>Hard stops, strike-proximity and expiry-eve exits act immediately; other signals must repeat 3 cycles in a row (about 4 minutes). All legs close in one limit order, first between mid and the worst price, then at the worst price. Realized P&amp;L comes from the actual fill.</p>
+          <div class="chips"><span class="chip x">see exit rules below</span></div></div></div>
+      </div>
+    </div>
+    <span class="down">↓</span>
+    <div class="stage">
+      <div class="stage-head"><span class="tag acc">Stage 1.5</span><h3>Clean up</h3></div>
+      <div class="steps">
+        <div class="step"><span class="n">4</span><div><b>Cancel stale orders</b><p>Unfilled entry orders past their time limit are cancelled. A ticker with an order still working skips new entries this cycle, and that order already counts toward its sector.</p></div></div>
+      </div>
+    </div>
+    <span class="down">↓</span>
+    <div class="stage">
+      <div class="stage-head"><span class="tag acc">Stage 2</span><h3>Look for new trades</h3><span class="mono" style="font-size:13px;color:var(--muted)">SPY QQQ IWM DIA XLF XLE TLT GLD EEM GDX META AMZN</span></div>
+      <div class="steps">
+        <div class="step"><span class="n">5</span><div><b>Rate the whole market</b><p>SPY against its 20, 50 and 200-day averages, SPY's RSI, VIX, the VIX to 3-month VIX ratio, and how many equity ETFs sit above their 50-day average. The state sets this cycle's position size and which strategies may open (table below). Capitulation skips new entries entirely.</p></div></div>
+        <div class="step"><span class="n g">6</span><div><b>Skip the ticker if its room is used up</b><p>Each one of these skips the ticker and journals why.</p>
+          <div class="chips"><span class="chip g">order still working</span><span class="chip g">2 positions already (ladder cap)</span><span class="chip g">sector holds 2</span><span class="chip g">10% total risk in use</span></div></div></div>
+        <div class="step"><span class="n g">7</span><div><b>Pre-trade filters</b><p>Any one of these skips the ticker for this cycle.</p>
+          <div class="chips"><span class="chip g">directional bias blocks the side</span><span class="chip g">RSI gate (momentum too strong)</span><span class="chip g">IV Rank &gt; 95 · block all entries</span></div></div></div>
+      </div>
+      <div class="phases" role="list">
+        <div class="phase" role="listitem"><span class="pn">PHASE I</span><span class="pt">Perceive</span><span class="pd">Price, SMAs, RSI, Bollinger bands, VIX, volatility rank</span></div>
+        <div class="phase" role="listitem"><span class="pn">PHASE II</span><span class="pt">Classify</span><span class="pd">Regime: bullish, bearish, sideways, mean reversion</span></div>
+        <div class="phase" role="listitem"><span class="pn">PHASE III</span><span class="pt">Plan</span><span class="pd">Credit spread first; debit spread or calendar if premium is too thin</span></div>
+        <div class="phase" role="listitem"><span class="pn">PHASE IV</span><span class="pt">Risk check</span><span class="pd">Credit floor or debit cap, 2% max loss × market size, market-state and ladder gates</span></div>
+        <div class="phase" role="listitem"><span class="pn">PHASE V</span><span class="pt">Analyse</span><span class="pd">Optional news-sentiment and LLM review; earnings within 7 days flags event risk</span></div>
+        <div class="phase" role="listitem"><span class="pn">PHASE VI</span><span class="pt">Execute</span><span class="pd">Live-price recheck, size into the risk budget left, submit one multi-leg order</span></div>
+      </div>
+    </div>
+    <span class="down">↓</span>
+    <div class="stage">
+      <div class="stage-head"><span class="tag acc">Stage 3</span><h3>Wrap up</h3></div>
+      <div class="steps">
+        <div class="step"><span class="n o">8</span><div><b>Record entry fills</b><p>For each order the broker reports filled, the actual fill price replaces the estimate in the trade plan, so profit targets and stops use what was really paid or received. Orders cancelled with nothing filled are marked unfilled.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── MARKET STATE ── -->
+<section aria-labelledby="ms-h">
+  <span class="eyebrow">Stage 2 · step 5</span>
+  <h2 id="ms-h">Market risk state</h2>
+  <p>One state for the whole market each cycle. Thresholds were checked against SPY and VIX from 2019 to 2026: in Normal, SPY fell 5% or more within 30 days 8.5% of the time; in Defensive, 31%.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>State</th><th>When</th><th>Size</th><th>New entries allowed</th><th>New cash-secured puts</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill o">Normal</span></td><td>No risk condition met</td><td class="num">× 1.0</td><td>All strategies</td><td><span class="pill o">yes</span></td></tr>
+        <tr><td><span class="pill g">Caution</span></td><td>SPY under its 50-day, VIX ≥ 20, VIX/VIX3M ≥ 0.95, or breadth under 50%</td><td class="num">× 0.5</td><td>Bear calls, condors, butterflies, put debits, calendars, bounce bull puts</td><td><span class="pill x">paused</span></td></tr>
+        <tr><td><span class="pill x">Defensive</span></td><td>SPY under its 200-day and VIX ≥ 22, an inverted VIX curve, or breadth under 40%</td><td class="num">× 0.25</td><td>Bear calls and put debits only</td><td><span class="pill x">paused</span></td></tr>
+        <tr><td><span class="pill x">Capitulation</span></td><td>VIX ≥ 35, VIX/VIX3M ≥ 1.10, or RSI ≤ 25 with VIX ≥ 28</td><td class="num">× 0</td><td>None</td><td><span class="pill x">paused</span></td></tr>
+        <tr><td><span class="pill a">Recovery</span></td><td>After a stress state, SPY back above its 20-day</td><td class="num">× 0.5</td><td>Bull puts, condors, butterflies, call debits, calendars, bounce bull puts</td><td><span class="pill o">yes</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-p">Leaving Caution for Normal needs every condition to clear by a margin, so the state doesn't flip back and forth when VIX hovers near 20. Exits are never gated by the state.</p>
+</section>
+
+<!-- ── REGIME → STRATEGY ── -->
+<section aria-labelledby="reg-h">
+  <span class="eyebrow">Phase II → III</span>
+  <h2 id="reg-h">How the regime picks the strategy</h2>
+  <p>Regime comes from price against the 200-day average and the slope of the 50-day; volatility rank and RSI refine it. The planner checks these rules in order and uses the first that applies.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Order</th><th>When</th><th>Strategy</th><th>RSI gate</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td><span class="s">Mean reversion</span><br>Price touches a 3-σ Bollinger band</td><td>Spread betting on a snap back (bear call at the upper band, bull put at the lower)</td><td><span class="pill o">any RSI</span></td></tr>
+        <tr><td class="num">2</td><td><span class="s">VIX spike</span><br>Volatility z-score inhibits bullish trades</td><td>Bullish or sideways demoted to <b>Bear Call Spread</b></td><td>—</td></tr>
+        <tr><td class="num">3</td><td><span class="s">Leadership bias</span><br>Bullish or sideways, and clearly outperforming its lead index</td><td><b>Bull Put Spread</b></td><td>—</td></tr>
+        <tr><td class="num">4</td><td><span class="s">Oversold downtrend</span><br>Bearish and RSI under 30</td><td>Volatility rank ≥ 30: <b>Bounce Bull Put</b> once price rises above the highest close of the last 5 days, short strike below the 10-day low. Otherwise no trade. Never a bear call into an oversold market.</td><td><span class="pill g">RSI &lt; 30</span></td></tr>
+        <tr class="band"><td colspan="4">5 · Regime credit spread, tried first</td></tr>
+        <tr><td class="num">5</td><td><span class="s">Bullish</span><br>Price &gt; SMA-200, SMA-50 rising</td><td><b>Bull Put Spread</b></td><td><span class="pill o">&lt; 70</span> <span class="pill g">≥ 70 skip</span></td></tr>
+        <tr><td class="num">5</td><td><span class="s">Bearish</span><br>Price &lt; SMA-200, SMA-50 falling</td><td><b>Bear Call Spread</b></td><td><span class="pill o">&gt; 30</span></td></tr>
+        <tr><td class="num">5</td><td><span class="s">Sideways</span><br>Everything else</td><td><b>Iron Butterfly</b> if enabled and positive EV, else <b>Iron Condor</b></td><td><span class="pill o">35–65</span> <span class="pill g">outside skip</span></td></tr>
+        <tr class="band"><td colspan="4">6 · Low-volatility fallback, when the credit spread finds nothing and volatility rank is under 30</td></tr>
+        <tr><td class="num">6</td><td><span class="s">Bullish</span></td><td><b>Call Debit Spread</b>: buy the 0.50-delta call, sell one width step higher</td><td>—</td></tr>
+        <tr><td class="num">6</td><td><span class="s">Bearish</span></td><td><b>Put Debit Spread</b>: buy the 0.50-delta put, sell one width step lower</td><td>—</td></tr>
+        <tr><td class="num">6</td><td><span class="s">Sideways</span></td><td><b>Calendar Spread</b>: sell the ~21-day call at the strike nearest the price, buy the same strike ~4 weeks later</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-p">Credit spreads: the scanner tries every combination of expiry (7–30 days), short-strike delta and wing width, and keeps the best one with positive expected value and at least 55% probability of profit. Debit spreads and calendars don't need model edge, since the trend or range is the bet. They must cost no more than 5% over the market mid and pay at least as much as they risk. All prices assume fills at the worse side of the quote, which is what the paper account actually gets.</p>
+</section>
+
+<!-- ── EXIT RULES ── -->
+<section aria-labelledby="exit-h">
+  <span class="eyebrow">Stage 1 · step 3</span>
+  <h2 id="exit-h">Exit rules</h2>
+  <div class="three">
+    <div class="card">
+      <h3>Credit spreads and condors</h3>
+      <div class="rule"><span class="pill o">profit</span><span>Close at 50% of the credit, judged at the price it costs to close now</span></div>
+      <div class="rule"><span class="pill x">now</span><span>Hard stop: loss ≥ 3× credit</span></div>
+      <div class="rule"><span class="pill x">stop</span><span>Loss ≥ 50% of max loss</span></div>
+      <div class="rule"><span class="pill x">now</span><span>Price within 1% of a short strike</span></div>
+      <div class="rule"><span class="pill x">now</span><span>Day before expiry after 15:30 ET</span></div>
+      <div class="rule"><span class="pill g">roll</span><span class="note">Defensive roll when price is 0.5–1.5% from a short strike (one per position)</span></div>
+      <div class="rule"><span class="pill x">3 cycles</span><span class="note">Regime no longer matches the strategy (the bounce bull put is exempt)</span></div>
+    </div>
+    <div class="card">
+      <h3>Debit spreads and calendars</h3>
+      <div class="rule"><span class="pill o">profit</span><span>Debit spread: 50% of its maximum profit. Calendar: 25% of what it cost.</span></div>
+      <div class="rule"><span class="pill x">stop</span><span>Loss ≥ 50% of what it cost</span></div>
+      <div class="rule"><span class="pill x">now</span><span>Day before the near expiry after 15:30 ET</span></div>
+      <div class="rule"><span class="pill x">3 cycles</span><span class="note">Only when the trend reverses (bullish to bearish or back). Calendars close when the market starts trending.</span></div>
+      <div class="rule"><span class="pill w">hold</span><span class="note">No strike-proximity exit: a debit spread wants price to reach the short strike.</span></div>
+    </div>
+    <div class="card">
+      <h3>Wheel legs (puts and covered calls)</h3>
+      <div class="rule"><span class="pill o">profit</span><span>Buy back at 50% of the credit</span></div>
+      <div class="rule"><span class="pill x">3 cycles</span><span>Put only: close when |Δ| ≥ 0.45</span></div>
+      <div class="rule"><span class="pill w">hold</span><span>Otherwise hold. No strike-proximity or expiry-eve closes, because assignment is part of the plan.</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── WHEEL ── -->
+<section aria-labelledby="wh-h">
+  <span class="eyebrow">Runs alongside the day · you approve every entry</span>
+  <h2 id="wh-h">The options Wheel</h2>
+  <p>Sell a put on a stock you'd be glad to own. If it expires worthless you keep the premium and start again; if you're assigned, you own the shares and sell covered calls until they're called away. New puts pause while the market state is Caution, Defensive or Capitulation.</p>
+  <div class="diagram">
+    <svg viewBox="0 0 880 430" role="img" aria-label="Wheel loop: screen, approve, sell cash-secured put, manage; at expiry either expired worthless back to screen, or assigned to own shares, sell covered call, then called away back to screen or expired to sell another call.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ahw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head w" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="aho" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head o" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+
+      <rect class="lane" x="10" y="10" width="420" height="410" rx="10"/>
+      <text class="lanet" x="26" y="32">LEG 1 · CASH-SECURED PUT</text>
+      <rect class="lane" x="450" y="10" width="420" height="410" rx="10"/>
+      <text class="lanet" x="466" y="32">LEG 2 · COVERED CALL</text>
+
+      <rect class="box a" x="40" y="52" width="360" height="62" rx="8"/>
+      <text class="ttl" x="58" y="78">Screen</text>
+      <text class="sub" x="58" y="99">quality, earnings, above 200-day avg, one per sector</text>
+
+      <rect class="box a" x="40" y="138" width="360" height="62" rx="8"/>
+      <text class="ttl" x="58" y="164">Approve</text>
+      <text class="sub" x="58" y="185">/propose → promote: cash covers strike × 100, ≤ 40% equity</text>
+
+      <rect class="box w" x="40" y="224" width="360" height="62" rx="8"/>
+      <text class="ttl" x="58" y="250">Sell cash-secured put</text>
+      <text class="sub" x="58" y="271">|Δ| ≤ 0.30, 21–60 days; limit at mid → halfway → bid</text>
+
+      <rect class="box" x="40" y="310" width="360" height="62" rx="8"/>
+      <text class="ttl" x="58" y="336">Manage every cycle</text>
+      <text class="sub" x="58" y="357">50% profit → buy back · |Δ| ≥ 0.45 → close</text>
+
+      <path class="edge" d="M220 114 V136" marker-end="url(#ah)"/>
+      <path class="edge" d="M220 200 V222" marker-end="url(#ah)"/>
+      <path class="edge" d="M220 286 V308" marker-end="url(#ah)"/>
+
+      <path class="edge o" d="M40 341 H24 V83 H38" marker-end="url(#aho)"/>
+      <text class="lbl o" x="30" y="396">expired worthless / bought back</text>
+      <text class="lbl o" x="30" y="410">→ keep premium, screen again</text>
+
+      <rect class="box w" x="480" y="310" width="360" height="62" rx="8"/>
+      <text class="ttl" x="498" y="336">Own 100 shares</text>
+      <text class="sub" x="498" y="357">cost basis = strike − premium</text>
+
+      <rect class="box w" x="480" y="181" width="360" height="62" rx="8"/>
+      <text class="ttl" x="498" y="207">Sell covered call</text>
+      <text class="sub" x="498" y="228">strike ≥ cost basis, 30–60 days, |Δ| ≤ 0.30</text>
+
+      <rect class="box" x="480" y="52" width="360" height="62" rx="8"/>
+      <text class="ttl" x="498" y="78">Manage every cycle</text>
+      <text class="sub" x="498" y="99">50% profit → buy back · otherwise hold</text>
+
+      <path class="edge w" d="M400 341 H478" marker-end="url(#ahw)"/>
+      <text class="lbl w" x="410" y="332">assigned</text>
+
+      <path class="edge" d="M660 310 V245" marker-end="url(#ah)"/>
+      <path class="edge" d="M660 181 V116" marker-end="url(#ah)"/>
+
+      <path class="edge w" d="M840 83 H856 V212 H842" marker-end="url(#ahw)"/>
+      <text class="lbl w" x="700" y="140" text-anchor="start">expired / bought back</text>
+      <text class="lbl w" x="700" y="154">→ sell another call</text>
+
+      <path class="edge o" d="M660 52 V44 H220 V50" marker-end="url(#aho)"/>
+      <text class="lbl o" x="680" y="40">called away → screen again</text>
+    </svg>
+  </div>
+  <p class="note-p">Expired options are settled by the first cycle of the next trading day. A covered call is never sent unless 100 shares are held.</p>
+</section>
+
+<footer>Paper account, about $29,600. Max risk 2% per trade and 10% of equity across all open spreads; up to 2 positions per ticker with expiries at least 7 days apart, 2 per sector. A single cash-secured put may use up to 40% of equity. Figures reflect the agent's configuration on 5 October 2026.</footer>
+</div>
