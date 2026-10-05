@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from trading_agent.chain_scanner import (
-    _quote_debit, debit_spread_ceiling, debit_spread_fair_value,
+    _quote_debit, debit_ceiling, debit_mid_value,
 )
 from trading_agent.debit_policy import (
     BOUNCE_BULL_PUT_STRATEGY, CALENDAR_STRATEGY, CALL_DEBIT_STRATEGY,
@@ -42,16 +42,17 @@ def test_quote_debit_natural_and_mid():
     assert _quote_debit(0.50, 0.60, 0.80, 0.90, model="natural") == 0.0    # never negative
 
 
-def test_fair_value_and_ceiling():
-    assert debit_spread_fair_value(5.0, 0.60, -0.30) == pytest.approx(2.25)
-    assert debit_spread_ceiling(5.0, 0.60, 0.30, 0.05) == pytest.approx(2.3625)
+def test_mid_value_and_ceiling():
+    assert debit_mid_value(2.00, 2.10, 0.60, 0.70) == pytest.approx(1.40)
+    assert debit_mid_value(0.0, 2.10, 0.60, 0.70) == pytest.approx(1.45)   # no bid → ask
+    assert debit_ceiling(2.25, 0.05) == pytest.approx(2.3625)
 
 
 # ── vertical debit scorer ─────────────────────────────────────────────────
 
 def score(debit, width=5.0, **kw):
-    args = dict(long_delta=0.60, short_delta=0.30, dte=30, max_overpay=0.05,
-                min_reward_risk=1.0)
+    args = dict(mid_value=2.25, long_delta=0.60, short_delta=0.30, dte=30,
+                max_overpay=0.05, min_reward_risk=1.0)
     args.update(kw)
     return _score_debit_spread_with_reason(debit=debit, width=width, **args)
 
@@ -62,7 +63,7 @@ def test_debit_scorer_accepts_near_fair():
     assert r["max_profit"] == pytest.approx(2.80)
     assert r["rr"] == pytest.approx(2.80 / 2.20)
     assert r["pop"] == pytest.approx(0.60 - 0.30 * 0.44)       # |Δ| at breakeven
-    assert r["ev"] == pytest.approx((2.25 - 2.20) / 2.20)
+    assert r["ev"] == pytest.approx((5.0 * 0.45 - 2.20) / 2.20)  # delta model, reported only
 
 
 @pytest.mark.parametrize("debit,kw,reason", [
@@ -75,47 +76,64 @@ def test_debit_scorer_rejects(debit, kw, reason):
     assert score(debit, **kw)["reason"] == reason
 
 
-def _calls(spot=100.0):
-    # strike → (delta, bid, ask)
-    rows = {95: (0.75, 6.0, 6.1), 98: (0.62, 3.9, 4.0), 100: (0.50, 2.6, 2.7),
-            103: (0.33, 1.6, 1.7), 105: (0.25, 0.8, 0.9), 108: (0.15, 0.4, 0.5)}
-    return [{"symbol": f"C{k}", "strike": float(k), "delta": d, "bid": b, "ask": a,
-             "type": "call"} for k, (d, b, a) in rows.items()]
+def _chain(opt, spot=100.0, dte=30, sigma=0.20, half_spread=0.01):
+    """Black-Scholes-consistent chain: strikes 90–110, bid/ask = price ∓ a penny."""
+    import math
+    t = dte / 365.0
+    rows = []
+    for k in range(90, 111):
+        price = _bs_price(spot, k, t, sigma, opt)
+        d1 = (math.log(spot / k) + 0.5 * sigma * sigma * t) / (sigma * math.sqrt(t))
+        nd1 = 0.5 * (1 + math.erf(d1 / math.sqrt(2)))
+        delta = nd1 if opt == "call" else nd1 - 1.0
+        rows.append({"symbol": f"{opt[0].upper()}{k}", "strike": float(k), "delta": round(delta, 4),
+                     "bid": round(max(0.01, price - half_spread), 2),
+                     "ask": round(price + half_spread, 2), "iv": sigma, "type": opt})
+    return rows
+
+
+def _calls():
+    return _chain("call")
 
 
 def _puts():
-    rows = {92: (-0.15, 0.4, 0.5), 95: (-0.25, 0.8, 0.9), 97: (-0.33, 1.6, 1.7),
-            100: (-0.50, 2.6, 2.7), 102: (-0.62, 3.9, 4.0)}
-    return [{"symbol": f"P{k}", "strike": float(k), "delta": d, "bid": b, "ask": a,
-             "type": "put"} for k, (d, b, a) in rows.items()]
+    return _chain("put")
 
 
-def test_decide_call_debit_picks_delta_targets():
+def _q(chain, k):
+    return next(c for c in chain if c["strike"] == k)
+
+
+WIDE = replace(PRESET, width_grid_pct=(0.02, 0.05))
+
+
+def test_decide_call_debit_buys_atm_smallest_debit_first():
+    chain = _calls()
     out = decide_debit_spread(DecisionInput(
-        side="call_debit", preset=PRESET,
-        chain_slices=[ChainSlice("2026-11-06", 30, _calls())]))
+        side="call_debit", preset=WIDE, chain_slices=[ChainSlice("2026-11-06", 30, chain)]))
+    assert [(c.long_strike, c.short_strike) for c in out.candidates] == [(100.0, 102.0), (100.0, 105.0)]
     c = out.candidates[0]
-    assert (c.long_strike, c.short_strike) == (98.0, 103.0)       # Δ .62 / .33
-    assert c.debit == pytest.approx(4.0 - 1.6)                   # natural
-    assert c.width == 5.0 and c.max_debit == pytest.approx(5 * 0.475 * 1.05, abs=1e-3)
+    assert c.debit == pytest.approx(_q(chain, 100)["ask"] - _q(chain, 102)["bid"])   # natural
+    mid = debit_mid_value(_q(chain, 100)["bid"], _q(chain, 100)["ask"],
+                          _q(chain, 102)["bid"], _q(chain, 102)["ask"])
+    assert c.fair_value == pytest.approx(mid, abs=1e-4)
+    assert c.max_debit == pytest.approx(mid * 1.05, abs=1e-4) and c.width == 2.0
 
 
 def test_decide_put_debit_sells_below():
     out = decide_debit_spread(DecisionInput(
-        side="put_debit", preset=PRESET,
-        chain_slices=[ChainSlice("2026-11-06", 30, _puts())]))
+        side="put_debit", preset=WIDE, chain_slices=[ChainSlice("2026-11-06", 30, _puts())]))
     c = out.candidates[0]
-    assert (c.long_strike, c.short_strike) == (102.0, 97.0)
-    assert c.option_type == "put"
+    assert (c.long_strike, c.short_strike) == (100.0, 98.0) and c.option_type == "put"
 
 
 def test_decide_debit_reports_near_miss_when_overpriced():
-    rich = [dict(c, ask=c["ask"] + 1.0) if c["strike"] == 98 else c for c in _calls()]
+    rich = [dict(c, ask=c["ask"] + 0.5) if c["strike"] == 100 else c for c in _calls()]
     out = decide_debit_spread(DecisionInput(
-        side="call_debit", preset=PRESET, chain_slices=[ChainSlice("2026-11-06", 30, rich)]))
+        side="call_debit", preset=WIDE, chain_slices=[ChainSlice("2026-11-06", 30, rich)]))
     assert out.candidates == []
-    assert out.diagnostics.rejects_by_reason == {DEBIT_REJECT_ABOVE_FAIR: 1}
-    assert out.diagnostics.best_near_miss["debit"] == pytest.approx(3.40)
+    assert out.diagnostics.rejects_by_reason == {DEBIT_REJECT_ABOVE_FAIR: 2}
+    assert out.diagnostics.best_near_miss["width"] == 5.0          # best reward/risk of the misses
 
 
 # ── calendars ─────────────────────────────────────────────────────────────
@@ -125,29 +143,37 @@ def test_bs_price_atm():
     assert _bs_price(100, 90, 0, 0.20, "put") == 0.0
 
 
-def cal(debit, near_iv=0.20, far_iv=0.20, **kw):
+def cal(debit, mid_value=1.0, near_iv=0.20, far_iv=0.20, **kw):
     args = dict(spot=100.0, strike=100.0, option_type="call", near_dte=21, far_dte=49,
                 max_overpay=0.05, min_reward_risk=1.0)
     args.update(kw)
-    return _score_calendar_with_reason(debit=debit, near_iv=near_iv, far_iv=far_iv, **args)
+    return _score_calendar_with_reason(debit=debit, mid_value=mid_value,
+                                       near_iv=near_iv, far_iv=far_iv, **args)
 
 
 def test_calendar_flat_vol_model_matches_no_arbitrage():
     r = cal(1.0)
     far, near = _bs_price(100, 100, 49 / 365, .2, "call"), _bs_price(100, 100, 21 / 365, .2, "call")
-    assert r["fair"] == pytest.approx(far - near, abs=0.02)
-    assert r["status"] == "accepted"
+    assert r["model"] == pytest.approx(far - near, abs=0.02)
+    assert r["status"] == "accepted" and r["fair"] == 1.0         # the market mid sets the level
 
 
-def test_calendar_rich_near_vol_raises_model_value():
-    assert cal(1.0, near_iv=0.30)["fair"] < cal(1.0, near_iv=0.30, far_iv=0.30)["fair"]
-    assert cal(1.0, far_iv=0.25)["fair"] > cal(1.0)["fair"]
+def test_calendar_model_shape_responds_to_term_structure():
+    assert cal(1.0, near_iv=0.30)["model"] < cal(1.0, near_iv=0.30, far_iv=0.30)["model"]
+    assert cal(1.0, far_iv=0.25)["model"] > cal(1.0)["model"]
+
+
+def test_calendar_rescales_to_mid():
+    """Zero-rate BS under-prices calendars (carry); the payoff is rescaled
+    so max profit is quoted relative to the market's own level."""
+    a, b = cal(1.0, mid_value=1.0), cal(2.0, mid_value=2.0)
+    assert a["rr"] == pytest.approx(b["rr"], rel=1e-6)
 
 
 @pytest.mark.parametrize("kw,reason", [
     ({"debit": 0.0}, DEBIT_REJECT_NON_POSITIVE),
     ({"debit": 1.0, "near_iv": 0.0}, CAL_REJECT_IV_MISSING),
-    ({"debit": 1.5}, DEBIT_REJECT_ABOVE_FAIR),
+    ({"debit": 1.06}, DEBIT_REJECT_ABOVE_FAIR),                   # > mid 1.00 × 1.05
 ])
 def test_calendar_rejects(kw, reason):
     assert cal(**kw)["reason"] == reason
@@ -160,13 +186,13 @@ def _cal_slice(exp, dte, iv, prices):
 
 
 def test_decide_calendar_uses_strike_nearest_spot():
-    near = _cal_slice("2026-10-26", 21, 0.20, {100: (1.85, 1.90), 105: (0.4, 0.45)})
-    far = _cal_slice("2026-11-23", 49, 0.20, {100: (2.85, 2.90), 105: (1.2, 1.3)})
+    near = _cal_slice("2026-10-26", 21, 0.20, {100: (1.88, 1.90), 105: (0.4, 0.45)})
+    far = _cal_slice("2026-11-23", 49, 0.20, {100: (2.95, 2.97), 105: (1.2, 1.3)})
     out = decide_calendar(DecisionInput(side="calendar", chain_slices=[near, far],
                                         preset=PRESET, spot=100.4))
     c = out.candidates[0]
     assert c.long_strike == c.short_strike == 100.0
-    assert c.debit == pytest.approx(2.90 - 1.85)
+    assert c.debit == pytest.approx(2.97 - 1.88) and c.fair_value == pytest.approx(1.07)
     assert (c.expiration, c.far_expiration) == ("2026-10-26", "2026-11-23")
 
 
@@ -182,16 +208,17 @@ def test_decide_calendar_needs_two_slices_and_spot():
 
 def _call_debit_plan():
     c = decide_debit_spread(DecisionInput(
-        side="call_debit", preset=PRESET,
+        side="call_debit", preset=WIDE,
         chain_slices=[ChainSlice("2026-11-06", 30, _calls())])).candidates[0]
     return build_debit_plan(ticker="SPY", regime="bullish", cand=c)
 
 
 def test_build_debit_plan_sign_convention():
     p = _call_debit_plan()
+    debit = round(_q(_calls(), 100)["ask"] - _q(_calls(), 102)["bid"], 2)
     assert p.strategy_name == CALL_DEBIT_STRATEGY and is_debit_plan(p)
-    assert p.net_credit == pytest.approx(-2.40) and p.max_loss == pytest.approx(240.0)
-    assert [(l.action, l.strike) for l in p.legs] == [("buy", 98.0), ("sell", 103.0)]
+    assert p.net_credit == pytest.approx(-debit) and p.max_loss == pytest.approx(debit * 100)
+    assert [(l.action, l.strike) for l in p.legs] == [("buy", 100.0), ("sell", 102.0)]
     assert p.to_dict()["max_debit"] == p.max_debit
 
 
@@ -202,26 +229,30 @@ def _rm():
 def test_risk_manager_debit_branch():
     p = _call_debit_plan()
     v = _rm().evaluate(p, 30_000, "paper", market_open=True)
-    assert v.approved, v.checks_failed                    # short |Δ| .33 > .25 not checked
-    assert any("Debit $2.40 ≤ cap" in c for c in v.checks_passed)
-    p.max_debit = 2.30
+    assert v.approved, v.checks_failed                    # short |Δ| .37 > .25 not checked
+    assert any(f"Debit ${-p.net_credit:.2f} ≤ cap" in c for c in v.checks_passed)
+    p.max_debit = round(-p.net_credit - 0.05, 2)
     v = _rm().evaluate(p, 30_000, "paper", market_open=True)
     assert not v.approved and "outside" in v.checks_failed[0]
 
 
 def test_sizing_uses_debit_as_max_loss():
     p = _call_debit_plan()
-    assert calculate_position_qty(p, 30_000, 0.02) == 2          # 600 // 240
-    assert calculate_position_qty(p, 30_000, 0.02, live_credit=-3.10) == 1
+    debit = -p.net_credit
+    assert calculate_position_qty(p, 30_000, 0.02) == int(600 // (debit * 100))
+    assert calculate_position_qty(p, 30_000, 0.02, live_credit=-4.00) == 1
 
 
 def test_executor_debit_recheck_and_positive_limit(tmp_path):
+    chain = _calls()
     provider = MagicMock()
     provider.fetch_option_quotes.return_value = {
-        "C98": {"bid": 3.9, "ask": 4.0}, "C103": {"bid": 1.6, "ask": 1.7}}
+        "C100": {"bid": _q(chain, 100)["bid"], "ask": _q(chain, 100)["ask"]},
+        "C102": {"bid": _q(chain, 102)["bid"], "ask": _q(chain, 102)["ask"]}}
     ex = OrderExecutor("k", "s", trade_plan_dir=str(tmp_path), dry_run=False,
                        data_provider=provider, max_risk_pct=0.02)
     p = _call_debit_plan()
+    debit = -p.net_credit
     sent = {}
 
     def capture(**kw):
@@ -229,9 +260,10 @@ def test_executor_debit_recheck_and_positive_limit(tmp_path):
         return {"status": "submitted"}
     with patch.object(ex, "_submit_order_with_idempotency", side_effect=capture):
         ex._submit_order(p, str(tmp_path / "p.json"), "run1", 30_000)
-    assert sent["limit_price"] == "2.4" and sent["qty"] == "2"   # debit → positive
-    ok, why = ex._recheck_live_economics(p, -2.90, 30_000)
-    assert not ok and "cap" in why                                # 2.90 > cap 2.49
+    assert float(sent["limit_price"]) == pytest.approx(debit)      # debit → positive
+    assert sent["qty"] == str(int(600 // (debit * 100)))
+    ok, why = ex._recheck_live_economics(p, -(p.max_debit + 0.05), 30_000)
+    assert not ok and "cap" in why
 
 
 # ── monitor exits ─────────────────────────────────────────────────────────

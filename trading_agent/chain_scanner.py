@@ -280,21 +280,25 @@ def _quote_debit(long_bid: float, long_ask: float,
     return round(max(0.0, long_mid - short_mid + max(0.0, fill_haircut)), 2)
 
 
-def debit_spread_fair_value(width: float, long_delta: float,
-                            short_delta: float) -> float:
-    """Model value (per share) of a vertical debit spread at expiry.
+def debit_mid_value(long_bid: float, long_ask: float,
+                    short_bid: float, short_ask: float) -> float:
+    """Market value (per share) of a long two-leg structure: long mid −
+    short mid. The reference for the debit cap.
 
-    With |Δ| read as the probability of finishing in the money, the payoff
-    rises linearly from 0 at the long strike to ``width`` at the short
-    strike, so E[payoff] ≈ width × (|Δlong| + |Δshort|) / 2. Single source
-    for the scorer, RiskManager and the executor's live recheck."""
-    return max(0.0, width) * (abs(long_delta) + abs(short_delta)) / 2.0
+    2026-10-05 live check: delta-interpolated and zero-rate Black-Scholes
+    "fair values" sat 14–60 % below the market mid on SPY / QQQ (skew,
+    rates), so a model cap rejected every liquid spread. The mid is the
+    market's own no-arbitrage value; the cap above it is a liquidity cost."""
+    long_mid = (long_bid + long_ask) / 2.0 if long_bid > 0 and long_ask > 0 else long_ask
+    short_mid = (short_bid + short_ask) / 2.0 if short_bid > 0 and short_ask > 0 else short_bid
+    return max(0.0, long_mid - short_mid)
 
 
-def debit_spread_ceiling(width: float, long_delta: float, short_delta: float,
-                         max_overpay: float) -> float:
-    """Highest debit worth paying = fair value × (1 + max_overpay)."""
-    return debit_spread_fair_value(width, long_delta, short_delta) * (1.0 + max_overpay)
+def debit_ceiling(mid_value: float, max_overpay: float) -> float:
+    """Highest debit worth paying = mid value × (1 + max_overpay). Single
+    source for the scorers' ``max_debit`` (rechecked by RiskManager and the
+    executor)."""
+    return max(0.0, mid_value) * (1.0 + max_overpay)
 
 
 # ---------------------------------------------------------------------------

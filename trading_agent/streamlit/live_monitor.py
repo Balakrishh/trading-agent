@@ -2712,23 +2712,21 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 key="cust_dte_cal_near")
         with db_d2:
             debit_long_delta = st.slider(
-                "Debit long |Δ|", 0.40, 0.80,
-                float(getattr(seed, "debit_long_delta", 0.60)), 0.05,
-                key="cust_debit_long_delta")
+                "Debit long |Δ|", 0.30, 0.70,
+                float(getattr(seed, "debit_long_delta", 0.50)), 0.05,
+                key="cust_debit_long_delta",
+                help="Bought leg; the sold leg sits one width-grid step further out.")
             cal_gap = st.number_input(
                 "Calendar gap (days)", 7, 90, int(getattr(seed, "calendar_gap_days", 28)), 1,
                 key="cust_cal_gap")
         with db_d3:
-            debit_short_delta = st.slider(
-                "Debit short |Δ|", 0.10, 0.45,
-                float(getattr(seed, "debit_short_delta", 0.30)), 0.05,
-                key="cust_debit_short_delta")
             debit_overpay = st.slider(
                 "Max overpay vs model", 0.0, 0.20,
                 float(getattr(seed, "debit_max_overpay", 0.05)), 0.01,
                 key="cust_debit_overpay",
-                help="Debit ≤ model value × (1 + this). Natural fills sit above "
-                     "mid, so 0 rejects almost everything.")
+                help="Debit ≤ market mid × (1 + this) — the liquidity cost you "
+                     "accept. Natural fills sit above mid, so 0 rejects almost "
+                     "everything.")
         with db_d4:
             debit_min_rr = st.slider(
                 "Min reward ÷ risk", 0.5, 3.0,
@@ -2782,7 +2780,6 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "bounce_bull_put_enabled":      bounce_enabled,
         "dte_debit":                    int(dte_debit),
         "debit_long_delta":             debit_long_delta,
-        "debit_short_delta":            debit_short_delta,
         "debit_max_overpay":            debit_overpay,
         "debit_min_reward_risk":        debit_min_rr,
         "debit_profit_target_pct":      debit_tp,

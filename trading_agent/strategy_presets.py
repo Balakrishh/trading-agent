@@ -276,16 +276,15 @@ class PresetConfig:
     # low volatility to call / put debit spreads, sideways + low
     # volatility to calendars, and bearish + RSI < 30 + elevated
     # volatility to a bull put once price stabilises. Scoring caps the
-    # debit at model value × (1 + debit_max_overpay) and requires
+    # debit at the market mid × (1 + debit_max_overpay) and requires
     # reward/risk ≥ debit_min_reward_risk.
     # ------------------------------------------------------------------
     debit_spreads_enabled:             bool  = True
     calendar_enabled:                  bool  = True
     bounce_bull_put_enabled:           bool  = True
     dte_debit:                         int   = 30
-    debit_long_delta:                  float = 0.60     # |Δ| of the bought leg
-    debit_short_delta:                 float = 0.30     # |Δ| of the sold leg
-    debit_max_overpay:                 float = 0.05     # debit ≤ model × 1.05
+    debit_long_delta:                  float = 0.50     # |Δ| of the bought leg; sold leg one width_grid_pct step out
+    debit_max_overpay:                 float = 0.05     # debit ≤ market mid × 1.05 (liquidity cost)
     debit_min_reward_risk:             float = 1.0      # max profit ÷ debit
     debit_profit_target_pct:           float = 0.50     # of max profit (verticals)
     debit_stop_loss_pct:               float = 0.50     # of the debit (verticals + calendars)
@@ -303,8 +302,8 @@ class PresetConfig:
         """Summary-line token for the skill-59 debit playbooks."""
         parts = []
         if self.debit_spreads_enabled:
-            parts.append(f"Debit@{self.dte_debit}d Δ{self.debit_long_delta:.2f}/"
-                         f"{self.debit_short_delta:.2f} RR≥{self.debit_min_reward_risk:g} "
+            parts.append(f"Debit@{self.dte_debit}d Δ{self.debit_long_delta:.2f} "
+                         f"RR≥{self.debit_min_reward_risk:g} "
                          f"TP{self.debit_profit_target_pct:.0%}/SL{self.debit_stop_loss_pct:.0%}")
         if self.calendar_enabled:
             parts.append(f"Cal@{self.dte_calendar_near}+{self.calendar_gap_days}d "

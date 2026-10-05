@@ -10,24 +10,27 @@
 
 ## 1. Theory & Objective
 
-Week 1 opened no spreads: in a low-volatility, oversold tape the credit scorer rejected ~8,400 grid points for no positive EV, because selling cheap premium is correctly unattractive. Backlog §6.3–6.5 adds the other side of the table. In a trend with low volatility, **buy** a vertical (call debit up, put debit down). In a sideways tape with low volatility, buy a **calendar** (sell the near-dated ATM option, buy the same strike further out). After an oversold sell-off with elevated volatility, sell a **bull put only once price stabilises**, below the recent low. The delta-probability model cannot see a directional or range thesis, so debit structures are not required to show positive model EV. Instead the debit is capped at model value × (1 + `debit_max_overpay`) and must offer reward/risk ≥ `debit_min_reward_risk`. Whether the thesis actually pays is measured by the §6.6 scorecard. Credit plans keep priority: for debit and calendar playbooks the credit plan runs first and the debit structure is the fallback, so the agent never trades less than before. The bounce and wait playbooks **replace** the credit plan, so no bear calls are sold into RSI < 30.
+Week 1 opened no spreads: in a low-volatility, oversold tape the credit scorer rejected ~8,400 grid points for no positive EV, because selling cheap premium is correctly unattractive. Backlog §6.3–6.5 adds the other side of the table. In a trend with low volatility, **buy** a vertical (call debit up, put debit down). In a sideways tape with low volatility, buy a **calendar** (sell the near-dated ATM option, buy the same strike further out). After an oversold sell-off with elevated volatility, sell a **bull put only once price stabilises**, below the recent low. No pricing model can see a directional or range thesis, so debit structures are not required to show positive model EV. Instead the debit is capped at the **market mid** × (1 + `debit_max_overpay`) — the overpay is a liquidity cost — and must offer reward/risk ≥ `debit_min_reward_risk`. The first draft capped at a *model* value (delta-interpolated for verticals, zero-rate Black-Scholes for calendars); a live read-only check on 2026-10-05 showed those sat 14–60 % below the market mid on SPY / QQQ (skew, interest carry) and rejected every liquid structure, so the mid became the reference. Whether the thesis actually pays is measured by the §6.6 scorecard. Credit plans keep priority: for debit and calendar playbooks the credit plan runs first and the debit structure is the fallback, so the agent never trades less than before. The bounce and wait playbooks **replace** the credit plan, so no bear calls are sold into RSI < 30.
 
 ## 2. Mathematical Formula
 
 ```text
-Vertical debit (call: buy |Δ|≈0.60, sell |Δ|≈0.30 above; put: mirror below)
+Vertical debit (call: buy |Δ|≈debit_long_delta (0.50), sell one width_grid_pct step above;
+                put: mirror, below). Widths = the credit verticals' grid, snapped to strikes.
   debit     = long_ask − short_bid                 (fill_model natural; mid: mid − mid + 0.02)
-  fair      = width × (|Δlong| + |Δshort|) / 2     (payoff linear between strikes, |Δ| = P(ITM))
-  accept    0 < debit < width,  debit ≤ fair × (1 + overpay),  (width − debit)/debit ≥ min_RR
-  POP       = |Δlong| + (|Δshort| − |Δlong|) × debit/width     (|Δ| at breakeven)
-  max_debit = fair × (1 + overpay)                 → SpreadPlan.max_debit
+  mid       = long_mid − short_mid                 (market value — the cap reference)
+  accept    0 < debit < width,  debit ≤ mid × (1 + overpay),  (width − debit)/debit ≥ min_RR
+  rank      smallest debit first (cheapest risk; widest-RR picks did not fit the risk budget)
+  POP       = |Δlong| + (|Δshort| − |Δlong|) × debit/width     (|Δ| at breakeven, reported)
+  EV        = (width × (|Δlong|+|Δshort|)/2 − debit) / debit    (delta model, reported, not gated)
+  max_debit = mid × (1 + overpay)                  → SpreadPlan.max_debit
 
 Calendar (sell near K, buy far K, K = strike nearest spot)
-  at the near expiry  V(S) = BS(S, K, far−near days, σ_far) − intrinsic_near(S)
-  S ~ lognormal(spot, σ_near, near days), zero drift, 81-point grid z ∈ [−4, 4]
-  model = E[V],  max profit = max V − debit,  POP = P(V > debit)
-  accept  debit ≤ model × (1 + overpay),  (max V − debit)/debit ≥ min_RR
-  (flat vol ⇒ model = far − near prices: no-arbitrage check; σ_near > σ_far lowers the cost of the edge)
+  shape     V(S) = BS(S, K, far−near days, σ_far) − intrinsic_near(S), S ~ lognormal(spot, σ_near, near days)
+            81-point grid z ∈ [−4, 4]; model = E[V]
+  level     scale = mid / model  (zero-rate BS misses carry: SPY model 3.58 vs mid 5.66)
+  max profit = max V·scale − debit,  POP = P(V·scale > debit)
+  accept    debit ≤ mid × (1 + overpay),  (max V·scale − debit)/debit ≥ min_RR
 
 Bounce bull put (bearish, RSI < 30, vol rank ≥ 30)
   stabilised  ⇔  price > max(close over last N sessions)       N = bounce_lookback_days
@@ -46,35 +49,49 @@ Exits (position-scale; debit_pos = debit × 100 × contracts)
 ## 3. Reference Python Implementation
 
 ```python
-# trading_agent/chain_scanner.py:283-291
-def debit_spread_fair_value(width: float, long_delta: float,
-                            short_delta: float) -> float:
-    """Model value (per share) of a vertical debit spread at expiry.
+# trading_agent/chain_scanner.py:283-294
+def debit_mid_value(long_bid: float, long_ask: float,
+                    short_bid: float, short_ask: float) -> float:
+    """Market value (per share) of a long two-leg structure: long mid −
+    short mid. The reference for the debit cap.
 
-    With |Δ| read as the probability of finishing in the money, the payoff
-    rises linearly from 0 at the long strike to ``width`` at the short
-    strike, so E[payoff] ≈ width × (|Δlong| + |Δshort|) / 2. Single source
-    for the scorer, RiskManager and the executor's live recheck."""
-    return max(0.0, width) * (abs(long_delta) + abs(short_delta)) / 2.0
+    2026-10-05 live check: delta-interpolated and zero-rate Black-Scholes
+    "fair values" sat 14–60 % below the market mid on SPY / QQQ (skew,
+    rates), so a model cap rejected every liquid spread. The mid is the
+    market's own no-arbitrage value; the cap above it is a liquidity cost."""
+    long_mid = (long_bid + long_ask) / 2.0 if long_bid > 0 and long_ask > 0 else long_ask
+    short_mid = (short_bid + short_ask) / 2.0 if short_bid > 0 and short_ask > 0 else short_bid
+    return max(0.0, long_mid - short_mid)
 ```
 
 ```python
-# trading_agent/decision_engine.py:529-554
+# trading_agent/chain_scanner.py:297-301
+def debit_ceiling(mid_value: float, max_overpay: float) -> float:
+    """Highest debit worth paying = mid value × (1 + max_overpay). Single
+    source for the scorers' ``max_debit`` (rechecked by RiskManager and the
+    executor)."""
+    return max(0.0, mid_value) * (1.0 + max_overpay)
+```
+
+```python
+# trading_agent/decision_engine.py:529-556
 def _score_debit_spread_with_reason(*, debit: float, width: float,
+                                    mid_value: float,
                                     long_delta: float, short_delta: float,
                                     dte: int, max_overpay: float,
                                     min_reward_risk: float) -> Dict[str, Any]:
     """Score a vertical debit spread. Accepted when 0 < debit < width,
-    debit ≤ fair × (1 + max_overpay) and (width − debit) / debit ≥
-    min_reward_risk. POP = |Δ| interpolated at the breakeven."""
+    debit ≤ mid × (1 + max_overpay) and (width − debit) / debit ≥
+    min_reward_risk. POP = |Δ| interpolated at the breakeven; EV is the
+    delta model's (width × mean |Δ| − debit) — reported, not gated."""
     if dte <= 0:
         return {"status": "rejected", "reason": DEBIT_REJECT_DTE_NON_POSITIVE}
     if debit <= 0:
         return {"status": "rejected", "reason": DEBIT_REJECT_NON_POSITIVE}
     if debit >= width:
         return {"status": "rejected", "reason": DEBIT_REJECT_GE_WIDTH}
-    fair = debit_spread_fair_value(width, long_delta, short_delta)
-    ceiling = debit_spread_ceiling(width, long_delta, short_delta, max_overpay)
+    fair = mid_value
+    ceiling = debit_ceiling(mid_value, max_overpay)
     rr = (width - debit) / debit
     out = {"fair": fair, "ceiling": ceiling, "rr": rr}
     if debit > ceiling:
@@ -83,26 +100,29 @@ def _score_debit_spread_with_reason(*, debit: float, width: float,
         return {**out, "status": "rejected", "reason": DEBIT_REJECT_REWARD_RISK}
     dl, ds = abs(long_delta), abs(short_delta)
     pop = dl + (ds - dl) * (debit / width)
-    ev = (fair - debit) / debit
+    ev = (width * (dl + ds) / 2.0 - debit) / debit
     return {**out, "status": "accepted", "pop": pop, "ev": ev,
             "annualized": ev * 365.0 / dte, "max_profit": width - debit}
 ```
 
 ```python
-# trading_agent/decision_engine.py:653-693
-def _score_calendar_with_reason(*, debit: float, spot: float, strike: float,
+# trading_agent/decision_engine.py:677-724
+def _score_calendar_with_reason(*, debit: float, mid_value: float,
+                                spot: float, strike: float,
                                 option_type: str, near_dte: int, far_dte: int,
                                 near_iv: float, far_iv: float,
                                 max_overpay: float,
                                 min_reward_risk: float) -> Dict[str, Any]:
     """Score a long calendar (sell near, buy far, same strike).
 
-    At the near expiry the position is worth V(S) = BS(far leg, S, far −
-    near days, far IV) − intrinsic(near leg). S is lognormal with the near
-    leg's IV (zero drift). model value = E[V]; max profit = max V − debit;
-    POP = P(V > debit). Accepted when debit ≤ model × (1 + max_overpay) and
-    (max V − debit) / debit ≥ min_reward_risk. Selling richer near-dated
-    vol than the far leg's is the edge the model can see."""
+    Black-Scholes gives the payoff SHAPE: at the near expiry the position
+    is worth V(S) = BS(far leg, S, far − near days, far IV) − intrinsic
+    (near leg), S lognormal with the near leg's IV. The zero-rate model
+    misses carry (SPY 2026-10-05: model 3.58 vs market mid 5.66), so V is
+    rescaled by mid / E[V] — the market sets the level, the model the
+    shape. max profit = max V·scale − debit; POP = P(V·scale > debit).
+    Accepted when debit ≤ mid × (1 + max_overpay) and
+    (max V·scale − debit) / debit ≥ min_reward_risk."""
     if near_dte <= 0 or far_dte <= near_dte:
         return {"status": "rejected", "reason": DEBIT_REJECT_DTE_NON_POSITIVE}
     if debit <= 0:
@@ -119,16 +139,20 @@ def _score_calendar_with_reason(*, debit: float, spot: float, strike: float,
                      else max(0.0, strike - s_t))
         values.append(_bs_price(s_t, strike, t_rem, far_iv, option_type) - intrinsic)
     model = sum(w * v for w, v in zip(_Z_W, values))
+    if model <= 0 or mid_value <= 0:
+        return {"status": "rejected", "reason": DEBIT_REJECT_NON_POSITIVE}
+    scale = mid_value / model
+    values = [v * scale for v in values]
     peak = max(values)
-    ceiling = model * (1.0 + max_overpay)
+    ceiling = debit_ceiling(mid_value, max_overpay)
     rr = (peak - debit) / debit
-    out = {"fair": model, "ceiling": ceiling, "rr": rr}
+    out = {"fair": mid_value, "model": model, "ceiling": ceiling, "rr": rr}
     if debit > ceiling:
         return {**out, "status": "rejected", "reason": DEBIT_REJECT_ABOVE_FAIR}
     if rr < min_reward_risk:
         return {**out, "status": "rejected", "reason": DEBIT_REJECT_REWARD_RISK}
     pop = sum(w for w, v in zip(_Z_W, values) if v > debit)
-    ev = (model - debit) / debit
+    ev = (mid_value - debit) / debit
     return {**out, "status": "accepted", "pop": pop, "ev": ev,
             "annualized": ev * 365.0 / near_dte, "max_profit": peak - debit}
 ```
@@ -229,7 +253,8 @@ def _score_calendar_with_reason(*, debit: float, spot: float, strike: float,
 ## 4. Edge Cases / Guardrails
 
 - **Credit plan valid** — it wins; the debit/calendar fallback is not even planned. Both invalid → the credit plan is returned (stable journal strategy names) with `; fallback <name>: no acceptable candidate (<reasons>)` appended to its reason.
-- **Overpay** — natural fills sit above mid, so `debit_max_overpay = 0` rejects nearly everything; default 0.05. The best near miss (debit, fair, cap, reward/risk) lands in the scan diagnostics.
+- **Overpay** — natural fills sit above mid, so `debit_max_overpay = 0` rejects nearly everything; default 0.05 (live 2026-10-05: SPY/QQQ/IWM natural 0.8–2.5 % over mid passed; DIA calendar 7.8 % and XLE put debit 8.4 % did not). The best near miss (debit, mid, cap, reward/risk) lands in the scan diagnostics.
+- **Live check 2026-10-05 (read-only planner run, no orders)** — accepted: SPY / QQQ / IWM call and put debits (max loss $285–$915 per contract), SPY / QQQ / IWM / GLD calendars ($264–$748). Rejected: XLE / EEM legs too wide (skill 29 gate), DIA calendar over the cap. A max loss above `max_risk_pct × equity` is caught by RiskManager / sizing (qty 0), which is why candidates rank smallest-debit first.
 - **Missing IV** — a calendar leg without `iv` is rejected (`calendar_iv_missing`); no IV is invented.
 - **Far expiry not listed** — the calendar tries near + gap, then ±7 days; none listed → `no far-dated chain listed`.
 - **Live drift** — the executor re-quotes at natural; a live debit above `max_debit`, or a max loss above `max_risk_pct × equity`, aborts (`live_debit_risk`). No extra tick is paid past the natural price.
@@ -248,7 +273,7 @@ def _score_calendar_with_reason(*, debit: float, spot: float, strike: float,
 - `03_credit_to_width_floor.md` — the credit-side floor these structures replace.
 - `29_per_leg_liquidity_gate.md` — same per-leg width gate on every leg.
 - `30_profit_target_management.md` — `profit_target_basis` (natural) applies to debit targets too.
-- `13_preset_system_hot_reload.md` — the 15 `debit_*` / `calendar_*` / `bounce_*` fields.
+- `13_preset_system_hot_reload.md` — the 14 `debit_*` / `calendar_*` / `bounce_*` fields.
 
 ---
 
