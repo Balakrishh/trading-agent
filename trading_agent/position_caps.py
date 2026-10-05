@@ -97,4 +97,51 @@ def compute_position_cap_dedup_set(
     return blocked, positions_per_ticker, positions_per_sector, sectors_at_cap
 
 
-__all__ = ["compute_position_cap_dedup_set"]
+def register_open(
+    ticker: str,
+    tickers: Iterable[str],
+    positions_per_ticker: Dict[str, int],
+    positions_per_sector: Dict[str, int],
+    *,
+    sector_for,
+    max_positions_per_ticker: int,
+    max_positions_per_sector: int,
+) -> Set[str]:
+    """Count one more open position (or pending order) on ``ticker`` and
+    return the tickers that are now blocked by its per-ticker or
+    per-sector cap. Mutates the two count dicts in place.
+
+    2026-10-05: the caps were computed once from Stage 1's FILLED
+    positions, so SPY, QQQ and IWM (all Broad Market, cap 2) were opened
+    in one cycle. The agent now calls this for every ticker with an
+    order still pending fill and after every submission in the loop."""
+    positions_per_ticker[ticker] = positions_per_ticker.get(ticker, 0) + 1
+    sec = sector_for(ticker)
+    positions_per_sector[sec] = positions_per_sector.get(sec, 0) + 1
+    blocked: Set[str] = set()
+    if positions_per_ticker[ticker] >= max_positions_per_ticker:
+        blocked.add(ticker)
+    if positions_per_sector[sec] >= max_positions_per_sector:
+        blocked |= {t for t in tickers if sector_for(t) == sec}
+    return blocked
+
+
+# Strategies excluded from the total-risk cap: Wheel legs carry their own
+# collateral limit (≤ 40 % of equity per CSP, skill 40 §2.9) and a CSP's
+# "max loss" is the whole strike, which would crowd out every spread.
+TOTAL_RISK_EXCLUDED = frozenset({"Cash-Secured Put", "Covered Call"})
+
+
+def open_defined_risk(monitor_results: Dict) -> float:
+    """Σ max loss (dollars, all contracts) of open defined-risk positions
+    from the monitor summary; Wheel legs excluded."""
+    total = 0.0
+    for sr in monitor_results.get("positions", []) or []:
+        if sr.get("strategy") in TOTAL_RISK_EXCLUDED:
+            continue
+        total += float(sr.get("max_loss") or 0.0) * max(1, int(sr.get("contracts") or 1))
+    return round(total, 2)
+
+
+__all__ = ["compute_position_cap_dedup_set", "register_open",
+           "open_defined_risk", "TOTAL_RISK_EXCLUDED"]

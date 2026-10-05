@@ -2684,6 +2684,14 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                      "wide even at modest credit.",
             )
 
+        max_total_risk_pct = st.slider(
+            "Max TOTAL open risk (% of equity)", 0.03, 0.30,
+            float(getattr(seed, "max_total_risk_pct", 0.10)), 0.01,
+            key="cust_max_total_risk_pct",
+            help="Σ max loss of all open defined-risk positions (Wheel legs "
+                 "excluded). New trades are sized into what remains; at the "
+                 "cap no new spreads open.")
+
         # ── Debit structures + bounce bull put (skill 59) ─────────────
         st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
         db_c1, db_c2, db_c3 = st.columns(3)
@@ -2789,6 +2797,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "calendar_option_type":         cal_type,
         "calendar_profit_target_pct":   cal_tp,
         "bounce_lookback_days":         int(bounce_lookback),
+        "max_total_risk_pct":           max_total_risk_pct,
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to
