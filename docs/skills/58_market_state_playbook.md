@@ -30,11 +30,14 @@ CAUTION       P < S50  or  V ≥ 20  or  T ≥ 0.95  or  B < 0.50
 NORMAL        otherwise
 
 gate:  state         size×  allowed new spreads                    new CSPs
-       NORMAL        1.0    bull put, bear call, IC, IB            yes
-       CAUTION       0.5    bear call, IC, IB                      no
-       DEFENSIVE     0.25   bear call                              no
+       NORMAL        1.0    all                                    yes
+       CAUTION       0.5    bear call, IC, IB, put debit,          no
+                            calendar, bounce bull put
+       DEFENSIVE     0.25   bear call, put debit                   no
        CAPITULATION  0.0    none                                   no
-       RECOVERY      0.5    bull put, IC, IB                       yes
+       RECOVERY      0.5    bull put, IC, IB, call debit,          yes
+                            calendar, bounce bull put
+       (skill 59 structures added 2026-10-05)
        (Mean Reversion Spread gated as bull put / bear call by its sold side)
 
 effective max_risk_pct = preset.max_risk_pct × size×   (RiskManager and executor sizer)
@@ -50,13 +53,18 @@ playbook(regime, vol_rank, RSI):  vol buckets high ≥ 50, mid 30–50, low < 30
 ## 3. Reference Python Implementation
 
 ```python
-# trading_agent/market_state.py:101-107
+# trading_agent/market_state.py:106-117
 GATES: Dict[str, StateGate] = {
     NORMAL:       StateGate(1.0, ALL_SPREADS, True),
-    CAUTION:      StateGate(0.5, frozenset({BEAR_CALL, IRON_CONDOR, IRON_BUTTERFLY}), False),
-    DEFENSIVE:    StateGate(0.25, frozenset({BEAR_CALL}), False),
+    # Bullish structures (bull put, call debit) wait for NORMAL / RECOVERY;
+    # the bounce bull put is allowed in CAUTION because its own trigger
+    # (price reclaiming the N-day high) is the stabilisation evidence.
+    CAUTION:      StateGate(0.5, frozenset({BEAR_CALL, IRON_CONDOR, IRON_BUTTERFLY,
+                                            PUT_DEBIT, CALENDAR, BOUNCE_BULL_PUT}), False),
+    DEFENSIVE:    StateGate(0.25, frozenset({BEAR_CALL, PUT_DEBIT}), False),
     CAPITULATION: StateGate(0.0, frozenset(), False),
-    RECOVERY:     StateGate(0.5, frozenset({BULL_PUT, IRON_CONDOR, IRON_BUTTERFLY}), True),
+    RECOVERY:     StateGate(0.5, frozenset({BULL_PUT, IRON_CONDOR, IRON_BUTTERFLY,
+                                            CALL_DEBIT, CALENDAR, BOUNCE_BULL_PUT}), True),
 }
 ```
 
@@ -265,6 +273,7 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 - `40_long_term_options_evaluator.md` — Wheel CSP pause in `wheel_screen` / promote.
 - `48_claude_code_mcp_surface.md` — `get_market_state` read-only tool.
 - `55_pending_orders_promotion.md` — `check_wheel_order` market-state check.
+- `59_debit_spreads_calendars.md` — the call / put debit, calendar and bounce bull put playbooks are now implemented (`playbook_implemented=True`) and routed from `playbook_for`.
 
 ---
 

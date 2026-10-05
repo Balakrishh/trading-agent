@@ -57,6 +57,13 @@ class SpreadPlan:
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     valid: bool = True
     rejection_reason: str = ""
+    # Debit structures (skill 59, 2026-10-05). ``net_credit`` is negative
+    # (−debit) for them; ``max_debit`` is the most the scorer would pay
+    # (model value × (1 + debit_max_overpay)) — RiskManager and the
+    # executor's live recheck compare against it. ``far_expiration`` is
+    # the long leg's expiry for a calendar ("" otherwise).
+    max_debit: Optional[float] = None
+    far_expiration: str = ""
 
     def to_dict(self) -> Dict:
         return {
@@ -80,6 +87,8 @@ class SpreadPlan:
             "timestamp": self.timestamp,
             "valid": self.valid,
             "rejection_reason": self.rejection_reason,
+            "max_debit": self.max_debit,
+            "far_expiration": self.far_expiration,
         }
 
 
@@ -322,6 +331,34 @@ class StrategyPlanner:
             return self._plan_bull_put(ticker, analysis, expiration)
 
         # --- Priority 4: Normal regime mapping ---
+        # Skill 59 + the skill-58 playbook table:
+        #   * oversold downtrend (bounce / wait playbooks) — the playbook
+        #     REPLACES the credit plan: no bear calls sold into RSI < 30.
+        #   * low volatility (call / put debit, calendar) — the credit
+        #     plan goes first (positive model EV is the stronger signal);
+        #     the debit structure is the fallback when it finds nothing.
+        #     When both fail the credit plan is returned (stable journal
+        #     strategy names) with the fallback's reason appended.
+        playbook = self._playbook_name(analysis)
+        if playbook in ("bounce_bull_put", "wait_for_stabilization"):
+            replacement = self._plan_playbook(ticker, analysis, playbook)
+            if replacement is not None:
+                return replacement
+        credit_plan = self._plan_credit_by_regime(ticker, analysis)
+        if credit_plan.valid:
+            return credit_plan
+        fallback = self._plan_playbook(ticker, analysis, playbook)
+        if fallback is None:
+            return credit_plan
+        if fallback.valid:
+            return fallback
+        credit_plan.rejection_reason = (
+            f"{credit_plan.rejection_reason}; fallback {fallback.rejection_reason}")
+        return credit_plan
+
+    def _plan_credit_by_regime(self, ticker: str,
+                               analysis: RegimeAnalysis) -> SpreadPlan:
+        """Pre-2026-10-05 regime → credit-structure mapping."""
         if analysis.regime == Regime.BULLISH:
             expiration = self._pick_expiration(self.KIND_VERTICAL)
             logger.info("[%s] Planning Bull Put Spread, expiration %s",
@@ -360,6 +397,186 @@ class StrategyPlanner:
             logger.info("[%s] Planning Iron Condor, expiration %s",
                         ticker, expiration)
             return self._plan_iron_condor(ticker, analysis, expiration)
+
+    # ------------------------------------------------------------------
+    # Playbook routing — skill 59 (backlog §6.3–6.5)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _playbook_name(analysis: RegimeAnalysis) -> str:
+        from trading_agent.market_state import playbook_for
+        return playbook_for(analysis.regime.value,
+                            getattr(analysis, "iv_rank", None), analysis.rsi_14).name
+
+    def _plan_playbook(self, ticker: str, analysis: RegimeAnalysis,
+                       pb: str) -> Optional[SpreadPlan]:
+        """Plan the playbook's debit / calendar / bounce structure, or
+        return None when the playbook is a credit structure (or its toggle
+        is off) so the caller uses the regime's credit plan.
+
+        A plan with ``strategy_name == ""`` is a deliberate "no trade"
+        (oversold, waiting for stabilisation) — the caller returns it
+        as-is instead of falling back to a credit spread."""
+        pre = self.preset
+        if pb in ("call_debit", "put_debit") and getattr(pre, "debit_spreads_enabled", False):
+            return self._plan_debit_spread(ticker, analysis, pb)
+        if pb == "calendar" and getattr(pre, "calendar_enabled", False):
+            return self._plan_calendar(ticker, analysis)
+        if pb == "bounce_bull_put" and getattr(pre, "bounce_bull_put_enabled", False):
+            return self._plan_bounce_bull_put(ticker, analysis)
+        if pb == "wait_for_stabilization" and getattr(pre, "bounce_bull_put_enabled", False):
+            return self._empty_plan(
+                ticker, "", analysis, "",
+                f"Playbook wait_for_stabilization: downtrend with RSI "
+                f"{analysis.rsi_14:.0f} < 30 and low volatility — no new "
+                f"bearish premium into an oversold market")
+        return None
+
+    def _expiration_near(self, target_dte: int) -> str:
+        """Weekly expiration nearest ``target_dte`` (± the preset window)."""
+        today = datetime.now().date()
+        window = self._dte_window
+        exp = next_weekly_expiration(today=today, target_dte=target_dte,
+                                     dte_min=max(1, target_dte - window),
+                                     dte_max=target_dte + window)
+        return exp.strftime("%Y-%m-%d")
+
+    def _typed_slice(self, ticker: str, expiration: str, opt: str):
+        """Fetch one expiry's chain of ``opt`` contracts as a ChainSlice."""
+        from datetime import date as _date
+        from trading_agent.decision_engine import ChainSlice
+        contracts = self.data.fetch_option_chain(ticker, expiration, opt) or []
+        chain = []
+        for c in contracts:
+            entry = dict(c)
+            entry["type"] = opt
+            entry.setdefault("mid", (entry.get("bid", 0) + entry.get("ask", 0)) / 2.0)
+            chain.append(entry)
+        dte = max(1, (_date.fromisoformat(expiration) - _date.today()).days)
+        return ChainSlice(expiration=expiration, dte=dte, contracts=chain)
+
+    def _plan_from_debit_output(self, ticker: str, analysis: RegimeAnalysis,
+                                kind: str, out, expiration: str) -> SpreadPlan:
+        from trading_agent.debit_policy import KIND_TO_STRATEGY, build_debit_plan
+        name = KIND_TO_STRATEGY[kind]
+        self.last_scan_diagnostics = out.diagnostics.to_journal_dict()
+        if not out.candidates:
+            hist = out.diagnostics.rejects_by_reason
+            return self._empty_plan(
+                ticker, name, analysis, expiration,
+                f"{name}: no acceptable candidate ({', '.join(sorted(hist)) or 'no chain'})")
+        c = out.candidates[0]
+        if kind == "calendar":
+            detail = (f"sell {c.expiration} / buy {c.far_expiration} {c.option_type} "
+                      f"{c.long_strike:g}")
+        else:
+            detail = (f"buy {c.long_strike:g} (Δ{abs(c.long_delta):.2f}) / sell "
+                      f"{c.short_strike:g} (Δ{abs(c.short_delta):.2f}) {c.option_type}s, "
+                      f"width ${c.width:g}")
+        reasoning = (f"{name} on {ticker} ({analysis.regime.value}, vol rank "
+                     f"{getattr(analysis, 'iv_rank', 0.0):.0f}): {detail}. Debit "
+                     f"${c.debit:.2f} vs model ${c.fair_value:.2f} (cap ${c.max_debit:.2f}), "
+                     f"max profit ${c.max_profit:.2f}, reward/risk {c.reward_risk:.2f}, "
+                     f"POP {c.pop:.0%}.")
+        return build_debit_plan(ticker=ticker, regime=analysis.regime.value,
+                                cand=c, reasoning=reasoning)
+
+    def _plan_debit_spread(self, ticker: str, analysis: RegimeAnalysis,
+                           kind: str) -> SpreadPlan:
+        """Call debit (uptrend) / put debit (downtrend) — backlog §6.3."""
+        from trading_agent.decision_engine import DecisionInput, decide_debit_spread
+        expiration = self._expiration_near(int(getattr(self.preset, "dte_debit", 30)))
+        opt = "call" if kind == "call_debit" else "put"
+        logger.info("[%s] Planning %s, expiration %s", ticker, kind, expiration)
+        slc = self._typed_slice(ticker, expiration, opt)
+        out = decide_debit_spread(DecisionInput(side=kind, chain_slices=[slc],
+                                                preset=self.preset))
+        return self._plan_from_debit_output(ticker, analysis, kind, out, expiration)
+
+    def _plan_calendar(self, ticker: str, analysis: RegimeAnalysis) -> SpreadPlan:
+        """Long calendar at the strike nearest spot — backlog §6.5. The far
+        leg tries near + gap, then ±7 days (weeklies are not listed far
+        out on every name)."""
+        from datetime import date as _date, timedelta as _td
+        from trading_agent.decision_engine import DecisionInput, decide_calendar
+        pre = self.preset
+        opt = str(getattr(pre, "calendar_option_type", "call"))
+        near_exp = self._expiration_near(int(getattr(pre, "dte_calendar_near", 21)))
+        near = self._typed_slice(ticker, near_exp, opt)
+        gap = int(getattr(pre, "calendar_gap_days", 28))
+        out = None
+        for shift in (0, 7, -7):
+            far_exp = (_date.fromisoformat(near_exp) + _td(days=gap + shift)).isoformat()
+            if far_exp <= near_exp:
+                continue
+            far = self._typed_slice(ticker, far_exp, opt)
+            if not far.contracts:
+                continue
+            out = decide_calendar(DecisionInput(side="calendar", chain_slices=[near, far],
+                                                preset=pre, spot=analysis.current_price))
+            break
+        if out is None:
+            return self._empty_plan(ticker, "Calendar Spread", analysis, near_exp,
+                                    "Calendar Spread: no far-dated chain listed")
+        logger.info("[%s] Planning calendar, near %s", ticker, near_exp)
+        return self._plan_from_debit_output(ticker, analysis, "calendar", out, near_exp)
+
+    def bounce_levels(self, ticker: str) -> Optional[Tuple[float, float]]:
+        """(prior N-day high close, recent low) from daily history, or None.
+        N = ``bounce_lookback_days``; the recent low spans 2N sessions."""
+        n = int(getattr(self.preset, "bounce_lookback_days", 5))
+        try:
+            df = self.data.fetch_historical_prices(ticker, period_days=200)
+            closes = [float(x) for x in df["Close"].dropna().tolist()]
+            lows = [float(x) for x in df["Low"].dropna().tolist()]
+        except Exception as exc:  # noqa: skill-34-exempt — no history → no bounce trade, the caller reports why
+            logger.warning("[%s] Bounce levels unavailable: %s", ticker, exc)
+            return None
+        if len(closes) < n or len(lows) < 2 * n:
+            return None
+        return max(closes[-n:]), min(lows[-2 * n:])
+
+    def _plan_bounce_bull_put(self, ticker: str,
+                              analysis: RegimeAnalysis) -> SpreadPlan:
+        """Backlog §6.4 — oversold downtrend with elevated volatility: once
+        price reclaims the N-day high close, sell a bull put whose short
+        strike sits below the recent low. Until then, no trade."""
+        from trading_agent.debit_policy import BOUNCE_BULL_PUT_STRATEGY as NAME
+        expiration = self._pick_expiration(self.KIND_VERTICAL)
+        levels = self.bounce_levels(ticker)
+        if levels is None:
+            return self._empty_plan(ticker, NAME, analysis, expiration,
+                                    "Bounce: price history unavailable")
+        high_close, recent_low = levels
+        price = float(analysis.current_price)
+        if price <= high_close:
+            return self._empty_plan(
+                ticker, "", analysis, expiration,
+                f"Bounce: waiting for stabilisation — price {price:.2f} ≤ "
+                f"{getattr(self.preset, 'bounce_lookback_days', 5)}-day high close {high_close:.2f}")
+        logger.info("[%s] Bounce confirmed (%.2f > %.2f) — bull put below %.2f",
+                    ticker, price, high_close, recent_low)
+        if self.is_adaptive:
+            plan = self._plan_via_scanner(
+                ticker, "bull_put", analysis, fallback_expiration=expiration,
+                strategy_name=NAME,
+                candidate_filter=lambda c: c.short_strike < recent_low)
+        else:
+            contracts = [c for c in (self.data.fetch_option_chain(ticker, expiration, "put") or [])
+                         if float(c["strike"]) < recent_low]
+            sold = self._find_sold_strike(contracts) if contracts else None
+            bought = (self._find_bought_strike(contracts, sold["strike"], direction="lower")
+                      if sold else None)
+            if not (sold and bought):
+                return self._empty_plan(ticker, NAME, analysis, expiration,
+                                        f"Bounce: no put spread below the recent low {recent_low:.2f}")
+            plan = self._assemble_plan(ticker, NAME, analysis, expiration, sold, bought, "put")
+        plan.strategy_name = NAME
+        plan.reasoning = (f"Bounce: price {price:.2f} reclaimed the "
+                          f"{getattr(self.preset, 'bounce_lookback_days', 5)}-day high close "
+                          f"{high_close:.2f}; short put below the recent low {recent_low:.2f}. "
+                          + plan.reasoning)
+        return plan
 
     # ------------------------------------------------------------------
     # Individual strategy builders
@@ -653,7 +870,10 @@ class StrategyPlanner:
 
     def _plan_via_scanner(self, ticker: str, side: str,
                           analysis: RegimeAnalysis,
-                          fallback_expiration: str) -> SpreadPlan:
+                          fallback_expiration: str,
+                          *,
+                          strategy_name: Optional[str] = None,
+                          candidate_filter=None) -> SpreadPlan:
         """
         Adaptive-mode planner. Routes through ChainScanner; converts the
         winning ``SpreadCandidate`` into a ``SpreadPlan`` whose legs and
@@ -669,10 +889,13 @@ class StrategyPlanner:
         stamp instead of an empty string.
         """
         assert self._scanner is not None, "_plan_via_scanner needs adaptive preset"
-        strategy_name = "Bull Put Spread" if side == "bull_put" else "Bear Call Spread"
+        strategy_name = strategy_name or (
+            "Bull Put Spread" if side == "bull_put" else "Bear Call Spread")
 
         try:
             candidates = self._scanner.scan(ticker, side)
+            if candidate_filter is not None:
+                candidates = [c for c in candidates if candidate_filter(c)]
         except Exception as exc:
             logger.exception("[%s] Adaptive scan failed: %s", ticker, exc)
             # Skill 34: page operator on the error channel. A ticker

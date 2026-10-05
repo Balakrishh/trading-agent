@@ -38,7 +38,7 @@ def test_capitulation(kw):
 def test_defensive_needs_below_sma200(kw):
     assert st(spy_price=95.0, spy_sma50=105.0, **kw).state == DEFENSIVE
     r = st(spy_price=95.0, spy_sma50=105.0, **kw)
-    assert r.gate.allowed_strategies == {BEAR_CALL} and not r.gate.allow_new_csp
+    assert r.gate.allowed_strategies == {BEAR_CALL, ms.PUT_DEBIT} and not r.gate.allow_new_csp
 
 
 @pytest.mark.parametrize("kw", [dict(spy_price=104.0), dict(vix=21.0),
@@ -79,15 +79,15 @@ def test_no_recovery_without_prior_stress():
 
 @pytest.mark.parametrize("regime,vol,rsi,name,impl", [
     ("bullish", 45, 55, "bull_put", True),
-    ("bullish", 20, 55, "call_debit", False),
+    ("bullish", 20, 55, "call_debit", True),
     ("bearish", 60, 45, "bear_call", True),
-    ("bearish", 20, 45, "put_debit", False),
-    ("bearish", 40, 25, "bounce_bull_put", False),
+    ("bearish", 20, 45, "put_debit", True),
+    ("bearish", 40, 25, "bounce_bull_put", True),
     ("bearish", 20, 25, "wait_for_stabilization", False),
     ("sideways", 35, 50, "iron_condor", True),
-    ("sideways", 10, 50, "calendar", False),
+    ("sideways", 10, 50, "calendar", True),
     ("mean_reversion", 10, 80, "mean_reversion", True),
-    ("bullish", None, None, "call_debit", False),
+    ("bullish", None, None, "call_debit", True),
 ])
 def test_playbook(regime, vol, rsi, name, impl):
     pb = playbook_for(regime, vol, rsi)
@@ -152,3 +152,22 @@ def test_caution_hysteresis():
     assert r.state == CAUTION and r.reasons[0].startswith("hysteresis")
     assert st(prior=CAUTION, spy_price=105.5).state == CAUTION      # < 1 % above SMA-50
     assert st(prior=CAUTION, vix=15.0).state == NORMAL
+
+
+def test_skill_59_names_match_debit_policy():
+    from trading_agent import debit_policy as dp
+    assert (ms.CALL_DEBIT, ms.PUT_DEBIT, ms.CALENDAR, ms.BOUNCE_BULL_PUT) == (
+        dp.CALL_DEBIT_STRATEGY, dp.PUT_DEBIT_STRATEGY, dp.CALENDAR_STRATEGY,
+        dp.BOUNCE_BULL_PUT_STRATEGY)
+
+
+@pytest.mark.parametrize("state,allowed,blocked", [
+    (CAUTION, ["Put Debit Spread", "Calendar Spread", "Bounce Bull Put Spread"],
+     ["Call Debit Spread"]),
+    (DEFENSIVE, ["Put Debit Spread"], ["Calendar Spread", "Bounce Bull Put Spread"]),
+    (RECOVERY, ["Call Debit Spread", "Calendar Spread"], ["Put Debit Spread"]),
+])
+def test_skill_59_gates(state, allowed, blocked):
+    g = ms.GATES[state]
+    assert all(a in g.allowed_strategies for a in allowed)
+    assert not any(b in g.allowed_strategies for b in blocked)

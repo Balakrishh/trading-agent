@@ -257,6 +257,51 @@ def _cw_floor(short_delta: float, edge_buffer: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Debit pricing — backlog §6.3 / §6.5, skill 59.
+# ---------------------------------------------------------------------------
+
+def _quote_debit(long_bid: float, long_ask: float,
+                 short_bid: float, short_ask: float,
+                 *,
+                 fill_haircut: float = DEFAULT_FILL_HAIRCUT,
+                 model: str = "mid") -> float:
+    """Estimate the debit to open a debit spread or calendar (buy the long
+    leg, sell the short leg), in dollars per share — the mirror of
+    ``_quote_credit``. ``model="natural"``: pay the long ask, receive the
+    short bid. ``"mid"``: mid − mid plus the fill haircut. A non-positive
+    result is returned as 0.0 (the scorer rejects it — a free spread is a
+    bad quote, not an opportunity). Returns ``None``-free floats only."""
+    if model == "natural":
+        return round(max(0.0, long_ask - short_bid), 2)
+    long_mid = ((long_bid + long_ask) / 2.0
+                if long_bid > 0 and long_ask > 0 else long_ask)
+    short_mid = ((short_bid + short_ask) / 2.0
+                 if short_bid > 0 and short_ask > 0 else short_bid)
+    return round(max(0.0, long_mid - short_mid + max(0.0, fill_haircut)), 2)
+
+
+def debit_mid_value(long_bid: float, long_ask: float,
+                    short_bid: float, short_ask: float) -> float:
+    """Market value (per share) of a long two-leg structure: long mid −
+    short mid. The reference for the debit cap.
+
+    2026-10-05 live check: delta-interpolated and zero-rate Black-Scholes
+    "fair values" sat 14–60 % below the market mid on SPY / QQQ (skew,
+    rates), so a model cap rejected every liquid spread. The mid is the
+    market's own no-arbitrage value; the cap above it is a liquidity cost."""
+    long_mid = (long_bid + long_ask) / 2.0 if long_bid > 0 and long_ask > 0 else long_ask
+    short_mid = (short_bid + short_ask) / 2.0 if short_bid > 0 and short_ask > 0 else short_bid
+    return max(0.0, long_mid - short_mid)
+
+
+def debit_ceiling(mid_value: float, max_overpay: float) -> float:
+    """Highest debit worth paying = mid value × (1 + max_overpay). Single
+    source for the scorers' ``max_debit`` (rechecked by RiskManager and the
+    executor)."""
+    return max(0.0, mid_value) * (1.0 + max_overpay)
+
+
+# ---------------------------------------------------------------------------
 # Iron Butterfly scoring — skill 45.
 # ---------------------------------------------------------------------------
 # Structural differences from a vertical / IC:

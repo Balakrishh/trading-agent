@@ -2684,6 +2684,79 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                      "wide even at modest credit.",
             )
 
+        # ── Debit structures + bounce bull put (skill 59) ─────────────
+        st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
+        db_c1, db_c2, db_c3 = st.columns(3)
+        with db_c1:
+            debit_enabled = st.checkbox(
+                "Debit spreads (trend + low vol)",
+                value=bool(getattr(seed, "debit_spreads_enabled", True)),
+                key="cust_debit_enabled")
+        with db_c2:
+            calendar_enabled = st.checkbox(
+                "Calendars (sideways + low vol)",
+                value=bool(getattr(seed, "calendar_enabled", True)),
+                key="cust_calendar_enabled")
+        with db_c3:
+            bounce_enabled = st.checkbox(
+                "Bounce bull put (oversold + stabilised)",
+                value=bool(getattr(seed, "bounce_bull_put_enabled", True)),
+                key="cust_bounce_enabled")
+        db_d1, db_d2, db_d3, db_d4 = st.columns(4)
+        with db_d1:
+            dte_debit = st.number_input(
+                "Debit DTE", 7, 90, int(getattr(seed, "dte_debit", 30)), 1,
+                key="cust_dte_debit")
+            dte_cal_near = st.number_input(
+                "Calendar near DTE", 7, 60, int(getattr(seed, "dte_calendar_near", 21)), 1,
+                key="cust_dte_cal_near")
+        with db_d2:
+            debit_long_delta = st.slider(
+                "Debit long |Δ|", 0.30, 0.70,
+                float(getattr(seed, "debit_long_delta", 0.50)), 0.05,
+                key="cust_debit_long_delta",
+                help="Bought leg; the sold leg sits one width-grid step further out.")
+            cal_gap = st.number_input(
+                "Calendar gap (days)", 7, 90, int(getattr(seed, "calendar_gap_days", 28)), 1,
+                key="cust_cal_gap")
+        with db_d3:
+            debit_overpay = st.slider(
+                "Max overpay vs model", 0.0, 0.20,
+                float(getattr(seed, "debit_max_overpay", 0.05)), 0.01,
+                key="cust_debit_overpay",
+                help="Debit ≤ market mid × (1 + this) — the liquidity cost you "
+                     "accept. Natural fills sit above mid, so 0 rejects almost "
+                     "everything.")
+        with db_d4:
+            debit_min_rr = st.slider(
+                "Min reward ÷ risk", 0.5, 3.0,
+                float(getattr(seed, "debit_min_reward_risk", 1.0)), 0.1,
+                key="cust_debit_min_rr")
+            bounce_lookback = st.number_input(
+                "Bounce lookback (days)", 2, 20, int(getattr(seed, "bounce_lookback_days", 5)), 1,
+                key="cust_bounce_lookback")
+        db_e1, db_e2, db_e3, db_e4 = st.columns(4)
+        with db_e1:
+            debit_tp = st.slider(
+                "Debit TP (% of max profit)", 0.2, 0.9,
+                float(getattr(seed, "debit_profit_target_pct", 0.50)), 0.05,
+                key="cust_debit_tp")
+        with db_e2:
+            debit_sl = st.slider(
+                "Debit stop (% of debit)", 0.2, 0.9,
+                float(getattr(seed, "debit_stop_loss_pct", 0.50)), 0.05,
+                key="cust_debit_sl")
+        with db_e3:
+            cal_tp = st.slider(
+                "Calendar TP (% of debit)", 0.1, 0.6,
+                float(getattr(seed, "calendar_profit_target_pct", 0.25)), 0.05,
+                key="cust_cal_tp")
+        with db_e4:
+            cal_type = st.selectbox(
+                "Calendar option type", ["call", "put"],
+                index=0 if getattr(seed, "calendar_option_type", "call") == "call" else 1,
+                key="cust_cal_type")
+
     payload = {
         "max_delta":          max_delta,
         "dte_vertical":       dte_vertical,
@@ -2702,6 +2775,20 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "profit_target_pct":  profit_target_pct,
         # Iron Butterfly knobs (skill 45).
         "iron_butterfly_enabled":       ib_enabled,
+        "debit_spreads_enabled":        debit_enabled,
+        "calendar_enabled":             calendar_enabled,
+        "bounce_bull_put_enabled":      bounce_enabled,
+        "dte_debit":                    int(dte_debit),
+        "debit_long_delta":             debit_long_delta,
+        "debit_max_overpay":            debit_overpay,
+        "debit_min_reward_risk":        debit_min_rr,
+        "debit_profit_target_pct":      debit_tp,
+        "debit_stop_loss_pct":          debit_sl,
+        "dte_calendar_near":            int(dte_cal_near),
+        "calendar_gap_days":            int(cal_gap),
+        "calendar_option_type":         cal_type,
+        "calendar_profit_target_pct":   cal_tp,
+        "bounce_lookback_days":         int(bounce_lookback),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

@@ -47,6 +47,7 @@ Public API
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,6 +72,9 @@ from trading_agent.chain_scanner import (
     _leg_spread_too_wide,
     _pop_from_delta,
     _quote_credit,
+    _quote_debit,
+    debit_ceiling,
+    debit_mid_value,
     _quote_credit_single,
     _score_candidate_with_reason,
     _score_iron_butterfly_with_reason,
@@ -107,9 +111,10 @@ class DecisionInput:
     market-data providers. ``preset`` carries the grids and floors
     (``delta_grid``, ``width_grid_pct``, ``edge_buffer``, ``min_pop``).
     """
-    side:          str                   # "bull_put" | "bear_call"
+    side:          str                   # "bull_put" | "bear_call" | "call_debit" | "put_debit" | "calendar"
     chain_slices:  List[ChainSlice]
     preset:        Any                   # PresetConfig — duck-typed to avoid an import cycle
+    spot:          Optional[float] = None   # underlying price; calendars need it (skill 59)
 
 
 @dataclass
@@ -452,6 +457,332 @@ def decide_iron_butterfly(
         candidates=candidates[:max_candidates],
         diagnostics=diag,
     )
+
+
+# ---------------------------------------------------------------------------
+# Debit strategies — backlog §6.3 (debit verticals), §6.5 (calendars), skill 59.
+# ---------------------------------------------------------------------------
+# Credit spreads need the market to overpay for risk; in a low-volatility
+# tape it rarely does (week 1: ~8,400 "no positive-EV" rejects). Debit
+# structures buy the move (verticals) or the time decay of a near-dated
+# option (calendars). Their edge is the playbook's directional / range
+# thesis, which no pricing model can see — so instead of demanding
+# positive model EV the scorers cap what we pay over the market mid
+# (``debit_max_overpay``, a liquidity cost) and demand a minimum
+# reward-to-risk. The 6.6 scorecard then measures whether the thesis pays.
+
+DEBIT_REJECT_NO_LONG          = "debit_no_long_contract"
+DEBIT_REJECT_NO_SHORT         = "debit_no_short_contract"
+DEBIT_REJECT_NON_POSITIVE     = "debit_non_positive"
+DEBIT_REJECT_GE_WIDTH         = "debit_ge_width"
+DEBIT_REJECT_ABOVE_FAIR       = "debit_above_fair"
+DEBIT_REJECT_REWARD_RISK      = "reward_risk_below_min"
+DEBIT_REJECT_DTE_NON_POSITIVE = "debit_dte_non_positive"
+CAL_REJECT_NEED_TWO_SLICES    = "calendar_needs_near_and_far"
+CAL_REJECT_NO_STRIKE          = "calendar_no_common_strike"
+CAL_REJECT_IV_MISSING         = "calendar_iv_missing"
+CAL_REJECT_NO_SPOT            = "calendar_no_spot"
+
+
+@dataclass
+class DebitCandidate:
+    """One scored debit structure. ``kind`` is ``call_debit`` /
+    ``put_debit`` / ``calendar``. Prices are per share. For calendars
+    ``long_*`` is the far-dated leg, ``short_*`` the near-dated one at the
+    same strike, ``expiration`` the NEAR expiry (it drives exits) and
+    ``far_expiration`` the long leg's; ``width`` is 0."""
+    kind:              str
+    option_type:       str
+    expiration:        str
+    dte:               int
+    long_strike:       float
+    short_strike:      float
+    long_symbol:       str
+    short_symbol:      str
+    long_delta:        float
+    short_delta:       float
+    long_bid:          float
+    long_ask:          float
+    short_bid:         float
+    short_ask:         float
+    debit:             float
+    width:             float
+    fair_value:        float
+    max_debit:         float
+    max_profit:        float
+    reward_risk:       float
+    pop:               float
+    ev_per_dollar_risked: float
+    annualized_score:  float
+    far_expiration:    str = ""
+    far_dte:           int = 0
+
+
+@dataclass
+class DebitDecisionOutput:
+    candidates:  List[DebitCandidate] = field(default_factory=list)
+    diagnostics: ScanDiagnostics = field(
+        default_factory=lambda: ScanDiagnostics(grid_points_total=0)
+    )
+
+
+def _score_debit_spread_with_reason(*, debit: float, width: float,
+                                    mid_value: float,
+                                    long_delta: float, short_delta: float,
+                                    dte: int, max_overpay: float,
+                                    min_reward_risk: float) -> Dict[str, Any]:
+    """Score a vertical debit spread. Accepted when 0 < debit < width,
+    debit ≤ mid × (1 + max_overpay) and (width − debit) / debit ≥
+    min_reward_risk. POP = |Δ| interpolated at the breakeven; EV is the
+    delta model's (width × mean |Δ| − debit) — reported, not gated."""
+    if dte <= 0:
+        return {"status": "rejected", "reason": DEBIT_REJECT_DTE_NON_POSITIVE}
+    if debit <= 0:
+        return {"status": "rejected", "reason": DEBIT_REJECT_NON_POSITIVE}
+    if debit >= width:
+        return {"status": "rejected", "reason": DEBIT_REJECT_GE_WIDTH}
+    fair = mid_value
+    ceiling = debit_ceiling(mid_value, max_overpay)
+    rr = (width - debit) / debit
+    out = {"fair": fair, "ceiling": ceiling, "rr": rr}
+    if debit > ceiling:
+        return {**out, "status": "rejected", "reason": DEBIT_REJECT_ABOVE_FAIR}
+    if rr < min_reward_risk:
+        return {**out, "status": "rejected", "reason": DEBIT_REJECT_REWARD_RISK}
+    dl, ds = abs(long_delta), abs(short_delta)
+    pop = dl + (ds - dl) * (debit / width)
+    ev = (width * (dl + ds) / 2.0 - debit) / debit
+    return {**out, "status": "accepted", "pop": pop, "ev": ev,
+            "annualized": ev * 365.0 / dte, "max_profit": width - debit}
+
+
+def decide_debit_spread(inp: DecisionInput, *,
+                        max_candidates: int = 5) -> DebitDecisionOutput:
+    """Call debit (buy the |Δ|≈debit_long_delta call, sell the call one
+    ``width_grid_pct`` step above it) or put debit (mirror, puts below).
+    Widths come from the same grid as the credit verticals so the max
+    loss (the debit) stays inside the risk budget — picking the short leg
+    by delta made QQQ spreads $33 wide (2026-10-05 live check). Among
+    candidates that clear the reward/risk floor the SMALLEST debit ranks
+    first: ranking by reward/risk picked the widest SPY spread ($913 max
+    loss, over a 3 % budget on $30k) and the trade would never size."""
+    side = inp.side
+    if side not in ("call_debit", "put_debit"):
+        raise ValueError(f"Unsupported debit side {side!r}")
+    preset = inp.preset
+    opt = "call" if side == "call_debit" else "put"
+    sign = 1.0 if opt == "call" else -1.0
+    long_t = float(getattr(preset, "debit_long_delta", 0.50))
+    widths = [float(w) for w in getattr(preset, "width_grid_pct", (0.01, 0.015, 0.02, 0.025))]
+    max_overpay = float(getattr(preset, "debit_max_overpay", 0.05))
+    min_rr = float(getattr(preset, "debit_min_reward_risk", 1.0))
+    model = str(getattr(preset, "fill_model", "natural"))
+    diag = ScanDiagnostics(grid_points_total=len(inp.chain_slices) * len(widths),
+                           expirations_resolved=len(inp.chain_slices))
+    cands: List[DebitCandidate] = []
+    for slc in inp.chain_slices:
+        chain = [c for c in slc.contracts
+                 if str(c.get("type", opt)).lower().startswith(opt[0])]
+        if not chain:
+            diag.record(REJECT_NO_CHAIN)
+            continue
+        long_c = _find_closest_delta(chain, sign * long_t, prefer_type=opt)
+        if long_c is None:
+            diag.record(DEBIT_REJECT_NO_LONG)
+            continue
+        k_long = float(long_c["strike"])
+        if _lt_leg_too_wide(long_c, preset):
+            diag.record(REJECT_LEG_SPREAD_WIDE, len(widths))
+            continue
+        grid_step = ChainScanner._infer_grid_step(chain)
+        for width_pct in widths:
+            width = ChainScanner._snap_width_to_grid(width_pct * k_long, grid_step)
+            short_c = (ChainScanner._find_strike(chain, k_long + sign * width)
+                       if width > 0 else None)
+            if short_c is None or sign * (float(short_c["strike"]) - k_long) <= 0:
+                diag.record(DEBIT_REJECT_NO_SHORT)
+                continue
+            if _lt_leg_too_wide(short_c, preset):
+                diag.record(REJECT_LEG_SPREAD_WIDE)
+                continue
+            cand = _debit_vertical_candidate(side, opt, slc, long_c, short_c, model,
+                                             max_overpay, min_rr, diag)
+            if cand is not None:
+                cands.append(cand)
+    cands.sort(key=lambda c: (c.debit, -c.reward_risk))
+    return DebitDecisionOutput(candidates=cands[:max_candidates], diagnostics=diag)
+
+
+def _debit_vertical_candidate(side, opt, slc, long_c, short_c, model, max_overpay,
+                              min_rr, diag) -> Optional[DebitCandidate]:
+    """Price + score one (long, short) pair; record rejects in ``diag``."""
+    k_long = float(long_c["strike"])
+    width = abs(float(short_c["strike"]) - k_long)
+    lb, la = float(long_c["bid"]), float(long_c["ask"])
+    sb, sa = float(short_c["bid"]), float(short_c["ask"])
+    debit = _quote_debit(lb, la, sb, sa, model=model)
+    diag.grid_points_priced += 1
+    r = _score_debit_spread_with_reason(
+        debit=debit, width=width, mid_value=debit_mid_value(lb, la, sb, sa),
+        long_delta=float(long_c["delta"]), short_delta=float(short_c.get("delta", 0) or 0),
+        dte=slc.dte, max_overpay=max_overpay, min_reward_risk=min_rr)
+    if r["status"] == "rejected":
+        diag.record(r["reason"])
+        if "fair" in r:
+            near = {"expiration": slc.expiration, "debit": debit, "width": width,
+                    "mid": round(r["fair"], 4), "ceiling": round(r["ceiling"], 4),
+                    "reward_risk": round(r["rr"], 3)}
+            if diag.best_near_miss is None or near["reward_risk"] > diag.best_near_miss.get("reward_risk", -1):
+                diag.best_near_miss = near
+        return None
+    return DebitCandidate(
+            kind=side, option_type=opt, expiration=slc.expiration, dte=slc.dte,
+            long_strike=k_long, short_strike=float(short_c["strike"]),
+            long_symbol=str(long_c.get("symbol", "")), short_symbol=str(short_c.get("symbol", "")),
+            long_delta=float(long_c["delta"]), short_delta=float(short_c["delta"]),
+            long_bid=float(long_c["bid"]), long_ask=float(long_c["ask"]),
+            short_bid=float(short_c["bid"]), short_ask=float(short_c["ask"]),
+            debit=debit, width=width, fair_value=round(r["fair"], 4),
+            max_debit=round(r["ceiling"], 4), max_profit=round(r["max_profit"], 4),
+            reward_risk=round(r["rr"], 4), pop=round(r["pop"], 4),
+            ev_per_dollar_risked=round(r["ev"], 4), annualized_score=round(r["annualized"], 4))
+
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _bs_price(spot: float, strike: float, t_years: float, sigma: float,
+              option_type: str) -> float:
+    """Black-Scholes price with zero rates and dividends; intrinsic value
+    when t or σ is non-positive."""
+    intrinsic = max(0.0, spot - strike) if option_type == "call" else max(0.0, strike - spot)
+    if t_years <= 0 or sigma <= 0 or spot <= 0 or strike <= 0:
+        return intrinsic
+    vt = sigma * math.sqrt(t_years)
+    d1 = (math.log(spot / strike) + 0.5 * vt * vt) / vt
+    d2 = d1 - vt
+    if option_type == "call":
+        return spot * _norm_cdf(d1) - strike * _norm_cdf(d2)
+    return strike * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
+
+
+# 81-point grid over z ∈ [−4, 4] — fine enough for a smooth payoff,
+# cheap enough to run per cycle.
+_Z_GRID = [-4.0 + 0.1 * i for i in range(81)]
+_Z_W = [math.exp(-0.5 * z * z) for z in _Z_GRID]
+_Z_W = [w / sum(_Z_W) for w in _Z_W]
+
+
+def _score_calendar_with_reason(*, debit: float, mid_value: float,
+                                spot: float, strike: float,
+                                option_type: str, near_dte: int, far_dte: int,
+                                near_iv: float, far_iv: float,
+                                max_overpay: float,
+                                min_reward_risk: float) -> Dict[str, Any]:
+    """Score a long calendar (sell near, buy far, same strike).
+
+    Black-Scholes gives the payoff SHAPE: at the near expiry the position
+    is worth V(S) = BS(far leg, S, far − near days, far IV) − intrinsic
+    (near leg), S lognormal with the near leg's IV. The zero-rate model
+    misses carry (SPY 2026-10-05: model 3.58 vs market mid 5.66), so V is
+    rescaled by mid / E[V] — the market sets the level, the model the
+    shape. max profit = max V·scale − debit; POP = P(V·scale > debit).
+    Accepted when debit ≤ mid × (1 + max_overpay) and
+    (max V·scale − debit) / debit ≥ min_reward_risk."""
+    if near_dte <= 0 or far_dte <= near_dte:
+        return {"status": "rejected", "reason": DEBIT_REJECT_DTE_NON_POSITIVE}
+    if debit <= 0:
+        return {"status": "rejected", "reason": DEBIT_REJECT_NON_POSITIVE}
+    if near_iv <= 0 or far_iv <= 0:
+        return {"status": "rejected", "reason": CAL_REJECT_IV_MISSING}
+    t1 = near_dte / 365.0
+    t_rem = (far_dte - near_dte) / 365.0
+    vt = near_iv * math.sqrt(t1)
+    values = []
+    for z in _Z_GRID:
+        s_t = spot * math.exp(-0.5 * vt * vt + vt * z)
+        intrinsic = (max(0.0, s_t - strike) if option_type == "call"
+                     else max(0.0, strike - s_t))
+        values.append(_bs_price(s_t, strike, t_rem, far_iv, option_type) - intrinsic)
+    model = sum(w * v for w, v in zip(_Z_W, values))
+    if model <= 0 or mid_value <= 0:
+        return {"status": "rejected", "reason": DEBIT_REJECT_NON_POSITIVE}
+    scale = mid_value / model
+    values = [v * scale for v in values]
+    peak = max(values)
+    ceiling = debit_ceiling(mid_value, max_overpay)
+    rr = (peak - debit) / debit
+    out = {"fair": mid_value, "model": model, "ceiling": ceiling, "rr": rr}
+    if debit > ceiling:
+        return {**out, "status": "rejected", "reason": DEBIT_REJECT_ABOVE_FAIR}
+    if rr < min_reward_risk:
+        return {**out, "status": "rejected", "reason": DEBIT_REJECT_REWARD_RISK}
+    pop = sum(w for w, v in zip(_Z_W, values) if v > debit)
+    ev = (mid_value - debit) / debit
+    return {**out, "status": "accepted", "pop": pop, "ev": ev,
+            "annualized": ev * 365.0 / near_dte, "max_profit": peak - debit}
+
+
+def decide_calendar(inp: DecisionInput) -> DebitDecisionOutput:
+    """Long calendar at the strike nearest spot. ``inp.chain_slices`` is
+    ``[near, far]``, each one option type (``preset.calendar_option_type``)."""
+    preset = inp.preset
+    opt = str(getattr(preset, "calendar_option_type", "call"))
+    diag = ScanDiagnostics(grid_points_total=1, expirations_resolved=len(inp.chain_slices))
+    if len(inp.chain_slices) != 2:
+        diag.record(CAL_REJECT_NEED_TWO_SLICES)
+        return DebitDecisionOutput(diagnostics=diag)
+    if not inp.spot or inp.spot <= 0:
+        diag.record(CAL_REJECT_NO_SPOT)
+        return DebitDecisionOutput(diagnostics=diag)
+    near, far = inp.chain_slices
+
+    def by_strike(slc):
+        return {round(float(c["strike"]), 2): c for c in slc.contracts
+                if str(c.get("type", opt)).lower().startswith(opt[0])
+                and float(c.get("bid", 0) or 0) > 0}
+    near_k, far_k = by_strike(near), by_strike(far)
+    common = sorted(set(near_k) & set(far_k), key=lambda k: abs(k - inp.spot))
+    if not common:
+        diag.record(CAL_REJECT_NO_STRIKE)
+        return DebitDecisionOutput(diagnostics=diag)
+    k = common[0]
+    short_c, long_c = near_k[k], far_k[k]
+    if _lt_leg_too_wide(long_c, preset) or _lt_leg_too_wide(short_c, preset):
+        diag.record(REJECT_LEG_SPREAD_WIDE)
+        return DebitDecisionOutput(diagnostics=diag)
+    debit = _quote_debit(float(long_c["bid"]), float(long_c["ask"]),
+                         float(short_c["bid"]), float(short_c["ask"]),
+                         model=str(getattr(preset, "fill_model", "natural")))
+    diag.grid_points_priced += 1
+    r = _score_calendar_with_reason(
+        debit=debit, mid_value=debit_mid_value(float(long_c["bid"]), float(long_c["ask"]),
+                                               float(short_c["bid"]), float(short_c["ask"])),
+        spot=float(inp.spot), strike=k, option_type=opt,
+        near_dte=near.dte, far_dte=far.dte,
+        near_iv=float(short_c.get("iv", 0) or 0), far_iv=float(long_c.get("iv", 0) or 0),
+        max_overpay=float(getattr(preset, "debit_max_overpay", 0.05)),
+        min_reward_risk=float(getattr(preset, "debit_min_reward_risk", 1.0)))
+    if r["status"] == "rejected":
+        diag.record(r["reason"])
+        if "fair" in r:
+            diag.best_near_miss = {"strike": k, "debit": debit, "mid": round(r["fair"], 4),
+                                   "ceiling": round(r["ceiling"], 4),
+                                   "reward_risk": round(r["rr"], 3)}
+        return DebitDecisionOutput(diagnostics=diag)
+    return DebitDecisionOutput(candidates=[DebitCandidate(
+        kind="calendar", option_type=opt, expiration=near.expiration, dte=near.dte,
+        long_strike=k, short_strike=k,
+        long_symbol=str(long_c.get("symbol", "")), short_symbol=str(short_c.get("symbol", "")),
+        long_delta=float(long_c.get("delta", 0) or 0), short_delta=float(short_c.get("delta", 0) or 0),
+        long_bid=float(long_c["bid"]), long_ask=float(long_c["ask"]),
+        short_bid=float(short_c["bid"]), short_ask=float(short_c["ask"]),
+        debit=debit, width=0.0, fair_value=round(r["fair"], 4), max_debit=round(r["ceiling"], 4),
+        max_profit=round(r["max_profit"], 4), reward_risk=round(r["rr"], 4),
+        pop=round(r["pop"], 4), ev_per_dollar_risked=round(r["ev"], 4),
+        annualized_score=round(r["annualized"], 4),
+        far_expiration=far.expiration, far_dte=far.dte)], diagnostics=diag)
 
 
 def _mid(contract: Dict[str, Any]) -> float:

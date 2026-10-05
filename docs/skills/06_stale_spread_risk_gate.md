@@ -95,6 +95,8 @@ if underlying_bid_ask is not None:
 - **Soft-pass != silent** — every stale-pass logs a `WARNING` with full bid/ask/mid, so a post-mortem can find every fill that proceeded against a wide quote.
 - **Different from "stale data"** — the watchlist UI's "⏰ stale data" badge is about `last_bar_ts` being old; this gate is about wide *current* quotes. Different problem, different rule. Don't conflate.
 
+- **Location (2026-10-05).** Checks 4–8 (max loss, paper, market hours, this underlying-liquidity gate, buying power) now live in `RiskManager._finish()`, shared by the credit path and the skill-59 debit branch; the logic is unchanged.
+
 ## 5. Cross-References
 
 - [03 Credit-to-Width floor](03_credit_to_width_floor.md) — also runs in `RiskGate`; both can fail a candidate independently.
@@ -102,4 +104,4 @@ if underlying_bid_ask is not None:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-15.*
+*Last verified against repo HEAD on 2026-10-05.*

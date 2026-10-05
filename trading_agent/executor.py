@@ -162,7 +162,12 @@ def calculate_position_qty(plan: SpreadPlan, account_balance: float,
         which would otherwise bypass the guardrail.
     """
     credit = live_credit if live_credit is not None else plan.net_credit
-    max_loss_per_contract = (plan.spread_width - credit) * 100
+    if credit < 0:
+        # Debit structure (skill 59): net credit is −debit and the debit
+        # is all a long spread / calendar can lose.
+        max_loss_per_contract = -credit * 100
+    else:
+        max_loss_per_contract = (plan.spread_width - credit) * 100
     if max_loss_per_contract <= 0 or account_balance <= 0:
         return 0
     max_risk_dollars = account_balance * max_risk_pct
@@ -315,6 +320,10 @@ class OrderExecutor:
             success, else a short human-readable "live_credit_risk: ..."
             string describing the first failure.
         """
+        from trading_agent.debit_policy import is_debit_plan
+        if is_debit_plan(plan):
+            return self._recheck_live_debit(plan, live_credit, account_balance)
+
         width = plan.spread_width
         if width <= 0:
             return (False,
@@ -351,6 +360,26 @@ class OrderExecutor:
                     f"(live_credit=${live_credit:.2f}, "
                     f"planning max_loss was ${plan.max_loss:.2f})")
 
+        return (True, "")
+
+    def _recheck_live_debit(self, plan: SpreadPlan, live_net: float,
+                            account_balance: float) -> Tuple[bool, str]:
+        """Skill 59: a debit plan's live debit must stay within the
+        scorer's ``max_debit`` cap and its max loss (the debit) within
+        ``max_risk_pct × equity``. ``live_net`` is the signed net credit."""
+        debit = -live_net
+        cap = plan.max_debit
+        if debit <= 0:
+            return (False, f"live_debit_risk: live net {live_net:.2f} is not a debit")
+        if cap is None or debit > cap:
+            return (False, f"live_debit_risk: debit ${debit:.2f} > cap "
+                           f"{'n/a' if cap is None else f'${cap:.2f}'} "
+                           f"(planned ${-plan.net_credit:.2f})")
+        max_allowed = account_balance * self.max_risk_pct
+        if debit * 100 > max_allowed:
+            return (False, f"live_debit_risk: max_loss ${debit * 100:.2f} > "
+                           f"{self.max_risk_pct*100:.0f}% × ${account_balance:,.2f} "
+                           f"(=${max_allowed:.2f})")
         return (True, "")
 
     def _submit_order(self, plan: SpreadPlan, plan_path: str,
@@ -407,7 +436,7 @@ class OrderExecutor:
             live_credit = haircut_credit
         else:
             drift = abs(live_credit - plan.net_credit)
-            drift_pct = drift / plan.net_credit if plan.net_credit else 0
+            drift_pct = drift / abs(plan.net_credit) if plan.net_credit else 0
             if drift_pct > self.PRICE_DRIFT_WARN_PCT:
                 logger.warning(
                     "[%s] Credit drifted %.1f%% since planning "
@@ -451,7 +480,13 @@ class OrderExecutor:
         # ------------------------------------------------------------------
         haircut_credit = round(live_credit - self.OPTION_TICK, 2)
         submit_credit = live_credit
-        if haircut_credit > 0:
+        if live_credit < 0:
+            # Debit (skill 59): the live value is already the natural
+            # price (pay the long ask, receive the short bid) — what paper
+            # fills at. Paying a tick more would only add cost.
+            logger.info("[%s] Debit order at natural $%.2f (cap $%.2f)",
+                        plan.ticker, -live_credit, plan.max_debit or 0.0)
+        elif haircut_credit > 0:
             ok_haircut, haircut_reason = self._recheck_live_economics(
                 plan, haircut_credit, account_balance)
             if ok_haircut:
@@ -473,15 +508,18 @@ class OrderExecutor:
                 "haircut without going non-positive — submitting at mid.",
                 plan.ticker, live_credit)
 
-        # Alpaca sign convention: credit → negative limit_price
-        limit_price_value = -abs(submit_credit)
+        # Alpaca sign convention: credit → negative limit_price, debit →
+        # positive. ``submit_credit`` is signed (negative for a debit).
+        limit_price_value = -submit_credit if submit_credit < 0 else -abs(submit_credit)
+        limit_price_value = round(limit_price_value, 2)
 
         # Size off the credit we're ACTUALLY submitting (post-haircut).
         # qty must reflect the economics on the wire, not the un-haircut
         # mid, so risk sizing stays consistent with what fills.
         qty = self._calculate_qty(plan, account_balance, live_credit=submit_credit)
         if qty < 1:
-            max_loss_per_contract = (plan.spread_width - submit_credit) * 100
+            max_loss_per_contract = (-submit_credit * 100 if submit_credit < 0
+                                     else (plan.spread_width - submit_credit) * 100)
             max_risk_dollars = account_balance * self.max_risk_pct
             reason = (
                 f"qty=0: max_loss_per_contract ${max_loss_per_contract:.2f} "
@@ -1034,6 +1072,10 @@ class OrderExecutor:
                 fill_debit = self._order_fill_price(order["id"])
                 if fill_debit is None:
                     fill_debit = price
+                elif price < 0 < fill_debit:
+                    # Net-credit close (a debit spread or calendar, skill
+                    # 59): keep the signed convention realized_pl uses.
+                    fill_debit = -fill_debit
                 realized = realized_pl_from_close(legs, fill_debit)
                 logger.info("[%s] Spread CLOSED atomically (%s) %s @ %.2f debit "
                             "(fill %.2f, realized %s)",
