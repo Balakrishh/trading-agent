@@ -52,7 +52,7 @@ Uses `US_MARKET_PROFILE.is_trading_day` — the same calendar `is_within_market_
 def supervise(
     *,
     max_iterations: Optional[int] = None,
-    sleep_fn=time.sleep,
+    sleep_fn=wall_clock_sleep,
     now_fn=None,
 ) -> int:
     """Run the supervisor loop.
@@ -83,6 +83,7 @@ The supervisor installs a `SIGTERM` handler that forwards the signal to the chil
 - **`RunAtLoad=true` is safe.** Installing the plist during market close makes the agent try to start, see "outside hours", exit, and the supervisor sleeps until next open. No trades on install.
 - **Same interpreter as supervisor.** `_run_agent_once` uses `sys.executable`, so the agent inherits whatever venv the supervisor was launched in. No PATH ambiguity between the launchd process and the trading agent.
 
+- **System sleep (2026-10-05).** On macOS `time.sleep` does not advance while the machine sleeps, so a single 12 h wait stretched by the whole lid-closed time (woke Sat 14:36 instead of 04:05; missed Monday's 09:25 open). `wall_clock_sleep` sleeps in ≤ 300 s slices and re-checks `time.time()`, so a wake is at most 5 minutes late once the Mac is awake. It cannot run while the Mac itself is asleep — keep it awake in market hours (e.g. `pmset` wake schedule or Energy settings).
 - **Cycle cadence (documented 2026-10-05).** In-session the supervisor sleeps `in_session_sleep_sec()` = `AGENT_CYCLE_SLEEP_SEC` (default 60, clamped 60–900) after each agent exit, so with ~15 s cycles the agent runs about every 75 s (≈300 cycles/day, measured 2026-09-29…10-02) — not every 5 minutes. Exit debounce of 3 cycles is therefore ≈ 4 min. Set `AGENT_CYCLE_SLEEP_SEC=285` for a ~5-minute cadence.
 
 ## 5. Cross-References
