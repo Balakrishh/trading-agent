@@ -98,6 +98,27 @@ class RiskManager:
         else:
             failed.append(f"Plan invalid: {plan.rejection_reason}")
 
+        # --- Checks 2 + 3 for debit structures (skill 59) ---
+        # A debit spread / calendar has no credit to floor and its sold leg
+        # is a hedge (vertical) or deliberately ATM (calendar), so the C/W
+        # floor and the sold-|Δ| cap do not apply. The equivalent guard is
+        # the debit cap the scorer set (model value × (1 + overpay)).
+        from trading_agent.debit_policy import is_debit_plan, plan_debit
+        if is_debit_plan(plan):
+            debit = plan_debit(plan)
+            cap = plan.max_debit
+            if not plan.valid:
+                pass                              # Check 1 already failed it
+            elif cap is None:
+                failed.append("Debit plan has no max_debit cap")
+            elif 0 < debit <= cap:
+                passed.append(f"Debit ${debit:.2f} ≤ cap ${cap:.2f} (model × (1+overpay))")
+            else:
+                failed.append(f"Debit ${debit:.2f} outside (0, cap ${cap:.2f}]")
+            return self._finish(plan, account_balance, account_type, market_open,
+                                force_market_open, underlying_bid_ask,
+                                account_buying_power, passed, failed)
+
         # --- Check 2: credit-to-width ratio ---
         # In adaptive mode the floor is delta-aware (matches the scanner):
         # required C/W = |Δshort_max| × (1 + edge_buffer). The static floor
@@ -135,6 +156,16 @@ class RiskManager:
                 failed.append(
                     f"Sold {leg.strike} |Δ|={abs(leg.delta):.3f} > {self.max_delta}")
 
+        return self._finish(plan, account_balance, account_type, market_open,
+                            force_market_open, underlying_bid_ask,
+                            account_buying_power, passed, failed)
+
+    def _finish(self, plan: SpreadPlan, account_balance: float, account_type: str,
+                market_open: bool, force_market_open: bool,
+                underlying_bid_ask: Optional[Tuple[float, float]],
+                account_buying_power: Optional[float],
+                passed: list, failed: list) -> RiskVerdict:
+        """Checks 4–8 (structure-independent) and the verdict."""
         # --- Check 4: max loss vs account ---
         max_allowed = round(account_balance * self.max_risk_pct, 2)
         if plan.max_loss <= max_allowed:

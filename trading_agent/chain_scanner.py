@@ -257,6 +257,47 @@ def _cw_floor(short_delta: float, edge_buffer: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Debit pricing — backlog §6.3 / §6.5, skill 59.
+# ---------------------------------------------------------------------------
+
+def _quote_debit(long_bid: float, long_ask: float,
+                 short_bid: float, short_ask: float,
+                 *,
+                 fill_haircut: float = DEFAULT_FILL_HAIRCUT,
+                 model: str = "mid") -> float:
+    """Estimate the debit to open a debit spread or calendar (buy the long
+    leg, sell the short leg), in dollars per share — the mirror of
+    ``_quote_credit``. ``model="natural"``: pay the long ask, receive the
+    short bid. ``"mid"``: mid − mid plus the fill haircut. A non-positive
+    result is returned as 0.0 (the scorer rejects it — a free spread is a
+    bad quote, not an opportunity). Returns ``None``-free floats only."""
+    if model == "natural":
+        return round(max(0.0, long_ask - short_bid), 2)
+    long_mid = ((long_bid + long_ask) / 2.0
+                if long_bid > 0 and long_ask > 0 else long_ask)
+    short_mid = ((short_bid + short_ask) / 2.0
+                 if short_bid > 0 and short_ask > 0 else short_bid)
+    return round(max(0.0, long_mid - short_mid + max(0.0, fill_haircut)), 2)
+
+
+def debit_spread_fair_value(width: float, long_delta: float,
+                            short_delta: float) -> float:
+    """Model value (per share) of a vertical debit spread at expiry.
+
+    With |Δ| read as the probability of finishing in the money, the payoff
+    rises linearly from 0 at the long strike to ``width`` at the short
+    strike, so E[payoff] ≈ width × (|Δlong| + |Δshort|) / 2. Single source
+    for the scorer, RiskManager and the executor's live recheck."""
+    return max(0.0, width) * (abs(long_delta) + abs(short_delta)) / 2.0
+
+
+def debit_spread_ceiling(width: float, long_delta: float, short_delta: float,
+                         max_overpay: float) -> float:
+    """Highest debit worth paying = fair value × (1 + max_overpay)."""
+    return debit_spread_fair_value(width, long_delta, short_delta) * (1.0 + max_overpay)
+
+
+# ---------------------------------------------------------------------------
 # Iron Butterfly scoring — skill 45.
 # ---------------------------------------------------------------------------
 # Structural differences from a vertical / IC:

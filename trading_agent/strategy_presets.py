@@ -271,8 +271,47 @@ class PresetConfig:
     auto_apply_allowed_fields:         Tuple[str, ...] = ()
 
     # ------------------------------------------------------------------
+    # Debit structures + bounce bull put (added 2026-10-05 — backlog
+    # §6.3–6.5, skill 59). The playbook table (skill 58) routes trend +
+    # low volatility to call / put debit spreads, sideways + low
+    # volatility to calendars, and bearish + RSI < 30 + elevated
+    # volatility to a bull put once price stabilises. Scoring caps the
+    # debit at model value × (1 + debit_max_overpay) and requires
+    # reward/risk ≥ debit_min_reward_risk.
+    # ------------------------------------------------------------------
+    debit_spreads_enabled:             bool  = True
+    calendar_enabled:                  bool  = True
+    bounce_bull_put_enabled:           bool  = True
+    dte_debit:                         int   = 30
+    debit_long_delta:                  float = 0.60     # |Δ| of the bought leg
+    debit_short_delta:                 float = 0.30     # |Δ| of the sold leg
+    debit_max_overpay:                 float = 0.05     # debit ≤ model × 1.05
+    debit_min_reward_risk:             float = 1.0      # max profit ÷ debit
+    debit_profit_target_pct:           float = 0.50     # of max profit (verticals)
+    debit_stop_loss_pct:               float = 0.50     # of the debit (verticals + calendars)
+    dte_calendar_near:                 int   = 21       # sold leg
+    calendar_gap_days:                 int   = 28       # bought leg ≈ near + gap
+    calendar_option_type:              str   = "call"
+    calendar_profit_target_pct:        float = 0.25     # of the debit
+    bounce_lookback_days:              int   = 5        # stabilisation = reclaim the N-day high close
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
+
+    def _debit_tag(self) -> str:
+        """Summary-line token for the skill-59 debit playbooks."""
+        parts = []
+        if self.debit_spreads_enabled:
+            parts.append(f"Debit@{self.dte_debit}d Δ{self.debit_long_delta:.2f}/"
+                         f"{self.debit_short_delta:.2f} RR≥{self.debit_min_reward_risk:g} "
+                         f"TP{self.debit_profit_target_pct:.0%}/SL{self.debit_stop_loss_pct:.0%}")
+        if self.calendar_enabled:
+            parts.append(f"Cal@{self.dte_calendar_near}+{self.calendar_gap_days}d "
+                         f"TP{self.calendar_profit_target_pct:.0%}")
+        if self.bounce_bull_put_enabled:
+            parts.append(f"Bounce@{self.bounce_lookback_days}d")
+        return " • ".join(parts) if parts else "Debit off"
 
     @property
     def dte_range_vertical(self) -> Tuple[int, int]:
@@ -309,6 +348,7 @@ class PresetConfig:
                 f"{self.max_leg_spread_pct_mid:.0%}mid • "
                 f"Fills @ {self.fill_model} • "
                 f"MarketState {'on' if self.market_state_enabled else 'off'} • "
+                f"{self._debit_tag()} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
                 f"Max risk {self.max_risk_pct*100:.0f}%"
@@ -320,6 +360,7 @@ class PresetConfig:
             f"C/W ≥ {self.min_credit_ratio} • "
             f"Fills @ {self.fill_model} • "
             f"MarketState {'on' if self.market_state_enabled else 'off'} • "
+            f"{self._debit_tag()} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
             f"Max risk {self.max_risk_pct*100:.0f}%"

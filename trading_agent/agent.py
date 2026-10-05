@@ -367,6 +367,10 @@ class TradingAgent:
             profit_target_pct=self.preset.profit_target_pct,
             # §6.1: profit target judged at the cost to close at natural.
             profit_target_basis=self.preset.fill_model,
+            # Skill 59: debit spread / calendar exit thresholds.
+            debit_profit_target_pct=self.preset.debit_profit_target_pct,
+            debit_stop_loss_pct=self.preset.debit_stop_loss_pct,
+            calendar_profit_target_pct=self.preset.calendar_profit_target_pct,
         )
         self.order_tracker: OrdersPort = OrderTracker(
             api_key=config.alpaca.api_key,

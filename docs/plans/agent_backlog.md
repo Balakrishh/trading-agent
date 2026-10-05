@@ -99,9 +99,9 @@ Order (paper only, one at a time, each with skill doc + tests + scoring in `deci
 
 - [x] **6.1 Fill-realistic pricing.** *(Done 2026-10-05: `PresetConfig.fill_model`, default natural; scorers, Wheel, iron butterfly, profit target.)* Compute EV, credit floors and screen yields at natural prices (sell at bid, buy at ask) instead of mid in all scorers — paper filled only at natural on 2026-09-30 (VZ entry) and 2026-10-01 (SPY close). Small change; makes every other number honest.
 - [x] **6.2 Regime-state classifier + playbook table.** Per cycle: trend × IV Rank × RSI extreme → one playbook from the table above (extends §1's market risk-state overlay). Fully deterministic; journal the chosen playbook on every row. *(Done 2026-10-05, Phase 3 — `trading_agent/market_state.py`, skill 58: `playbook`/`playbook_implemented` on every signal row; market state gates entries; validation via `scripts/research/validate_market_state.py`.)*
-- [ ] **6.3 Debit spreads** for trend + low IV (call debit in uptrend, put debit in downtrend). Biggest trade-count gain in low-IV tapes.
-- [ ] **6.4 Bounce bull put:** bearish + RSI < 30 + IV Rank elevated + stabilisation trigger (e.g. close reclaims the 5-day high) → bull put below the recent low.
-- [ ] **6.5 Calendar spreads** for sideways + low IV.
+- [x] **6.3 Debit spreads** for trend + low IV (call debit in uptrend, put debit in downtrend). Biggest trade-count gain in low-IV tapes. *(Done 2026-10-05, Phase 4 — skill 59; fallback after the credit plan in low volatility.)*
+- [x] **6.4 Bounce bull put:** bearish + RSI < 30 + IV Rank elevated + stabilisation trigger (e.g. close reclaims the 5-day high) → bull put below the recent low. *(Done 2026-10-05, Phase 4 — trigger: price > N-day high close; short strike below the 2N-day low; replaces the bear call when RSI < 30.)*
+- [x] **6.5 Calendar spreads** for sideways + low IV. *(Done 2026-10-05, Phase 4 — Black-Scholes model over the near-expiry distribution.)*
 - [ ] **6.6 Per-playbook scorecard:** tag every trade with regime + playbook; after 20–30 trades per playbook report win rate, avg win/loss, slippage vs mid, EV realised; use it to size (1–3 % risk by track record) or disable a playbook.
 - [ ] **6.7 More shots at the same risk:** add liquid single names (via the Wheel fundamentals screen), ladder weekly expirations, smaller size per trade.
 - [ ] **6.8 Start now, in parallel:** the §3 realized-vol POP shadow log (no trading effect) so evidence accumulates while 6.1–6.5 are built.

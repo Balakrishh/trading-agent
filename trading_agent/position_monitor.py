@@ -31,6 +31,10 @@ from trading_agent.regime import Regime
 from trading_agent.wheel_policy import (
     CSP_STOP_ABS_DELTA, CSP_STRATEGY, TAKE_PROFIT_PCT_OF_CREDIT, WHEEL_STRATEGIES,
 )
+from trading_agent.debit_policy import (
+    BOUNCE_BULL_PUT_STRATEGY, CALENDAR_STRATEGY, CALL_DEBIT_STRATEGY,
+    DEBIT_STRATEGIES, DEBIT_VERTICALS, PUT_DEBIT_STRATEGY,
+)
 
 
 # ── Position-fetch retry policy ─────────────────────────────────────────────
@@ -71,6 +75,12 @@ STRATEGY_REGIME_MAP = {
     "Bear Call Spread":     Regime.BEARISH,
     "Iron Condor":          Regime.SIDEWAYS,
     "Mean Reversion Spread": None,   # direction-neutral; never regime-shift closed
+    # Skill 59. The bounce bull put is opened in a bearish regime on
+    # purpose, so a regime check would close it at once — None.
+    CALL_DEBIT_STRATEGY:      Regime.BULLISH,
+    PUT_DEBIT_STRATEGY:       Regime.BEARISH,
+    CALENDAR_STRATEGY:        Regime.SIDEWAYS,
+    BOUNCE_BULL_PUT_STRATEGY: None,
 }
 
 
@@ -238,7 +248,10 @@ class PositionMonitor:
                  hard_stop_multiplier: float = 3.0,
                  strike_proximity_pct: float = 0.01,
                  post_fill_grace_seconds: int = 60,
-                 profit_target_basis: str = "natural"):
+                 profit_target_basis: str = "natural",
+                 debit_profit_target_pct: float = 0.50,
+                 debit_stop_loss_pct: float = 0.50,
+                 calendar_profit_target_pct: float = 0.25):
         """
         Additional parameter
         --------------------
@@ -262,6 +275,10 @@ class PositionMonitor:
         # natural price (PresetConfig.fill_model, backlog §6.1); "mid":
         # legacy mid valuation. Stops always use the mid valuation.
         self.profit_target_basis = profit_target_basis
+        # Skill 59 debit structures (PresetConfig.debit_* / calendar_*).
+        self.debit_profit_target_pct = debit_profit_target_pct
+        self.debit_stop_loss_pct = debit_stop_loss_pct
+        self.calendar_profit_target_pct = calendar_profit_target_pct
 
     def _profit_pl(self, spread: "SpreadPosition") -> float:
         if self.profit_target_basis == "natural" and spread.net_natural_pl is not None:
@@ -523,6 +540,8 @@ class PositionMonitor:
         # table — strategy name, breakeven, P&L all derived from what we
         # know about the legs themselves.
         unmatched = [p for p in positions if p.symbol not in matched_symbols]
+        calendars, unmatched = self._infer_calendars(unmatched)
+        spreads.extend(calendars)
         inferred = self._infer_spreads_from_legs(unmatched)
         spreads.extend(inferred)
 
@@ -567,6 +586,40 @@ class PositionMonitor:
         except (ValueError, IndexError):
             return None
         return None
+
+    @classmethod
+    def _infer_calendars(cls, legs: List[PositionSnapshot]):
+        """Pair a short and a long leg with the same underlying, type and
+        strike but different expirations into a Calendar Spread (skill 59)
+        — the (underlying, expiration) buckets below would otherwise split
+        it into a "Naked Short" plus an orphan long. Returns (calendars,
+        remaining legs)."""
+        decoded = [(leg, cls._parse_occ(leg.symbol)) for leg in legs]
+        used: set = set()
+        out: List[SpreadPosition] = []
+        for s_leg, s_occ in decoded:
+            if s_occ is None or s_leg.side != "short" or s_leg.symbol in used:
+                continue
+            for l_leg, l_occ in decoded:
+                if (l_occ is None or l_leg.side != "long" or l_leg.symbol in used
+                        or l_occ["underlying"] != s_occ["underlying"]
+                        or l_occ["type"] != s_occ["type"]
+                        or l_occ["strike"] != s_occ["strike"]
+                        or l_occ["expiration"] <= s_occ["expiration"]):
+                    continue
+                credit = s_leg.avg_entry_price - l_leg.avg_entry_price
+                pair = [s_leg, l_leg]
+                out.append(SpreadPosition(
+                    underlying=s_occ["underlying"], strategy_name=CALENDAR_STRATEGY,
+                    legs=pair, original_credit=round(credit, 2),
+                    max_loss=round(max(0.0, -credit * 100), 2), spread_width=0.0,
+                    net_unrealized_pl=sum(p.unrealized_pl for p in pair),
+                    net_natural_pl=_sum_natural(pair),
+                    expiration=s_occ["expiration"], short_strikes=[s_occ["strike"]],
+                    origin="inferred"))
+                used.update({s_leg.symbol, l_leg.symbol})
+                break
+        return out, [leg for leg in legs if leg.symbol not in used]
 
     @classmethod
     def _infer_spreads_from_legs(
@@ -620,13 +673,17 @@ class PositionMonitor:
             puts   = [d for d in decoded if d["type"] == "put"]
             calls  = [d for d in decoded if d["type"] == "call"]
 
+            # Entry credit per share (negative → a debit structure).
+            entry_net = (sum(d["leg"].avg_entry_price for d in shorts)
+                         - sum(d["leg"].avg_entry_price for d in longs))
+
             # Classify
             if len(decoded) == 4 and puts and calls and shorts and longs:
                 strategy = "Iron Condor"
             elif (len(decoded) == 2 and len(puts) == 2 and len(shorts) == 1):
-                strategy = "Bull Put Spread"
+                strategy = PUT_DEBIT_STRATEGY if entry_net < 0 else "Bull Put Spread"
             elif (len(decoded) == 2 and len(calls) == 2 and len(shorts) == 1):
-                strategy = "Bear Call Spread"
+                strategy = CALL_DEBIT_STRATEGY if entry_net < 0 else "Bear Call Spread"
             elif len(decoded) == 1 and shorts:
                 strategy = "Naked Short"
             else:
@@ -650,7 +707,8 @@ class PositionMonitor:
             put_width  = _wing_width(puts)
             call_width = _wing_width(calls)
             spread_width = max(put_width, call_width, 0.0)
-            max_loss = max(0.0, (spread_width - credit) * 100)
+            max_loss = (max(0.0, -credit * 100) if strategy in DEBIT_VERTICALS
+                        else max(0.0, (spread_width - credit) * 100))
 
             short_strikes = [d["strike"] for d in shorts]
             net_pl = sum(d["leg"].unrealized_pl for d in decoded)
@@ -691,6 +749,44 @@ class PositionMonitor:
             return (ExitSignal.DELTA_STOP,
                     f"Wheel CSP: |Δ| {abs(spread.short_delta):.2f} ≥ {CSP_STOP_ABS_DELTA}")
         return (ExitSignal.HOLD, "Wheel: holding — assignment accepted")
+
+    def _check_debit_exit(self, spread: SpreadPosition,
+                          current_regimes: Dict[str, Regime]):
+        """Stop at ``debit_stop_loss_pct`` of the debit; profit target at
+        ``debit_profit_target_pct`` of max profit (verticals) or
+        ``calendar_profit_target_pct`` of the debit (calendars); DTE
+        safety on the (near) expiry; regime shift against the thesis."""
+        contracts = max(1, spread.contracts_open)
+        debit_position = -spread.original_credit * 100 * contracts
+        if debit_position <= 0:
+            return (ExitSignal.HOLD, "Debit: no recorded debit — holding")
+        loss = -spread.net_unrealized_pl
+        stop = debit_position * self.debit_stop_loss_pct
+        if loss >= stop > 0:
+            return (ExitSignal.STOP_LOSS,
+                    f"Debit: loss ${loss:.2f} ≥ {self.debit_stop_loss_pct:.0%} of "
+                    f"debit ${debit_position:.2f}")
+        if spread.strategy_name in DEBIT_VERTICALS:
+            max_profit = (spread.spread_width + spread.original_credit) * 100 * contracts
+            target = max_profit * self.debit_profit_target_pct
+            label = f"{self.debit_profit_target_pct:.0%} of max profit ${max_profit:.2f}"
+        else:
+            target = debit_position * self.calendar_profit_target_pct
+            label = f"{self.calendar_profit_target_pct:.0%} of debit ${debit_position:.2f}"
+        profit_pl = self._profit_pl(spread)
+        if profit_pl >= target > 0:
+            return (ExitSignal.PROFIT_TARGET,
+                    f"Debit: profit ${profit_pl:.2f} ({self.profit_target_basis}) ≥ {label}")
+        dte_signal = self._check_dte_safety(spread.expiration)
+        if dte_signal:
+            return (ExitSignal.DTE_SAFETY, dte_signal)
+        expected = STRATEGY_REGIME_MAP.get(spread.strategy_name)
+        current = current_regimes.get(spread.underlying)
+        if expected and current is not None and current != expected:
+            return (ExitSignal.REGIME_SHIFT,
+                    f"Regime shifted to {current.value} but holding "
+                    f"{spread.strategy_name} (expects {expected.value})")
+        return (ExitSignal.HOLD, "")
 
     def evaluate(self, spreads: List[SpreadPosition],
                  current_regimes: Dict[str, Regime],
@@ -780,6 +876,13 @@ class PositionMonitor:
         # regime shift, credit-multiple hard stop) must not run here.
         if spread.strategy_name in WHEEL_STRATEGIES:
             return self._check_wheel_exit(spread)
+
+        # --- Debit structures (skill 59) ------------------------------
+        # The credit rules are keyed to a credit received; a long spread
+        # or calendar risks its debit instead. Strike proximity does not
+        # apply (a debit vertical WANTS price through the short strike).
+        if spread.strategy_name in DEBIT_STRATEGIES:
+            return self._check_debit_exit(spread, current_regimes)
 
         # ---------------------------------------------------------------
         # Per-position economics (contract-count-scaled).

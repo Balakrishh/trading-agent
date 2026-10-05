@@ -13,8 +13,8 @@ give the same answer and every rule is unit-testable:
    State      Meaning / effect on new entries
    ========== ========================================================
    NORMAL     everything allowed, full size
-   CAUTION    half size; no new bull puts or cash-secured puts
-   DEFENSIVE  quarter size; bear calls only; no new cash-secured puts
+   CAUTION    half size; no new bull puts, call debits or cash-secured puts
+   DEFENSIVE  quarter size; bear calls and put debits only; no new CSPs
    CAPITULATN no new entries at all
    RECOVERY   half size; bullish premium (bull puts, CSPs) re-enabled
    ========== ========================================================
@@ -49,7 +49,12 @@ STATES = (NORMAL, CAUTION, DEFENSIVE, CAPITULATION, RECOVERY)
 BULL_PUT, BEAR_CALL, IRON_CONDOR, IRON_BUTTERFLY, MEAN_REVERSION = (
     "Bull Put Spread", "Bear Call Spread", "Iron Condor", "Iron Butterfly",
     "Mean Reversion Spread")
-ALL_SPREADS = frozenset({BULL_PUT, BEAR_CALL, IRON_CONDOR, IRON_BUTTERFLY})
+# Skill 59 structures. Names duplicated from debit_policy (which imports
+# strategy.py) to keep this module import-light; a test pins them equal.
+CALL_DEBIT, PUT_DEBIT, CALENDAR, BOUNCE_BULL_PUT = (
+    "Call Debit Spread", "Put Debit Spread", "Calendar Spread", "Bounce Bull Put Spread")
+ALL_SPREADS = frozenset({BULL_PUT, BEAR_CALL, IRON_CONDOR, IRON_BUTTERFLY,
+                         CALL_DEBIT, PUT_DEBIT, CALENDAR, BOUNCE_BULL_PUT})
 
 # Bonds, metals and commodities often rise in an equity sell-off — counting
 # them would make breadth look healthy exactly when it is not.
@@ -100,10 +105,15 @@ class StateGate:
 
 GATES: Dict[str, StateGate] = {
     NORMAL:       StateGate(1.0, ALL_SPREADS, True),
-    CAUTION:      StateGate(0.5, frozenset({BEAR_CALL, IRON_CONDOR, IRON_BUTTERFLY}), False),
-    DEFENSIVE:    StateGate(0.25, frozenset({BEAR_CALL}), False),
+    # Bullish structures (bull put, call debit) wait for NORMAL / RECOVERY;
+    # the bounce bull put is allowed in CAUTION because its own trigger
+    # (price reclaiming the N-day high) is the stabilisation evidence.
+    CAUTION:      StateGate(0.5, frozenset({BEAR_CALL, IRON_CONDOR, IRON_BUTTERFLY,
+                                            PUT_DEBIT, CALENDAR, BOUNCE_BULL_PUT}), False),
+    DEFENSIVE:    StateGate(0.25, frozenset({BEAR_CALL, PUT_DEBIT}), False),
     CAPITULATION: StateGate(0.0, frozenset(), False),
-    RECOVERY:     StateGate(0.5, frozenset({BULL_PUT, IRON_CONDOR, IRON_BUTTERFLY}), True),
+    RECOVERY:     StateGate(0.5, frozenset({BULL_PUT, IRON_CONDOR, IRON_BUTTERFLY,
+                                            CALL_DEBIT, CALENDAR, BOUNCE_BULL_PUT}), True),
 }
 
 
@@ -250,7 +260,8 @@ class Playbook:
 
 VOL_HIGH, VOL_LOW = 50.0, 30.0      # volatility-rank buckets (0–100)
 RSI_OVERSOLD, RSI_OVERBOUGHT = 30.0, 70.0
-_IMPLEMENTED = frozenset({"bull_put", "bear_call", "iron_condor", "mean_reversion"})
+_IMPLEMENTED = frozenset({"bull_put", "bear_call", "iron_condor", "mean_reversion",
+                          "call_debit", "put_debit", "calendar", "bounce_bull_put"})
 
 
 def playbook_for(regime: str, vol_rank: Optional[float], rsi: Optional[float]) -> Playbook:
