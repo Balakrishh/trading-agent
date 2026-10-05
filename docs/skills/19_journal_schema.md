@@ -179,6 +179,8 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 - **Close rows carry the fill-based P&L (2026-10-01).** `raw_signal.net_unrealized_pl` on a `closed` row is the realized P&L from the actual close fill when known (`pl_source: "fill"`), else the exit-signal mark (`pl_source: "signal_mark"`). The mark is always kept as `signal_mark_pl`; `close_fill_debit` records the fill. Rows written before 2026-10-01 have no `pl_source` and hold the mark.
 
+- **Risk-vetoed rejects carry a reason (2026-10-05).** When the plan is valid but RiskManager rejects it, `raw_signal.rejection_reason` is now `"risk: <first checks_failed entry>"` (previously `None`, which grouped as "(no reason recorded)"). `JournalReader.reject_reasons_today` falls back to `checks_failed[0]` for older rows.
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — run_mode split rationale, journal-as-source-of-truth principle.
@@ -190,4 +192,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-10-01.*
+*Last verified against repo HEAD on 2026-10-05.*

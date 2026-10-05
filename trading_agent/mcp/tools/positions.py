@@ -131,3 +131,19 @@ def get_journal_summary() -> Dict[str, Any]:
         "realized_pl_today": reader.realized_pl_today(),
         "reject_reasons_top5": reader.reject_reasons_today(top_n=5),
     }
+
+
+def get_position_valuations() -> Dict[str, Any]:
+    """The agent monitor's latest per-position valuation (mid P&L, exit signal).
+
+    Written by the agent every cycle after exit evaluation (skill 50), so
+    /triage uses exactly the numbers the exit rules use. ``age_seconds``
+    shows staleness; outside market hours it reflects the last cycle.
+    """
+    from trading_agent.position_snapshot import read_snapshot
+
+    snap = read_snapshot()
+    if snap is None:
+        return {"positions": [], "source": "unavailable",
+                "note": "no snapshot yet — the agent writes one each cycle"}
+    return {**snap, "source": "agent_monitor"}

@@ -14,6 +14,8 @@ Enforces four invariants:
 from __future__ import annotations
 
 import ast
+
+import pytest
 from pathlib import Path
 
 
@@ -334,3 +336,17 @@ def test_skill_48_mcp_entry_loads_dotenv(monkeypatch):
     monkeypatch.setattr(entry, "load_dotenv", lambda *a, **k: calls.append(1))
     assert entry.main(["--list-tools"]) == 0
     assert calls, "python -m trading_agent.mcp must call load_dotenv()"
+
+
+@pytest.mark.parametrize("raw,expected", [(0.0, None), (0, None), (None, None), (0.008, 0.008)])
+def test_skill_48_fundamentals_zero_short_interest_is_unknown(raw, expected):
+    """Schwab returned shortIntToFloat 0.0 for AAPL (2026-09-29) — treat
+    as not provided so screens can't read it as 'no short interest'."""
+    from trading_agent.market_data_schwab import SchwabMarketDataProvider
+    fund = {"peRatio": 30.0}
+    if raw is not None:
+        fund["shortIntToFloat"] = raw
+    fake_body = {"instruments": [{"symbol": "AAPL", "fundamental": fund}]}
+    prov = SchwabMarketDataProvider.__new__(SchwabMarketDataProvider)
+    prov._get = lambda path, params=None, timeout=None: fake_body   # noqa: SLF001,ARG005
+    assert prov.fetch_fundamentals("AAPL")["short_int_to_float"] == expected

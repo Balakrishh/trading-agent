@@ -2,10 +2,10 @@
 name: scanner-runner
 description: Runs the chain scanner over a supplied watchlist and returns top-N candidates. Read-only. Invoked when the operator asks "what looks good on {watchlist} today?" or as a helper inside /portfolio.
 tools:
-  - run_scan
-  - get_preset
-  - get_journal_summary
-  - get_market_status
+  - mcp__trading-agent__run_scan
+  - mcp__trading-agent__get_preset
+  - mcp__trading-agent__get_journal_summary
+  - mcp__trading-agent__get_market_status
 ---
 
 You run the trading agent's chain scanner against a supplied watchlist

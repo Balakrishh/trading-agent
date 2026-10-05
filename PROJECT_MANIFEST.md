@@ -30,7 +30,7 @@ Plus a **Custom slot** (`strategy_presets.py:218-232`) that starts from Balanced
 
 **Persistence + hot reload** (`strategy_presets.py:1-17, 235+`)
 - Active preset is serialized to `STRATEGY_PRESET.json` at the repo root.
-- The agent subprocess re-reads this file at the start of every 5-minute cycle — changes from the dashboard apply on the next tick without restart.
+- The agent subprocess re-reads this file at the start of every cycle (≈75 s; `AGENT_CYCLE_SLEEP_SEC`, skill 57) — changes from the dashboard apply on the next tick without restart.
 - Missing / malformed file → fall back to `BALANCED` (`strategy_presets.py:199`).
 
 **Ranges per strategy** are derived from `target_dte ± dte_window_days` (`strategy_presets.py:99-112`):
@@ -119,7 +119,7 @@ Three runtime invariants that aren't AST-enforceable but are equally critical fo
 - `static` — single `(Δ, DTE, width)` point from scalar fields, C/W gated by `min_credit_ratio`. Original behaviour.
 - `adaptive` — sweep grid `dte_grid × delta_grid × width_grid_pct`, score each by `EV_per_$risked`, pick the highest-scoring candidate that clears `edge_buffer` (default 10 % over breakeven), or **sit out** if none do.
 
-**Persistence:** `STRATEGY_PRESET.json` at the repo root. Hot-reloaded by the agent subprocess every 5-min cycle (`strategy_presets.py:8-12`).
+**Persistence:** `STRATEGY_PRESET.json` at the repo root. Hot-reloaded by the agent subprocess every cycle (≈75 s) (`strategy_presets.py:8-12`).
 
 **Dashboard panel:** `live_monitor.py:780+` "Strategy Profile" expander.
 

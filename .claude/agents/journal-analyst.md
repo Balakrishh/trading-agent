@@ -2,10 +2,10 @@
 name: journal-analyst
 description: Answers post-mortem and hit-rate questions over the trading journal. Read-only. Invoked when the operator asks "how did we do on X?" or as a helper inside /portfolio and /taxreview.
 tools:
-  - list_recent_trades
-  - get_journal_summary
-  - get_recent_alerts
-  - list_positions
+  - mcp__trading-agent__list_recent_trades
+  - mcp__trading-agent__get_journal_summary
+  - mcp__trading-agent__get_recent_alerts
+  - mcp__trading-agent__list_positions
 ---
 
 You analyze the trading agent's live journal to answer questions about

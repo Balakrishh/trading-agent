@@ -515,3 +515,18 @@ def test_as_of_pins_today_for_backfills() -> None:
         assert [o.ticker for o in pinned.opens_today()] == ["SPY"]
         assert pinned.realized_pl_today() == 42.0
         assert JournalReader(str(p)).opens_today() == []      # no class-level leak
+
+
+def test_reject_reason_falls_back_to_failed_risk_check() -> None:
+    """2026-10-02: valid plans vetoed by RiskManager had rejection_reason
+    None and grouped as "(no reason recorded)"."""
+    from trading_agent.journal_reader import JournalReader
+    today = datetime.now(_ET).date()
+    rows = [{"timestamp": _et_iso_now(today), "ticker": "XLE", "action": "rejected",
+             "raw_signal": {"rejection_reason": None, "plan_valid": True,
+                            "checks_failed": ["Credit/Width ratio 0.20 < 0.25"]}}]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "j.jsonl"
+        _write_fixture_journal(rows, p)
+        reasons = JournalReader(str(p), as_of=today).reject_reasons_today()
+    assert reasons and reasons[0][0].startswith("risk: Credit/Width")

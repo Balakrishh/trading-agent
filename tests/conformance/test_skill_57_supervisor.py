@@ -150,3 +150,14 @@ def test_skill_57_readonly_in_the_agent_supervisor_docstring():
     assert "NEVER imports the executor" in docstring, (
         "supervisor module docstring must state the read-only invariant"
     )
+
+
+def test_skill_57_in_session_sleep_is_configurable(monkeypatch):
+    """The in-session sleep is the gap between cycles (≈75 s cycle by
+    default, measured 2026-09-30); AGENT_CYCLE_SLEEP_SEC tunes it."""
+    from trading_agent.agent_supervisor import _MIN_SLEEP_SEC, in_session_sleep_sec
+    monkeypatch.delenv("AGENT_CYCLE_SLEEP_SEC", raising=False)
+    assert in_session_sleep_sec() == _MIN_SLEEP_SEC == 60
+    for raw, want in (("285", 285), ("5", 60), ("99999", 900), ("abc", 60)):
+        monkeypatch.setenv("AGENT_CYCLE_SLEEP_SEC", raw)
+        assert in_session_sleep_sec() == want

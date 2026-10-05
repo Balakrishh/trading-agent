@@ -915,8 +915,12 @@ class SchwabMarketDataProvider(MarketDataProvider):
             "operating_margin_ttm": _safe_float(_pick(
                 "operatingMargin", "operatingProfitMarginTTM",
                 "operatingMarginMRQ", "operatingMarginTTM")),
+            # Schwab sends an explicit 0.0 when it has no short-interest
+            # figure for the account's entitlement (AAPL read 0.0 on
+            # 2026-09-29). A listed equity never has exactly zero short
+            # interest, so 0.0 means "not provided" → None.
             "short_int_to_float":   _safe_float(_pick(
-                "shortIntToFloat", "shortIntToFloatRatio")),
+                "shortIntToFloat", "shortIntToFloatRatio")) or None,
             "as_of":              datetime.now(timezone.utc).isoformat(),
             # Optional raw echo — flip
             # SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW=true to see every

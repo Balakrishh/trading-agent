@@ -61,4 +61,4 @@ The brief is rendered as prose sections in this order:
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

@@ -53,12 +53,12 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 ## 2. Wheel improvements
 
 - [x] Bid/ask width gate in `_score_cash_secured_put` / covered calls, reusing the spread scanner's `max_leg_spread_pct_mid` (5 %) and `max_leg_spread_cents`. Found 2026-09-30 pre-market: BMY $60P 0.40/1.11, VZ $44P 0.32/0.85 — mid-based yields of 20 %+ on untradeable quotes.
-- [ ] `wheel_screen` treats a JSON-array string (`'["VZ"]'`, as some MCP clients send lists) as one ticker → `missing:fundamentals`. Parse JSON-looking strings before the comma split. Found 2026-09-30 during `/propose VZ`.
+- [x] `wheel_screen` treats a JSON-array string (`'["VZ"]'`, as some MCP clients send lists) as one ticker → `missing:fundamentals`. Parse JSON-looking strings before the comma split. Found 2026-09-30 during `/propose VZ`.
 - [ ] Spread entries have the same estimate-vs-fill gap (SPY IC: plan 0.49, fill 0.48). Spread orders are fire-and-forget, so record the fill when the order tracker (skill 26/`order_tracker.py`) sees it filled, reusing `OrderExecutor._record_fill_credit`.
 - [ ] 200-day trend filter: no cash-secured puts on a stock below its 200-day average.
 - [ ] One pick per sector (banks and telecom cluster today).
 - [ ] Wire `csp_*` / `cc_*` tunables into `PresetConfig` (skill 40 §3.3): `to_summary_line()`, Streamlit Strategy-Profile panel, `agent.py`.
-- [ ] Fundamentals: map `short_int_to_float` to `None` when Schwab returns 0.0.
+- [x] Fundamentals: map `short_int_to_float` to `None` when Schwab returns 0.0.
 
 ## 3. Strategy research
 
@@ -67,11 +67,12 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 
 ## 4. Hygiene
 
-- [ ] **`/triage` must use the agent's valuation, not Alpaca's indicative feed.** 2026-09-30 10:15 ET: triage priced the SPY IC legs from Alpaca's free `indicative` options snapshots and reported −$392 ("$16 from stop loss, close now"); the agent's Schwab-mid re-mark showed −$112 to −$136 and HOLD. Fix: add option-symbol support to MCP `get_quote` (data server `/quotes`), or expose the monitor's per-position mid P&L via a read-only tool, and update skill 50 so triage never mixes quote sources.
-- [ ] **Correct the cycle interval in docs.** Logs show a monitor cycle roughly every 75 s (10:21:48, 10:23:05, 10:24:21 …; supervisor restarts the agent ~60 s after each cycle), not every 5 minutes. The 3-cycle exit debounce is therefore ~4 min, not 15. Fix the Trading Day Flow artifact, skills 44 / 57 / PROJECT_MANIFEST, and decide whether the cadence is intended (API load, journal volume, debounce length).
-- [ ] **Subagent `tools:` lists use bare MCP names** (`list_recent_trades` …), so `journal-analyst` (and likely `scanner-runner`, `risk-reviewer`) start with zero tools and Claude Code refuses to spawn them (found 2026-10-02 in the weekly review). Use `mcp__trading-agent__<name>`; check `scan_subagent_allowlists.py` accepts the prefixed form.
-- [ ] `tests/test_after_hours_shutdown.py` SIGKILLs pytest (exit 137) when run after market close — **CI risk for evening pushes**. `test_after_close_calls_graceful_exit_0` patches `_is_within_market_hours` and `graceful_exit`, so `run_cycle` continues past the mocked exit; suspects: `_maybe_send_eod_summary()` (agent.py:727, real clock) or the real `TradingAgent` picking up the local `.env`. Reproduce after 16:05 ET, in a clean worktree with `env -i`, to see whether CI is affected at all.
+- [x] **`/triage` must use the agent's valuation, not Alpaca's indicative feed.** 2026-09-30 10:15 ET: triage priced the SPY IC legs from Alpaca's free `indicative` options snapshots and reported −$392 ("$16 from stop loss, close now"); the agent's Schwab-mid re-mark showed −$112 to −$136 and HOLD. Fix: add option-symbol support to MCP `get_quote` (data server `/quotes`), or expose the monitor's per-position mid P&L via a read-only tool, and update skill 50 so triage never mixes quote sources.
+- [x] **Correct the cycle interval in docs.** Logs show a monitor cycle roughly every 75 s (10:21:48, 10:23:05, 10:24:21 …; supervisor restarts the agent ~60 s after each cycle), not every 5 minutes. The 3-cycle exit debounce is therefore ~4 min, not 15. Fix the Trading Day Flow artifact, skills 44 / 57 / PROJECT_MANIFEST, and decide whether the cadence is intended (API load, journal volume, debounce length).
+- [x] **Subagent `tools:` lists use bare MCP names** (`list_recent_trades` …), so `journal-analyst` (and likely `scanner-runner`, `risk-reviewer`) start with zero tools and Claude Code refuses to spawn them (found 2026-10-02 in the weekly review). Use `mcp__trading-agent__<name>`; check `scan_subagent_allowlists.py` accepts the prefixed form.
+- [x] *(2026-10-05: no longer reproducible — 20/20 pass outside market hours in a clean worktree and with the local `.env`; watch CI on evening pushes.)* `tests/test_after_hours_shutdown.py` SIGKILLs pytest (exit 137) when run after market close — **CI risk for evening pushes**. `test_after_close_calls_graceful_exit_0` patches `_is_within_market_hours` and `graceful_exit`, so `run_cycle` continues past the mocked exit; suspects: `_maybe_send_eod_summary()` (agent.py:727, real clock) or the real `TradingAgent` picking up the local `.env`. Reproduce after 16:05 ET, in a clean worktree with `env -i`, to see whether CI is affected at all.
 - [x] CI red since 2026-09-29 (fixed 2026-10-01): skill-freshness failures (footers stamped before commit / in local time vs CI's UTC), stale traceability matrix, missing fastapi/uvicorn/httpx2 in requirements, and four tests stale since the 29bb020 cache-off default. Before pushing: commit, then run `TZ=UTC python scripts/checks/scan_skill_freshness.py` and the CI steps in a clean worktree.
+- [x] "(no reason recorded)" rejects were valid plans vetoed by RiskManager (reason only in `checks_failed`); the writer now records `risk: <first failed check>` and the reader falls back to `checks_failed` (2026-10-05).
 - [x] The "23 pre-existing test failures" are local-environment only: a clean worktree with `env -i` (no `.env`, UTC) gives 0 failures (2026-10-01). Run local checks that way before trusting a failure count.
 - [ ] Delete merged branches: `fix/iron-condor-wing-width`, `fix/mcp-dataserver-env-key`, `feat/wheel-lifecycle`.
 

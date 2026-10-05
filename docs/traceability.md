@@ -29,9 +29,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 17 | close failure and cooldown | agent.py, streamlit/live_monitor.py, sector_map.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_sector_map.py, test_streamlit/test_live_monitor.py | conformance/test_skill_17_pdt_reactive_block.py, conformance/test_skill_17_position_cap.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md, 05_ghost_process_diagnostic.md |
 | 18 | order submission idempotency | executor.py | test_executor.py, test_production_readiness.py, test_wheel_integration.py | conformance/test_skill_18_order_submission_idempotency.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md |
 | 19 | journal schema | journal_kb.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_dedup.py, test_journal_derived_cooldown.py, test_journal_kb.py, test_production_readiness.py | conformance/test_skill_19_journal_reader.py, conformance/test_skill_19_journal_schema.py | 01_daily_close_review.md, 03_zombie_position_recovery.md |
-| 28 | position monitor spread grouping | position_monitor.py | test_backtest/test_sim_position.py, test_executor.py, test_position_monitor.py, test_production_readiness.py, test_wheel_integration.py | conformance/test_skill_28_position_monitor_spread_grouping.py | 06_ticker_dashboard_diagnostic.md |
+| 28 | position monitor spread grouping | position_monitor.py | test_backtest/test_sim_position.py, test_executor.py, test_position_monitor.py, test_position_snapshot.py, test_production_readiness.py, test_wheel_integration.py | conformance/test_skill_28_position_monitor_spread_grouping.py | 06_ticker_dashboard_diagnostic.md |
 | 29 | per leg liquidity gate | chain_scanner.py, decision_engine.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py | conformance/test_skill_29_leg_liquidity_gate.py | — |
-| 30 | profit target management | strategy_presets.py, position_monitor.py, backtest/runner.py | test_backtest/test_sim_position.py, test_chain_scanner.py, test_executor.py, test_position_monitor.py, test_production_readiness.py, test_streamlit/test_backtest_ui.py, test_wheel_integration.py | conformance/test_skill_30_profit_target_management.py | — |
+| 30 | profit target management | strategy_presets.py, position_monitor.py, backtest/runner.py | test_backtest/test_sim_position.py, test_chain_scanner.py, test_executor.py, test_position_monitor.py, test_position_snapshot.py, test_production_readiness.py, test_streamlit/test_backtest_ui.py, test_wheel_integration.py | conformance/test_skill_30_profit_target_management.py | — |
 | 31 | defensive roll | defensive_roll_evaluator.py, executor.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_wheel_integration.py | conformance/test_skill_31_defensive_roll.py | — |
 | 32 | telegram operator alerts | telegram_notifier.py, agent.py, streamlit/live_monitor.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_streamlit/test_live_monitor.py | conformance/test_skill_32_telegram_alerts.py | — |
 | 33 | pdt dte cap | strategy_presets.py, strategy.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_executor.py, test_journal_derived_cooldown.py, test_production_readiness.py, test_risk_manager.py, test_strategy.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_33_pdt_dte_cap.py | — |
@@ -44,17 +44,17 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 40 | long term options evaluator | long_term_evaluator.py, decision_engine.py, streamlit/long_term_evaluator_ui.py | test_agent_integration.py, test_backtest/test_synthetic_chain.py, test_position_monitor.py, test_wheel_integration.py | conformance/test_skill_40_long_term_evaluator.py | — |
 | 41 | positions provider | positions_provider.py | test_wheel_integration.py | conformance/test_skill_41_positions_provider.py | — |
 | 42 | portfolio alert scheduler | portfolio_alert_scheduler.py, telegram_notifier.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_journal_derived_cooldown.py, test_production_readiness.py | conformance/test_skill_42_portfolio_alert_scheduler.py | — |
-| 44 | position monitor scaling | position_monitor.py | test_backtest/test_sim_position.py, test_executor.py, test_position_monitor.py, test_production_readiness.py, test_wheel_integration.py | conformance/test_skill_44_position_monitor_scaling.py | — |
+| 44 | position monitor scaling | position_monitor.py | test_backtest/test_sim_position.py, test_executor.py, test_position_monitor.py, test_position_snapshot.py, test_production_readiness.py, test_wheel_integration.py | conformance/test_skill_44_position_monitor_scaling.py | — |
 | 45 | iron butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_45_iron_butterfly.py | — |
 | 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
 | 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | — | conformance/test_skill_47_schwab_data_api.py | — |
-| 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | conformance/test_skill_48_mcp_readonly.py, conformance/test_subagent_and_command_shape.py | — |
-| 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | — | ❌ MISSING | — |
-| 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | — | ❌ MISSING | — |
+| 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_position_snapshot.py | conformance/test_skill_48_mcp_readonly.py, conformance/test_subagent_and_command_shape.py | — |
+| 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_position_snapshot.py | ❌ MISSING | — |
+| 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | test_position_snapshot.py | ❌ MISSING | — |
 | 51 | pre trade approval | mcp/tools/strategy.py, pending_orders_writer.py, executor_promote.py | test_wheel_integration.py | ❌ MISSING | — |
-| 52 | watchlist curation | mcp/tools/positions.py, watchlist_store.py, journal_reader.py | test_watchlist_store.py | ❌ MISSING | — |
+| 52 | watchlist curation | mcp/tools/positions.py, watchlist_store.py, journal_reader.py | test_position_snapshot.py, test_watchlist_store.py | ❌ MISSING | — |
 | 53 | incident response | mcp/tools/market.py, exception_monitor.py, journal_reader.py | — | ❌ MISSING | — |
-| 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | — | ❌ MISSING | — |
+| 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | test_position_snapshot.py | ❌ MISSING | — |
 | 55 | pending orders promotion | executor_promote.py, pending_orders_writer.py, strategy_presets.py | test_chain_scanner.py, test_streamlit/test_backtest_ui.py, test_wheel_integration.py | conformance/test_skill_55_promote_gate.py | — |
 | 56 | daily journal reviewer | daily_reviewer.py, daily_reviewer_main.py, pending_preset_updates_writer.py, apply_preset_update.py | eval/test_daily_reviewer_scenarios.py | conformance/test_skill_56_daily_reviewer.py | — |
 | 57 | agent supervisor | agent_supervisor.py | — | conformance/test_skill_57_supervisor.py | — |
@@ -85,6 +85,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/news_aggregator.py` (last modified 2026-04-19)
 - `trading_agent/order_tracker.py` (last modified 2026-05-01)
 - `trading_agent/ports.py` (last modified 2026-05-06)
+- `trading_agent/position_snapshot.py` (last modified 2026-10-05)
 - `trading_agent/rsi_gate.py` (last modified 2026-05-06)
 - `trading_agent/sentiment_cache.py` (last modified 2026-04-19)
 - `trading_agent/sentiment_pipeline.py` (last modified 2026-04-19)
@@ -104,7 +105,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/wheel_lifecycle.py` (last modified 2026-09-29)
 - `trading_agent/wheel_policy.py` (last modified 2026-09-29)
 
-**Orphan source coverage:** 38 / 99 files (38% uncovered)
+**Orphan source coverage:** 39 / 100 files (39% uncovered)
 
 ## Orphan skills (no conformance test)
 

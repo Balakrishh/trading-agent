@@ -578,9 +578,13 @@ class JournalReader:
             rs = rec.get("raw_signal") or {}
             if not isinstance(rs, dict):
                 continue
+            failed = rs.get("checks_failed")
             reason = (
                 rs.get("rejection_reason")
                 or rs.get("reason")
+                # Rows before 2026-10-05: a valid plan vetoed by the risk
+                # manager carried its reason only in checks_failed.
+                or (f"risk: {failed[0]}" if isinstance(failed, list) and failed else None)
                 or "(no reason recorded)"
             )
             # Truncate noisy long reasons but keep them grouping-stable

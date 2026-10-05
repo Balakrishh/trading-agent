@@ -12,9 +12,16 @@ multiple open strategies, ASK before picking one — never guess.
 Call:
 
 1. `get_position(ticker=..., strategy=...)`
-2. `get_preset()`
-3. `get_quote(symbol=...)` (the underlying)
-4. If proximity looks close: `score_candidate(underlying=..., strategy=..., params={target_dte: preset.dte_iron_condor})`
+2. `get_position_valuations()` — the agent monitor's own per-position mid
+   P&L, exit signal, short delta and underlying price from its latest cycle.
+   **Use these numbers for every threshold.** Do not re-price legs from
+   another feed (2026-09-30: Alpaca's indicative feed gave −$392 "close now"
+   while the agent's Schwab mid was −$112 HOLD). If `age_seconds` is large
+   (agent not running / after hours), say the valuation is as of that time.
+3. `get_preset()`
+4. `get_quote(symbol=...)` (the underlying) — only if the snapshot lacks
+   `underlying_price`.
+5. If proximity looks close: `score_candidate(underlying=..., strategy=..., params={target_dte: preset.dte_iron_condor})`
 
 Apply the three predicates in priority order — profit target → stop loss
 → strike-proximity + defensive roll (only if `preset.defensive_roll_enabled`
