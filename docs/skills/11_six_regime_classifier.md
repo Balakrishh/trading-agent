@@ -16,6 +16,7 @@ The classifier exists to drive strategy dispatch:
 - **Bearish** → Bear Call.
 - **Sideways** → Bull Put or Bear Call depending on leadership Z-score (skill 08), or Iron Condor.
 - **Mean-Reversion** → Mean-Reversion strategy (sell credit *against* the move expecting reversal).
+- *Since 2026-10-05* the regime is one axis of the playbook table (`market_state.playbook_for`, skill 58): with low volatility (vol rank < 30) a regime whose credit plan finds no positive-EV candidate falls back to a call debit (bullish), put debit (bearish) or calendar (sideways); Bearish + RSI < 30 routes to the bounce bull put / wait playbooks instead of a bear call (skill 59).
 
 We want the rules to be **deterministic**, **priority-ordered**, and **single-sourced**. There must be exactly one function in the codebase that maps `(price, sma, bb_width, …) → Regime`. The architectural invariant scanner (`scripts/checks/scan_invariant_check.py`) enforces this — any second implementation is a CI failure.
 
@@ -133,4 +134,4 @@ def _determine_regime(self, price: float, sma50: float, sma200: float,
 
 ---
 
-*Last verified against repo HEAD on 2026-05-22.*
+*Last verified against repo HEAD on 2026-10-05.*

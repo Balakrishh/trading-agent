@@ -38,8 +38,9 @@ python -m trading_agent.agent --dry-run
 # launch the dashboard (Live + Backtest + LLM tabs)
 streamlit run trading_agent/streamlit/app.py
 
-# 5-minute cron schedule
-*/5 9-16 * * 1-5 cd /path/to/trading-agent && python -m trading_agent.agent >> logs/cron.log 2>&1
+# continuous: the launchd supervisor restarts the agent after every cycle
+# (skill 57) — a cycle ≈ every 75 s in market hours (AGENT_CYCLE_SLEEP_SEC=60)
+python -m trading_agent.agent_supervisor
 ```
 
 After-hours behaviour: exits cleanly before 9:25 AM ET, after 4:05 PM ET, and on weekends. Override with `FORCE_MARKET_OPEN=true` for paper testing.
@@ -56,7 +57,8 @@ Each cycle runs two stages sequentially: monitor existing positions first, then 
 │                                                                     │
 │  STAGE 1 — Monitor Open Positions                                   │
 │    Position Monitor → Exit Signal Check → Order Tracker             │
-│      (50 % stop-loss, 75 % profit, regime shift, DTE safety)        │
+│      (credit: 50 % profit at natural, 3× hard stop, strike prox.;   │
+│       debit: 50 % of max profit / 50 % of debit stop; DTE safety)   │
 │                                                                     │
 │  STAGE 2 — Open New Positions  (per ticker)                         │
 │    I·Perceive → II·Classify → III·Plan → IV·Risk → V·LLM → VI·Exec  │
@@ -78,27 +80,37 @@ Each cycle runs two stages sequentially: monitor existing positions first, then 
 
 ## Strategy Selection
 
-Strategy choice follows a strict priority order:
+*Current as of 2026-10-05 (backlog phases 1–5, skills 58–60).* Every cycle the agent first rates the **whole market**, then plans each ticker through a strict priority order, then gates the plan.
 
-| Priority | Regime | Detection | Strategy |
-|---|---|---|---|
-| **1** | **Mean Reversion** | Price touches 3-σ Bollinger Band | Mean-Reversion Spread |
-| 2 | **VIX inhibit** | `vix_z > +2 σ` AND regime ∈ {Bullish, Sideways} | Bear Call (demoted) |
-| 3 | **Bullish + Lead-z** | Bullish AND `leadership_z > +1.5 σ` vs anchor | Bull Put (leadership bias) |
-| 4 | **Sideways + Lead-z** | Sideways AND `leadership_z > +1.5 σ` vs anchor | Bull Put (leadership bias) |
-| 5 | **Bullish** | `Price > SMA-200` AND `SMA-50 slope > 0` | Bull Put |
-| 6 | **Bearish** | `Price < SMA-200` AND `SMA-50 slope < 0` | Bear Call |
-| 7 | **Sideways** | Between SMAs / narrow Bollinger | Iron Condor |
+**0 · Market risk state (skill 58).** SPY vs its 20/50/200-day averages, SPY RSI, VIX, VIX/VIX3M and equity-ETF breadth → `NORMAL / CAUTION / DEFENSIVE / CAPITULATION / RECOVERY`. It sets a size multiplier (1.0 / 0.5 / 0.25 / 0, 0.5 in RECOVERY) and which strategy families may open; CAPITULATION skips all new entries. Exits are never gated.
 
-**Mean Reversion.** A 3-σ band touch is statistically extreme; the agent expects reversion. Upper touch → Bear Call above price; lower touch → Bull Put below price.
+**Per-ticker plan, first match wins:**
 
-**Z-scored leadership bias.** `LEADERSHIP_ANCHORS` in `regime.py` maps each ticker to a sibling benchmark (`SPY → QQQ`, sector ETFs → SPY, …). `MarketDataProvider.get_leadership_zscore(ticker, anchor)` normalises the latest 5-min return differential against its own ~20-bar rolling distribution (first 2 open bars dropped to suppress the open-print spike). When `z > 1.5 σ` and regime is Bullish/Sideways, the planner picks Bull Put instead of the default mapping.
+| Priority | Condition | Plan |
+|---|---|---|
+| **1** | **Mean reversion** — price touches a 3-σ Bollinger band | Mean-Reversion Spread (bear call above / bull put below) |
+| 2 | **VIX inhibit** — `vix_z > +2 σ` and regime Bullish / Sideways | Bear Call (demoted) |
+| 3 | **Leadership bias** — `leadership_z > +1.5 σ`, Bullish / Sideways | Bull Put |
+| 4 | **Oversold downtrend** — Bearish, RSI < 30 | vol rank ≥ 30: **Bounce Bull Put** once price reclaims its 5-day high close (short strike below the 10-day low), else no trade; vol rank < 30: no trade (*wait for stabilisation*) — never a bear call into RSI < 30 |
+| 5 | **Regime credit plan** | Bullish → Bull Put · Bearish → Bear Call · Sideways → Iron Butterfly (opt-in) then Iron Condor |
+| 6 | **Low-volatility fallback** — the credit plan found no positive-EV candidate and vol rank < 30 | Bullish → **Call Debit Spread** · Bearish → **Put Debit Spread** · Sideways → **Calendar Spread** |
 
-**VIX inter-market gate.** `^VIX` is fetched via yfinance (Alpaca doesn't carry the index) and z-scored over the last ~20 5-min bars. `vix_z > +2 σ` flips `inter_market_inhibit_bullish=True` and demotes Bull Put / Iron Condor → Bear Call for that cycle. Mean-reversion bypasses the gate.
+The playbook table behind rows 4–6 (trend × volatility × RSI → playbook) lives in `market_state.playbook_for`; every journal row carries `playbook` and `playbook_implemented`.
 
-**Adaptive spread width.** No longer flat `$5`. Per chain the planner computes `width = max(SPREAD_WIDTH_FLOOR, 3 × strike_grid_step, 0.025 × spot)`, snapped UP to grid. Result: `$5` on an `$80` ticker (floor wins), `$15-20` on SPY/QQQ at `$700` (spot-percentage wins). The legacy `SPREAD_WIDTH = $5` is now a hard floor, never a target.
+**Then the gates, in order:** RiskManager (below) → market-state strategy gate (e.g. CAUTION blocks new bull puts / call debits / CSPs) → ladder gate → total-risk sizing. A rejected plan is journaled with its reason (`risk: <first failed check>`).
 
-**DTE targeting.** Theta capture is concentrated 25-40 DTE. Default `TARGET_DTE = 35`, accepted range `(28, 45)`. Highest-DTE Friday in range wins ties.
+**Credit vs debit economics.**
+* Credit structures need positive EV with `|Δ|` as P(ITM): `C/W ≥ |Δshort| × (1 + edge_buffer)` (one formula in three files, CI-enforced).
+* Debit structures (skill 59) are not required to show model EV — their edge is the trend / range thesis. Instead the debit must be ≤ **market mid × (1 + `debit_max_overpay`)** (5 %) and reward/risk ≥ 1.0. Verticals buy the |Δ|≈0.50 leg and sell one `width_grid_pct` step out (smallest debit first); calendars sell the near (≈21 DTE) and buy the far (+28 d) strike nearest spot, payoff shape from Black-Scholes rescaled to the mid.
+* All pricing uses `fill_model = "natural"` (sell at the bid, buy at the ask) — the paper account filled only at natural.
+
+**Wheel (operator-driven, skill 40).** Cash-secured puts / covered calls are screened by MCP `wheel_screen` (fundamentals, earnings, per-leg quote gate, no CSP below the 200-day average, one ticker per sector, CSP pause in CAUTION / DEFENSIVE / CAPITULATION), staged with `/propose`, and submitted by `executor_promote` (mid → halfway → bid). The agent monitors them (50 % profit, |Δ| ≥ 0.45 stop; assignment accepted) and reconciles expiries.
+
+**Z-scored leadership bias.** `LEADERSHIP_ANCHORS` in `regime.py` maps each ticker to a sibling benchmark (`SPY → QQQ`, sector ETFs → SPY, …). The latest 5-min return differential is z-scored against its own ~20-bar distribution; `z > 1.5 σ` in a Bullish/Sideways regime picks Bull Put.
+
+**VIX inter-market gate.** `^VIX` (yfinance) z-scored over ~20 5-min bars; `vix_z > +2 σ` sets `inter_market_inhibit_bullish` and demotes Bull Put / Iron Condor → Bear Call for that cycle. Mean reversion bypasses it.
+
+**DTE and width.** Per-strategy and per-preset (skill 13): verticals / condors / mean reversion / debit (30) / calendar near (21); the adaptive scanner sweeps `dte_grid × delta_grid × width_grid_pct`. There is no single `TARGET_DTE`.
 
 ---
 
@@ -106,7 +118,7 @@ Strategy choice follows a strict priority order:
 
 `chain_scanner.py` replaces the legacy "single point in chain space" planner with a scored sweep. For every `(DTE, target Δshort, width)` tuple in the configured grid the scanner fetches the relevant put/call chain, picks the contract closest to target Δ, picks the protective leg `width × spot` strikes away (snapped to grid), prices the spread off NBBO mids, and scores it.
 
-**Credit pricing — `_quote_credit`.** `short_mid − long_mid − fill_haircut`, where each leg's mid is `(bid+ask)/2` when both are positive and the conservative side (short→bid, long→ask) when a quote is missing. Default `fill_haircut = $0.02` matches the executor's per-leg slippage budget so scored credit and targeted-fill limit price stay in sync. Worst-case `short_bid − long_ask` is no longer used for scoring.
+**Credit pricing — `_quote_credit`.** With the default `fill_model = "natural"` (backlog §6.1): `short_bid − long_ask` — what the paper account actually fills at. With `"mid"`: `short_mid − long_mid − fill_haircut` ($0.02), conservative side when a quote is missing. Debits use the mirror, `_quote_debit` (natural: `long_ask − short_bid`).
 
 **Score formula:**
 
@@ -132,25 +144,39 @@ Every trade must pass **all eight checks** before execution:
 | # | Check | Rule |
 |---|---|---|
 | 1 | Plan Validity | Strategy planner found valid strikes and contracts |
-| 2 | Credit-to-Width | **Adaptive**: `C/W ≥ |Δshort| × (1 + edge_buffer)`. **Static**: `C/W ≥ MIN_CREDIT_RATIO` (0.33) |
-| 3 | Sold Delta | `≤ MAX_DELTA` (default 0.20) |
-| 4 | Max Loss | `≤ MAX_RISK_PCT × equity` (default 2 %) |
+| 2 | Credit-to-Width | **Adaptive**: `C/W ≥ |Δshort| × (1 + edge_buffer)`. **Static**: `C/W ≥ min_credit_ratio`. **Debit plans** (skill 59): `0 < debit ≤ max_debit` (mid × (1 + overpay)) instead |
+| 3 | Sold Delta | `≤ max_delta` — credit plans only (a debit spread's sold leg is a hedge; a calendar's is ATM by design) |
+| 4 | Max Loss | `≤ max_risk_pct × equity` (preset; 2 % live) × market-state size multiplier, capped by the remaining total-risk budget |
 | 5 | Account Type | Must be `paper` |
 | 6 | Market Hours | Market must be open |
 | 7 | Underlying Liquidity | `bid/ask spread < max(LIQUIDITY_MAX_SPREAD, LIQUIDITY_BPS_OF_MID × mid)`; stale quotes (`spread/mid > STALE_SPREAD_PCT`) soft-pass with a WARNING |
 | 8 | Buying Power | `available BP ≥ (1 − MAX_BUYING_POWER_PCT) × equity` |
 
-`Max Loss = (Width − Credit) × 100`. The sentiment pipeline is advisory only — it can tighten constraints, never loosen them.
+`Max Loss = (Width − Credit) × 100` for credit structures and `Debit × 100` for debit structures. The sentiment pipeline is advisory only — it can tighten constraints, never loosen them.
+
+**Portfolio caps (skill 37).**
+* **Per ticker:** up to `max_positions_per_ticker` (2) — a second position only on a later day and with an expiration ≥ `ladder_min_gap_days` (7) from the open one (laddering). Pending orders block the ticker.
+* **Per sector:** 2 (`sector_map.py`); counts pending orders and every submission earlier in the same cycle.
+* **Total open risk:** Σ max loss of open defined-risk positions ≤ `max_total_risk_pct` (10 %) of equity; each trade is sized into what remains; Wheel legs excluded (their collateral has its own 40 %-of-equity rule).
+* **Market state:** size multiplier and allowed families (above).
 
 **Daily Drawdown Circuit Breaker.** Equity drop > `DAILY_DRAWDOWN_LIMIT` (default 5 %) from the day's open → log + `os._exit(1)`.
 
 **Liquidation Mode.** Available BP > `MAX_BUYING_POWER_PCT` (default 80 %) → Stage 2 skipped; Stage 1 continues.
 
-**Capital Retainment Guards.** Macro Guard (skips Bull Put when `price < SMA-200`); High-IV Block (skips ALL new entries when realized-vol IV rank > 95th percentile).
+**Capital Retainment Guards.** Macro Guard (skips Bull Put when `price < SMA-200`); High-IV Block (skips ALL new entries when realized-vol IV rank > 95th percentile); RSI gate (no bear call at RSI ≤ 30, no iron condor while RSI is outside [35, 65)).
 
-**Position Exit Debouncing.** Non-immediate exit signals require **3 consecutive cycles** (~15 min). Bypassed by `HARD_STOP` (lost ≥ 3× initial credit), `STRIKE_PROXIMITY` (within 1 % of any short strike), `DTE_SAFETY` (Thursday after 15:30 ET, expiry next day).
+**Exits.**
+* *Credit spreads:* profit target 50 % of credit judged at the natural cost to close; `HARD_STOP` at 3× credit; 50 %-of-max-loss stop; `STRIKE_PROXIMITY` (within 1 % of a short strike, optional defensive roll); `DTE_SAFETY` (15:30 ET on the last trading day before expiry); regime shift.
+* *Debit spreads / calendars (skill 59):* stop at 50 % of the debit; target 50 % of max profit (verticals) or 25 % of the debit (calendars); DTE safety on the near expiry; regime exit only on a trend **reversal** (calendars: when no longer sideways).
+* *Wheel:* 50 % of credit; CSP |Δ| ≥ 0.45 stop; otherwise assignment is accepted.
+* Closes go out as one multi-leg order (improved, then natural price); realized P&L is computed from the actual fills.
 
-**Live Quote Refresh at Execution.** The executor fetches a fresh, no-cache quote for both leg symbols immediately before order submission and re-validates economics-bearing guardrails (credit ratio, max loss) against the live credit.
+**Position Exit Debouncing.** Non-immediate exit signals require **3 consecutive cycles** (≈ 4 min at the ~75 s cadence). Bypassed by `HARD_STOP`, `STRIKE_PROXIMITY` and `DTE_SAFETY`.
+
+**Live Quote Refresh at Execution.** The executor re-quotes both legs right before submission and re-validates the economics-bearing checks (credit ratio or debit cap, max loss) against the live price; debit orders go at natural, credit orders one tick inside.
+
+**Measurement (skill 60).** Entry fills are written back into the trade plans the monitor reads; every journaled plan logs a realized-volatility POP beside the delta POP (shadow, no trading effect); MCP `get_playbook_scorecard` reports win rate / expectancy / return on risk per playbook with an advisory size after 20 trades.
 
 ---
 
@@ -235,7 +261,7 @@ Both layers are off by default. Each degrades gracefully if its dependencies are
 
 ### Multi-Source Sentiment Pipeline
 
-A `SentimentPipeline` facade (`sentiment_pipeline.py`) runs concurrently in a background thread during every cycle and delivers a `VerifiedSentimentReport` to the LLM Analyst at Phase V. Three tiers of gating prevent redundant local-LLM calls within the 5-minute budget.
+A `SentimentPipeline` facade (`sentiment_pipeline.py`) runs concurrently in a background thread during every cycle and delivers a `VerifiedSentimentReport` to the LLM Analyst at Phase V. Three tiers of gating prevent redundant local-LLM calls within the per-cycle budget (a cycle runs about every 75 s).
 
 | Tier | Gate | When it fires | LLM calls |
 |---|---|---|---|

@@ -9,16 +9,20 @@
 
 ## 1. What this project is
 
-An autonomous options credit-spread trading agent. Primary goal is **capital
-preservation** — every trade has a known, capped maximum loss. The agent
-runs a 5-minute cycle that scans option chains, picks the highest-EV
-risk-defined credit spread, and submits a multi-leg order via the Alpaca
-paper-trading API.
+An autonomous, defined-risk options trading agent. Primary goal is **capital
+preservation** — every trade has a known, capped maximum loss. A cycle runs
+about every 75 s in market hours: it rates the whole market (risk state,
+skill 58), picks the highest-EV credit spread per ticker — or, when premium
+is too cheap to sell, a debit spread / calendar, or an oversold-bounce bull
+put (skill 59) — and submits a multi-leg order via the Alpaca
+paper-trading API. A Wheel leg (cash-secured puts / covered calls, skill 40)
+runs alongside, staged by the operator through `/propose`.
 
 The same scoring logic powers two surfaces:
 
-- **Live agent** — `python -m trading_agent.agent` runs one cycle (or a
-  loop). Designed to be cron-driven every 5 minutes during market hours.
+- **Live agent** — `python -m trading_agent.agent` runs one cycle; the
+  launchd supervisor (`agent_supervisor`, skill 57) restarts it ~60 s after
+  each cycle in market hours (≈ every 75 s) and sleeps to the next open.
 - **Backtester** — runs from the Streamlit UI; replays historical bars
   through the same decision engine, risk manager, sizer, and exit-monitor
   the live agent uses. Lives in `trading_agent/backtest/` (added
@@ -153,37 +157,53 @@ I/O, no calendar lookups, no broker calls. It takes `ChainSlice`s in
 DTE), runs the full `(Δ × width)` sweep, and returns ranked
 `SpreadCandidate`s plus a `ScanDiagnostics` block.
 
-### 3.3 Strategy selection priority
+### 3.3 Strategy selection priority (current as of 2026-10-05)
 
-| Priority | Regime | Trigger | Strategy |
-|---|---|---|---|
-| 1 | Mean Reversion | 3-σ Bollinger touch | MR Spread |
-| 2 | VIX inhibit | `vix_z > +2 σ` AND regime ∈ {Bullish, Sideways} | Bear Call (demoted) |
-| 3 | Bullish + Lead-z | Bullish AND `leadership_z > +1.5 σ` | Bull Put (leadership bias) |
-| 4 | Sideways + Lead-z | Sideways AND `leadership_z > +1.5 σ` | Bull Put (leadership bias) |
-| 5 | Bullish | Price > SMA-200 AND SMA-50 slope > 0 | Bull Put |
-| 6 | Bearish | Price < SMA-200 AND SMA-50 slope < 0 | Bear Call |
-| 7 | Sideways | Between SMAs / narrow Bollinger | Iron Condor |
+**Before any ticker:** the market risk state (skill 58 — SPY trend / RSI,
+VIX, VIX/VIX3M, breadth) sets the size multiplier (1.0 / 0.5 / 0.25 / 0;
+0.5 in RECOVERY) and the allowed strategy families. CAPITULATION skips
+Stage 2.
 
-Mean-reversion bypasses the VIX gate (the band touch already encodes
-the volatility condition).
+| Priority | Condition | Plan |
+|---|---|---|
+| 1 | 3-σ Bollinger touch | Mean-Reversion Spread |
+| 2 | `vix_z > +2 σ`, Bullish / Sideways | Bear Call (demoted) |
+| 3 | `leadership_z > +1.5 σ`, Bullish / Sideways | Bull Put |
+| 4 | Bearish, RSI < 30 | vol rank ≥ 30: Bounce Bull Put after price reclaims the 5-day high close (short strike below the 10-day low), else no trade; vol rank < 30: no trade |
+| 5 | Regime | Bullish → Bull Put · Bearish → Bear Call · Sideways → Iron Butterfly (opt-in) → Iron Condor |
+| 6 | Credit plan found nothing, vol rank < 30 | Call Debit (bullish) · Put Debit (bearish) · Calendar (sideways) |
 
-### 3.4 Risk guardrails (8 checks)
+Then: RiskManager → market-state strategy gate → ladder gate (2nd
+position on a ticker: later day, expiry ≥ 7 d apart) → total-risk sizing
+(Σ open max loss ≤ 10 % of equity). Mean reversion bypasses the VIX gate.
+Playbook table: `market_state.playbook_for`; every journal row carries
+`playbook`. Credit structures need positive EV
+(`C/W ≥ |Δshort| × (1 + edge_buffer)`); debit structures need
+`debit ≤ mid × 1.05` and reward/risk ≥ 1 (skill 59). Pricing is at
+natural (`fill_model`).
+
+### 3.4 Risk guardrails (8 checks + portfolio caps)
 
 1. Plan validity
-2. C/W ≥ `|Δshort| × (1 + edge_buffer)` (adaptive) or `MIN_CREDIT_RATIO=0.33` (static)
-3. Sold delta ≤ `MAX_DELTA` (default 0.20)
-4. Max loss ≤ `MAX_RISK_PCT × equity` (default 2 %)
+2. Credit: C/W ≥ `|Δshort| × (1 + edge_buffer)` (adaptive) or `min_credit_ratio` (static) · Debit: `0 < debit ≤ max_debit`
+3. Sold delta ≤ `max_delta` (credit plans only)
+4. Max loss ≤ `max_risk_pct × equity` (2 % live) × market-state multiplier, within the remaining total-risk budget
 5. Account type = paper
 6. Market hours
 7. Underlying liquidity: spread < `max(LIQUIDITY_MAX_SPREAD, LIQUIDITY_BPS_OF_MID × mid)`
 8. Buying power ≥ `(1 − MAX_BUYING_POWER_PCT) × equity` (default 80 %)
 
+Portfolio caps (skill 37): ≤ 2 positions per ticker (laddered), ≤ 2 per
+sector (pending orders and in-cycle submissions count), total open
+defined risk ≤ 10 % of equity (Wheel excluded).
+
 Plus: daily-drawdown circuit breaker (5 %); liquidation mode (skip Stage
 2 above 80 % BP); macro guard (skip Bull Put when price < SMA-200);
 high-IV block (skip all entries when realized-vol IV-rank > 95th
-percentile); 3-cycle exit debounce (bypassed by HARD_STOP /
-STRIKE_PROXIMITY / DTE_SAFETY).
+percentile); RSI gate; 3-cycle exit debounce (≈ 4 min; bypassed by
+HARD_STOP / STRIKE_PROXIMITY / DTE_SAFETY). Debit structures have their
+own exits (50 % of debit stop, 50 % of max profit / 25 % of debit
+target, reversal-only regime exit).
 
 ### 3.5 Adaptive spread width
 
