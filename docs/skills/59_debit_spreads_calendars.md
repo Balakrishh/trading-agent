@@ -42,8 +42,9 @@ Exits (position-scale; debit_pos = debit × 100 × contracts)
   stop     loss ≥ debit_stop_loss_pct × debit_pos
   target   verticals: profit ≥ debit_profit_target_pct × (width − debit) × 100 × contracts
            calendars: profit ≥ calendar_profit_target_pct × debit_pos
-  then DTE safety on the (near) expiry, then regime shift (call debit ↔ bullish,
-  put debit ↔ bearish, calendar ↔ sideways; bounce bull put never regime-closed)
+  then DTE safety on the (near) expiry, then regime shift: debit verticals only on a
+  REVERSAL (call debit when bearish, put debit when bullish — sideways is a drift, not a
+  contradiction); calendar when no longer sideways; bounce bull put never regime-closed
 ```
 
 ## 3. Reference Python Implementation
@@ -187,7 +188,7 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 ```
 
 ```python
-# trading_agent/position_monitor.py:753-789
+# trading_agent/position_monitor.py:759-803
     def _check_debit_exit(self, spread: SpreadPosition,
                           current_regimes: Dict[str, Regime]):
         """Stop at ``debit_stop_loss_pct`` of the debit; profit target at
@@ -221,6 +222,14 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
         expected = STRATEGY_REGIME_MAP.get(spread.strategy_name)
         current = current_regimes.get(spread.underlying)
         if expected and current is not None and current != expected:
+            # A debit vertical's thesis breaks only when the trend
+            # REVERSES; a drift to sideways is not a contradiction.
+            # 2026-10-05: IWM flickered bearish → sideways one cycle after
+            # a put debit filled (price between its 50- and 200-day) and
+            # the old rule voted to close it at the bid/ask cost.
+            if (spread.strategy_name in DEBIT_VERTICALS
+                    and current not in _OPPOSITE_TREND.get(expected, ())):
+                return (ExitSignal.HOLD, "")
             return (ExitSignal.REGIME_SHIFT,
                     f"Regime shifted to {current.value} but holding "
                     f"{spread.strategy_name} (expects {expected.value})")
@@ -260,6 +269,7 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 - **Live drift** — the executor re-quotes at natural; a live debit above `max_debit`, or a max loss above `max_risk_pct × equity`, aborts (`live_debit_risk`). No extra tick is paid past the natural price.
 - **Order sign** — Alpaca mleg `limit_price` is positive for a debit. A net-credit close of a debit structure with a positive `filled_avg_price` is re-signed so `realized_pl_from_close` stays correct.
 - **RiskManager** — the C/W floor and sold-|Δ| cap do not apply to debit plans (the short leg is a hedge, or ATM by design); the check is `0 < debit ≤ max_debit`. Max loss vs account uses `max_loss` = debit × 100.
+- **Regime flicker (2026-10-05)** — IWM (price between its 50- and 200-day) flipped bearish → sideways one cycle after a put debit filled and the old any-change rule voted to close it at the bid/ask cost. Debit verticals now regime-exit only on a reversal; stops and targets still apply.
 - **Strike proximity** — never applied to debit structures (a call debit wants price through the short strike). Defensive rolls only fire on that signal, so they never touch debit positions.
 - **Leg inference** — a 2-leg same-type position with a net debit is inferred as a call / put debit spread; a short and a long at the same strike and type with different expiries is inferred as a calendar (the per-expiry buckets would otherwise split it into "Naked Short" + an orphan long).
 - **Market state** (skill 58) — call debits are bullish (NORMAL / RECOVERY), put debits bearish (also DEFENSIVE), calendars neutral (not DEFENSIVE); the bounce bull put is allowed in CAUTION because its own trigger is the stabilisation evidence.

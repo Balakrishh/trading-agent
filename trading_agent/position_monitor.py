@@ -83,6 +83,12 @@ STRATEGY_REGIME_MAP = {
     BOUNCE_BULL_PUT_STRATEGY: None,
 }
 
+# Regimes that reverse a directional debit thesis (skill 59).
+_OPPOSITE_TREND = {
+    Regime.BULLISH: (Regime.BEARISH,),
+    Regime.BEARISH: (Regime.BULLISH,),
+}
+
 
 @dataclass
 class PositionSnapshot:
@@ -783,6 +789,14 @@ class PositionMonitor:
         expected = STRATEGY_REGIME_MAP.get(spread.strategy_name)
         current = current_regimes.get(spread.underlying)
         if expected and current is not None and current != expected:
+            # A debit vertical's thesis breaks only when the trend
+            # REVERSES; a drift to sideways is not a contradiction.
+            # 2026-10-05: IWM flickered bearish → sideways one cycle after
+            # a put debit filled (price between its 50- and 200-day) and
+            # the old rule voted to close it at the bid/ask cost.
+            if (spread.strategy_name in DEBIT_VERTICALS
+                    and current not in _OPPOSITE_TREND.get(expected, ())):
+                return (ExitSignal.HOLD, "")
             return (ExitSignal.REGIME_SHIFT,
                     f"Regime shifted to {current.value} but holding "
                     f"{spread.strategy_name} (expects {expected.value})")
