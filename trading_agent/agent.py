@@ -2276,6 +2276,30 @@ class TradingAgent:
         self._cycle_risk_pct = self._base_max_risk_pct * mult
         self._set_trade_risk_pct(self._cycle_risk_pct)
 
+    def _shadow_pop_fields(self, plan, analysis) -> Dict:
+        """Backlog §3 / §6.8 shadow log: delta POP vs realized-vol POP for
+        the journaled plan. No trading effect. ``shadow_pop_available`` is
+        set only when the realized-vol inputs were read successfully."""
+        if not getattr(plan, "legs", None):
+            return {}
+        from datetime import date as _date
+        from trading_agent.shadow_pop import realized_vol, shadow_pop
+        out: Dict = {"shadow_pop_available": False}
+        sigma = None
+        try:
+            df = self.data_provider.fetch_historical_prices(plan.ticker, period_days=200)
+            sigma = realized_vol([float(x) for x in df["Close"].dropna().tolist()])
+            out["shadow_pop_available"] = sigma is not None
+        except Exception as exc:  # noqa: skill-34-exempt — shadow log only; never affects trading
+            logger.debug("[%s] shadow POP history unavailable: %s", plan.ticker, exc)
+        try:
+            dte = max(1, (_date.fromisoformat(plan.expiration) - _date.today()).days)
+        except (TypeError, ValueError):
+            dte = 1
+        out.update(shadow_pop(plan, float(analysis.current_price or 0.0), sigma, dte))
+        out["rv_20d"] = round(sigma, 4) if sigma is not None else None
+        return out
+
     @staticmethod
     def _register_open(ticker, tickers, per_ticker, per_sector):
         """Count a new position / pending order toward the per-ticker and
@@ -2693,6 +2717,9 @@ class TradingAgent:
                 exec_result.get("order_id") if exec_result else None
             ),
             "run_id": exec_result.get("run_id") if exec_result else None,
+            # Contracts submitted (2026-10-05) — the playbook scorecard
+            # needs it for return on risk; spread rows lacked it before.
+            "contracts": exec_result.get("qty") if exec_result else None,
             "thesis": thesis,
         }
 
@@ -2707,6 +2734,7 @@ class TradingAgent:
             analysis.rsi_14)
         raw["playbook"] = pb.name
         raw["playbook_implemented"] = pb.implemented
+        raw.update(self._shadow_pop_fields(plan, analysis))
 
         # Adaptive-scan diagnostics: top-K candidates + selected pick. Only
         # set when the planner ran the scanner this cycle; static mode emits
@@ -2983,8 +3011,28 @@ class TradingAgent:
     # Order status check
     # ==================================================================
 
+    def _reconcile_entry_fills(self) -> None:
+        """Backlog §2: write actual multi-leg entry fills into the trade
+        plans the monitor reads (``fill_reconciler.py``)."""
+        if self.config.trading.dry_run:
+            return
+        from trading_agent.executor import OrderExecutor
+        from trading_agent.fill_reconciler import reconcile_fills
+        try:
+            counts = reconcile_fills(
+                self.config.logging.trade_plan_dir,
+                get_order=self.order_tracker.get_order_by_id,
+                record_fill=lambda path, run, fill: OrderExecutor._record_fill_credit(
+                    path, run, None, fill),
+                mark_unfilled=OrderExecutor._mark_run_unfilled)
+            if counts["recorded"] or counts["unfilled"]:
+                logger.info("Entry fills reconciled: %s", counts)
+        except Exception as exc:  # noqa: skill-34-exempt — fill reconciliation is best-effort; next cycle retries
+            logger.warning("Entry-fill reconciliation failed: %s", exc)
+
     def _check_order_statuses(self) -> Dict:
         """Fetch recent orders and log a summary."""
+        self._reconcile_entry_fills()
         try:
             open_orders = self.order_tracker.fetch_open_orders()
             recent_fills = self.order_tracker.fetch_recent_fills(limit=10)

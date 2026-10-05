@@ -184,3 +184,13 @@ def _isolate_market_state(tmp_path, monkeypatch):
     from trading_agent import market_state
     monkeypatch.setattr(market_state, "STATE_PATH", tmp_path / "market_state.json")
     monkeypatch.setattr(market_state, "yfinance_level", lambda symbol: None)
+
+
+@pytest.fixture(autouse=True)
+def _offline_wheel_lookups(monkeypatch):
+    """Backlog §2 (2026-10-05): wheel_screen's 200-day SMA and sector
+    lookups hit yfinance — keep tests offline. SMA 1.0 sits below any
+    test spot, so the trend filter passes unless a test overrides it."""
+    import trading_agent.mcp.tools.strategy as st
+    monkeypatch.setattr(st, "_sma200", lambda t: 1.0)
+    monkeypatch.setattr(st, "_yf_sector", lambda t: None)

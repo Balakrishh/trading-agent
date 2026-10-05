@@ -921,11 +921,14 @@ class OrderExecutor:
         monitor used the 0.26 estimate (target $13 instead of $10.50).
         """
         def mutate(tp):
-            width = float(tp.get("spread_width") or plan.spread_width or 0.0)
+            width = float(tp.get("spread_width") or getattr(plan, "spread_width", 0.0) or 0.0)
             tp["estimated_net_credit"] = tp.get("net_credit")
             tp["net_credit"] = round(fill, 2)
             tp["credit_to_width_ratio"] = round(fill / width, 4) if width else 0.0
-            if float(tp.get("max_loss") or 0.0) > 0:
+            if fill < 0:
+                # Debit structure (skill 59): the debit is the max loss.
+                tp["max_loss"] = round(-fill * 100, 2)
+            elif float(tp.get("max_loss") or 0.0) > 0:
                 tp["max_loss"] = round((width - fill) * 100, 2)
         return cls._update_run_trade_plan(plan_path, run_id, mutate)
 
@@ -939,7 +942,7 @@ class OrderExecutor:
         (2026-09-30: VZ run 20260930_135925 shadowed the filled run)."""
         def mutate(tp):
             tp["valid"] = False
-            tp["rejection_reason"] = "unfilled: all sell-to-open attempts cancelled"
+            tp["rejection_reason"] = "unfilled: order cancelled / expired with nothing filled"
         return cls._update_run_trade_plan(plan_path, run_id, mutate)
 
     # ------------------------------------------------------------------

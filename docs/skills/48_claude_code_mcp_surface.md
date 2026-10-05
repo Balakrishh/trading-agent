@@ -35,6 +35,7 @@ get_chain(underlying, expiration=None,          — skill-47 passthrough
 get_quote(symbol)                               — skill-47 passthrough
 get_market_status()                             — skill-47 passthrough
 get_market_state()                              — market risk state + gate + hedge idea (skill 58)
+get_playbook_scorecard(days=365, min_trades=20) — per-playbook track record, advisory size (skill 60)
 get_fundamentals(ticker)                        — P/E, EPS, mcap, dividend, beta, 52w, ROE/ROA (skill-47 passthrough)
 get_recent_alerts(hours=24)                     — ExceptionMonitor tail
 ```
@@ -69,6 +70,7 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_quote",
     "get_market_status",
     "get_market_state",
+    "get_playbook_scorecard",
     "get_fundamentals",
     "get_recent_alerts",
 )
@@ -128,6 +130,7 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 
 - **`get_position_valuations()` (2026-10-05).** Reads `trade_journal/position_valuations.json`, written by the agent after every exit evaluation (`trading_agent/position_snapshot.py`): per-position mid P&L, exit signal, short delta, underlying price, `age_seconds`. `/triage` uses it so it never re-prices legs from a second feed.
 - **`get_market_state()` (2026-10-05).** Reads `trade_journal/market_state.json`, written by the agent every cycle (skill 58): state, reasons, inputs, gate, `age_seconds`, `account_balance`. In CAUTION / DEFENSIVE it adds a SPY put-spread `hedge_suggestion` (≈3 % / 10 % OTM, 30–45 DTE, sized to half the account) — a suggestion for `/propose`, never an order. No snapshot → `{"state": null, "source": "unavailable"}`. `wheel_screen` output now carries `market_state` and `csp_paused`.
+- **`get_playbook_scorecard()` (2026-10-05, skill 60).** Round trips from the live journal grouped by playbook: win rate, avg win / loss, expectancy, return on risk (trades with a known contract count), entry slippage, advisory verdict / `suggested_risk_pct`. Read-only; the `journal-analyst` subagent has it. `wheel_screen` diagnostics now include `below_200d_sma`, `trend_unavailable` and `sector_cap` (skill 40).
 - **Fundamentals `short_int_to_float`:** Schwab's explicit 0.0 is mapped to `None` (not provided).
 - **Subagent tool names** must be the full `mcp__trading-agent__<tool>` form; bare names leave the subagent with zero tools (Claude Code refuses to spawn it). `scan_subagent_allowlists.py` enforces the prefix.
 

@@ -305,8 +305,35 @@ class PresetConfig:
     max_total_risk_pct:                float = 0.10
 
     # ------------------------------------------------------------------
+    # Wheel (skill 40 §3.3, wired 2026-10-05 — backlog §2). Defaults equal
+    # the decision_engine fallbacks the scorers used before, so the
+    # wiring changes nothing until edited. csp_require_above_sma200: no
+    # cash-secured put on a stock below its 200-day average (fail closed
+    # when the trend is unknown). csp_max_per_sector: distinct tickers per
+    # sector in one wheel_screen (banks and telecom clustered).
+    # ------------------------------------------------------------------
+    cc_max_short_delta:                float = 0.30
+    cc_dte_band:                       Tuple[int, int] = (30, 60)
+    cc_min_iv_rank:                    float = 0.25
+    csp_max_short_delta:               float = 0.30
+    csp_dte_band:                      Tuple[int, int] = (21, 60)
+    csp_min_iv_rank:                   float = 0.25
+    csp_strike_band:                   Tuple[float, float] = (0.85, 0.97)
+    csp_require_above_sma200:          bool  = True
+    csp_max_per_sector:                int   = 1
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
+
+    def _wheel_tag(self) -> str:
+        """Summary-line token for the Wheel tunables (skill 40 §3.3)."""
+        return (f"Wheel CSP Δ≤{self.csp_max_short_delta:.2f} "
+                f"{self.csp_dte_band[0]}–{self.csp_dte_band[1]}d "
+                f"K {self.csp_strike_band[0]:.0%}–{self.csp_strike_band[1]:.0%} "
+                f"{'>200d ' if self.csp_require_above_sma200 else ''}"
+                f"{self.csp_max_per_sector}/sector • CC Δ≤{self.cc_max_short_delta:.2f} "
+                f"{self.cc_dte_band[0]}–{self.cc_dte_band[1]}d")
 
     def _debit_tag(self) -> str:
         """Summary-line token for the skill-59 debit playbooks."""
@@ -358,6 +385,7 @@ class PresetConfig:
                 f"Fills @ {self.fill_model} • "
                 f"MarketState {'on' if self.market_state_enabled else 'off'} • "
                 f"{self._debit_tag()} • "
+                f"{self._wheel_tag()} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
                 f"Max risk {self.max_risk_pct*100:.0f}% "
@@ -371,6 +399,7 @@ class PresetConfig:
             f"Fills @ {self.fill_model} • "
             f"MarketState {'on' if self.market_state_enabled else 'off'} • "
             f"{self._debit_tag()} • "
+            f"{self._wheel_tag()} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
             f"Max risk {self.max_risk_pct*100:.0f}% "
@@ -537,7 +566,9 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 # Persistence
 # ---------------------------------------------------------------------------
 
-_TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct"}
+_TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct",
+                 "iron_butterfly_dte_grid", "iron_butterfly_wing_width_pct",
+                 "cc_dte_band", "csp_dte_band", "csp_strike_band"}
 
 
 def _coerce_overrides(overrides: Dict) -> Dict:
