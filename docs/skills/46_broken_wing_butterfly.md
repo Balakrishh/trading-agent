@@ -159,4 +159,4 @@ broken_wing_butterfly_wing_width_pct: Tuple[float, ...] = (0.020, 0.030, 0.040, 
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

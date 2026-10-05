@@ -10,7 +10,7 @@
 
 ## 1. Theory & Objective
 
-Credit-spread strategies are scored on theoretical credit (mid-mid), but the broker marks the position at **worst-case bid/ask** — shorts at the ask (cost to buy back), longs at the bid (cost to sell). When per-leg bid-ask spreads are wide, the gap between the credit you collect and the cost to close immediately can eat **50%+ of the credit on day one**, even at fill. Theta and IV mean-reversion eventually erase this, but only over multiple days, and the dashboard P&L during that wait looks like a real loss.
+Credit-spread strategies were scored on theoretical credit (mid-mid; since 2026-10-05 the default `fill_model="natural"` scores at bid/ask instead — skill 03 §4), but the broker marks the position at **worst-case bid/ask** — shorts at the ask (cost to buy back), longs at the bid (cost to sell). When per-leg bid-ask spreads are wide, the gap between the credit you collect and the cost to close immediately can eat **50%+ of the credit on day one**, even at fill. Theta and IV mean-reversion eventually erase this, but only over multiple days, and the dashboard P&L during that wait looks like a real loss.
 
 The 2026-05-15 GLD trade is the canonical case. The agent filled an Iron Condor at $1.95 credit per spread; the same chain's worst-case round-trip cost was $3.10 → -$115/spread day-1 mark, persistent through the next 90 minutes despite GLD being flat. The C/W floor (0.39 > 0.30 min) passed because it doesn't see bid-ask spreads — only credit and width.
 
@@ -113,4 +113,4 @@ Both fields are appended at the end of `PresetConfig` (frozen dataclass, default
 
 ---
 
-*Last verified against repo HEAD on 2026-09-30.*
+*Last verified against repo HEAD on 2026-10-05.*

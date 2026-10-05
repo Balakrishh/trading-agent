@@ -120,4 +120,4 @@ def _score_candidate(credit: float, width: float, short_delta: float,
 
 ---
 
-*Last verified against repo HEAD on 2026-07-06.*
+*Last verified against repo HEAD on 2026-10-05.*

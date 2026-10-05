@@ -40,7 +40,8 @@ inputs:  preset.max_delta, preset.dte_vertical, preset.dte_window_days,
                    dte_vertical + dte_window_days]
   short_leg   = first contract with |Δ| ≤ max_delta in chain
   long_leg    = strike = short_strike ± snap(width_value)
-  credit      = mid(short) − mid(long)
+  credit      = bid(short) − ask(long)          # fill_model="natural" (default, 2026-10-05)
+              | mid(short) − mid(long) − haircut   # fill_model="mid" (legacy)
   width       = |short_strike − long_strike|
 
   ACCEPT  iff  credit / width ≥ min_credit_ratio
@@ -285,4 +286,4 @@ self.executor: ExecutionPort = OrderExecutor(
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*
