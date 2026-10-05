@@ -152,6 +152,8 @@ class LongTermEvaluator:
         put_chain_fetcher: Optional[ChainFetcher] = None,
         fundamentals_fetcher: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
         spot_fetcher: Optional[Callable[[str], Optional[float]]] = None,
+        trend_fetcher: Optional[Callable[[str], Optional[float]]] = None,
+        sector_fetcher: Optional[Callable[[str], str]] = None,
     ) -> None:
         self.positions_provider = positions_provider
         self.call_chain_fetcher = call_chain_fetcher
@@ -161,6 +163,11 @@ class LongTermEvaluator:
         self.put_chain_fetcher = put_chain_fetcher
         self.fundamentals_fetcher = fundamentals_fetcher
         self.spot_fetcher = spot_fetcher
+        # Backlog §2 (2026-10-05). trend_fetcher(ticker) → 200-day SMA (or
+        # None when unknown); sector_fetcher(ticker) → sector label. Both
+        # optional: absent → that filter is not applied (legacy callers).
+        self.trend_fetcher = trend_fetcher
+        self.sector_fetcher = sector_fetcher
         # ticker → why no CSP was recommended (screen reasons, no chain,
         # no accepted contract). Reset on every recommend() call.
         self.last_diagnostics: Dict[str, List[str]] = {}
@@ -208,7 +215,35 @@ class LongTermEvaluator:
                 recs.extend(self._recommend_cash_secured_puts(ticker))
 
         recs.sort(key=lambda r: r.score, reverse=True)
-        return recs
+        return self._cap_csp_per_sector(recs)
+
+    def _cap_csp_per_sector(self, recs: List[Recommendation]) -> List[Recommendation]:
+        """Keep CSPs from at most ``csp_max_per_sector`` distinct tickers
+        per sector (best score first); several strikes of one kept ticker
+        stay. Dropped tickers get a ``sector_cap`` diagnostic."""
+        if self.sector_fetcher is None:
+            return recs
+        cap = int(getattr(self.preset, "csp_max_per_sector", 1) or 0)
+        if cap <= 0:
+            return recs
+        kept: Dict[str, List[str]] = {}
+        out: List[Recommendation] = []
+        for r in recs:
+            if r.strategy != "cash_secured_put":
+                out.append(r)
+                continue
+            sector = self.sector_fetcher(r.ticker)
+            tickers = kept.setdefault(sector, [])
+            if r.ticker in tickers or len(tickers) < cap:
+                if r.ticker not in tickers:
+                    tickers.append(r.ticker)
+                out.append(r)
+            else:
+                self.last_diagnostics.setdefault(r.ticker, [])
+                note = f"sector_cap ({sector}: {', '.join(tickers)} ranked higher)"
+                if note not in self.last_diagnostics[r.ticker]:
+                    self.last_diagnostics[r.ticker].append(note)
+        return out
 
     def _recommend_cash_secured_puts(self, ticker: str) -> List[Recommendation]:
         """Fundamentals screen → put chain → ``_score_cash_secured_put``.
@@ -234,6 +269,10 @@ class LongTermEvaluator:
             return []
         if not spot or spot <= 0 or not chain:
             self.last_diagnostics[ticker] = ["no_spot" if not spot or spot <= 0 else "no_chain"]
+            return []
+        trend_reason = self._trend_block(ticker, float(spot))
+        if trend_reason:
+            self.last_diagnostics[ticker] = [trend_reason]
             return []
 
         scored: List[Tuple[float, Dict[str, float], Dict[str, Any]]] = []
@@ -289,6 +328,23 @@ class LongTermEvaluator:
                 metrics={**metrics, **self._contract_fields(contract), "spot": float(spot)},
             ))
         return recs
+
+    def _trend_block(self, ticker: str, spot: float) -> Optional[str]:
+        """Backlog §2: no CSP below the 200-day SMA. Fail closed when the
+        trend is unknown — selling puts blind into a downtrend is the
+        failure this filter exists to stop."""
+        if self.trend_fetcher is None or not getattr(self.preset, "csp_require_above_sma200", True):
+            return None
+        try:
+            sma200 = self.trend_fetcher(ticker)
+        except Exception as exc:           # noqa: BLE001 — fail closed for this ticker
+            logger.warning("trend_fetcher(%s) raised %s — skipping CSP.", ticker, exc)
+            sma200 = None
+        if sma200 is None or sma200 <= 0:
+            return "trend_unavailable (200-day SMA unknown)"
+        if spot < sma200:
+            return f"below_200d_sma ({spot:.2f} < {sma200:.2f})"
+        return None
 
     # ------------------------------------------------------------------
     # Strategy-specific assemblers

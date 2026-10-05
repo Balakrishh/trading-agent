@@ -987,8 +987,8 @@ def _score_covered_call_with_reason(
 # ---------------------------------------------------------------------------
 # Cash-secured put scoring — skill 40 §2.2 (Wheel entry leg).
 # ---------------------------------------------------------------------------
-# Same fallback pattern as the covered-call scorer: PresetConfig may
-# override via csp_* attrs once the preset wiring lands.
+# PresetConfig.csp_* (wired 2026-10-05) carries these same defaults; the
+# constants stay as fallbacks for callers without a preset.
 _CSP_DEFAULT_MAX_SHORT_DELTA: float = 0.30
 _CSP_DEFAULT_DTE_BAND:        Tuple[int, int] = (21, 60)
 _CSP_DEFAULT_MIN_IV_RANK:     float = 0.25

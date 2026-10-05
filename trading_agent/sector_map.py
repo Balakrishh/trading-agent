@@ -121,6 +121,56 @@ TICKER_SECTOR_MAP: Dict[str, str] = {
     "TSLA":  "Consumer Discretionary",
     "ZS":    "Technology",
 
+    # Common Wheel names (2026-10-05, backlog §2 "one pick per sector":
+    # the screen clustered banks and telecom). Unmapped names fall back
+    # to the yfinance sector via ``wheel_sector``.
+    "BAC":   "Financials",
+    "C":     "Financials",
+    "GS":    "Financials",
+    "MS":    "Financials",
+    "PNC":   "Financials",
+    "SCHW":  "Financials",
+    "TFC":   "Financials",
+    "USB":   "Financials",
+    "WFC":   "Financials",
+    "CMCSA": "Communications",
+    "T":     "Communications",
+    "TMUS":  "Communications",
+    "VZ":    "Communications",
+    "CL":    "Consumer Staples",
+    "GIS":   "Consumer Staples",
+    "KHC":   "Consumer Staples",
+    "KMB":   "Consumer Staples",
+    "KO":    "Consumer Staples",
+    "MO":    "Consumer Staples",
+    "PEP":   "Consumer Staples",
+    "PG":    "Consumer Staples",
+    "PM":    "Consumer Staples",
+    "WMT":   "Consumer Staples",
+    "ABBV":  "Healthcare",
+    "BMY":   "Healthcare",
+    "CVS":   "Healthcare",
+    "GILD":  "Healthcare",
+    "JNJ":   "Healthcare",
+    "MRK":   "Healthcare",
+    "PFE":   "Healthcare",
+    "COP":   "Energy",
+    "CVX":   "Energy",
+    "OXY":   "Energy",
+    "SLB":   "Energy",
+    "XOM":   "Energy",
+    "D":     "Utilities",
+    "DUK":   "Utilities",
+    "NEE":   "Utilities",
+    "SO":    "Utilities",
+    "CSCO":  "Technology",
+    "IBM":   "Technology",
+    "ORCL":  "Technology",
+    "F":     "Consumer Discretionary",
+    "GM":    "Consumer Discretionary",
+    "NKE":   "Consumer Discretionary",
+    "SBUX":  "Consumer Discretionary",
+
     # Themed equity ETFs landed alongside single-names.
     "NASA":  "Industrials",               # TEMA Space Innovators: aerospace + defense lean
 }
@@ -133,6 +183,34 @@ TICKER_SECTOR_MAP: Dict[str, str] = {
 # ``PresetConfig`` field because sector grouping is a global property
 # of the trading universe, not a per-strategy tunable.
 MAX_POSITIONS_PER_SECTOR: int = 2
+
+
+# yfinance ``info["sector"]`` → the SPDR names above.
+_YF_SECTOR = {
+    "Communication Services": "Communications",
+    "Financial Services": "Financials",
+    "Consumer Defensive": "Consumer Staples",
+    "Consumer Cyclical": "Consumer Discretionary",
+    "Basic Materials": "Materials",
+}
+
+
+def wheel_sector(ticker: str, info_sector=None) -> str:
+    """Sector for the Wheel's one-pick-per-sector rule: the map above,
+    else ``info_sector(ticker)`` (e.g. yfinance ``info["sector"]``,
+    translated to SPDR names), else the ticker itself — an unknown name
+    is its own sector, never lumped with other unknowns under "Other"."""
+    mapped = TICKER_SECTOR_MAP.get((ticker or "").upper())
+    if mapped:
+        return mapped
+    if info_sector is not None:
+        try:
+            raw = info_sector(ticker)
+        except Exception:                       # noqa: BLE001 — lookup is best-effort
+            raw = None
+        if raw:
+            return _YF_SECTOR.get(raw, raw)
+    return (ticker or "").upper()
 
 
 def sector_for(ticker: str) -> str:

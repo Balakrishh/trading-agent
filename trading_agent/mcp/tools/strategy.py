@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 # conformance test in test_skill_48 verifies nothing here reaches
 # ``trading_agent.executor`` or order-submission primitives.
 from trading_agent.decision_engine import decide, DecisionInput, ChainSlice
+from trading_agent.sector_map import wheel_sector
 from trading_agent.strategy_presets import load_active_preset
 
 from trading_agent.mcp.tools import market as _market
@@ -384,6 +385,10 @@ def wheel_screen(
         put_chain_fetcher=put_chain,
         fundamentals_fetcher=fundamentals,
         spot_fetcher=spot,
+        # Backlog §2 (2026-10-05): no CSP below the 200-day SMA; one
+        # ticker per sector.
+        trend_fetcher=_sma200,
+        sector_fetcher=lambda t: wheel_sector(t, _yf_sector),
     )
     recs = evaluator.recommend(tickers)
     diagnostics = dict(evaluator.last_diagnostics)
@@ -460,6 +465,35 @@ def _wheel_rec_row(r: Any, used_expiration: Dict[tuple, str],
         "metrics": {k: round(v, 4) for k, v in m.items()},
         "plan": plan,
     }
+
+
+_SMA200_CACHE: Dict[str, Optional[float]] = {}
+_SECTOR_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _sma200(ticker: str) -> Optional[float]:
+    """200-day simple average of daily closes (yfinance), cached per
+    process; None when fewer than 200 closes are available."""
+    if ticker not in _SMA200_CACHE:
+        try:
+            import yfinance as yf
+            closes = yf.Ticker(ticker).history(period="400d", auto_adjust=False)["Close"].dropna()
+            _SMA200_CACHE[ticker] = (float(closes.tail(200).mean())
+                                     if len(closes) >= 200 else None)
+        except Exception:                               # noqa: BLE001 — unknown → CSP fails closed
+            _SMA200_CACHE[ticker] = None
+    return _SMA200_CACHE[ticker]
+
+
+def _yf_sector(ticker: str) -> Optional[str]:
+    """yfinance ``info["sector"]``, cached; None when unavailable."""
+    if ticker not in _SECTOR_CACHE:
+        try:
+            import yfinance as yf
+            _SECTOR_CACHE[ticker] = (yf.Ticker(ticker).info or {}).get("sector")
+        except Exception:                               # noqa: BLE001 — unknown → own sector
+            _SECTOR_CACHE[ticker] = None
+    return _SECTOR_CACHE[ticker]
 
 
 def _positions_provider() -> Any:

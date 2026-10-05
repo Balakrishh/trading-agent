@@ -2692,6 +2692,41 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                  "excluded). New trades are sized into what remains; at the "
                  "cap no new spreads open.")
 
+        # ── Wheel (skill 40 §3.3) ───────────────────────────────────────
+        st.markdown("**Wheel — cash-secured puts / covered calls** *(skill 40)*")
+        wh1, wh2, wh3, wh4 = st.columns(4)
+        with wh1:
+            csp_max_delta = st.slider("CSP max |Δ|", 0.10, 0.45,
+                                      float(getattr(seed, "csp_max_short_delta", 0.30)), 0.01,
+                                      key="cust_csp_max_delta")
+            cc_max_delta = st.slider("CC max |Δ|", 0.10, 0.45,
+                                     float(getattr(seed, "cc_max_short_delta", 0.30)), 0.01,
+                                     key="cust_cc_max_delta")
+        with wh2:
+            csp_dte_lo, csp_dte_hi = st.slider(
+                "CSP DTE band", 7, 90, tuple(getattr(seed, "csp_dte_band", (21, 60))),
+                key="cust_csp_dte_band")
+            cc_dte_lo, cc_dte_hi = st.slider(
+                "CC DTE band", 7, 90, tuple(getattr(seed, "cc_dte_band", (30, 60))),
+                key="cust_cc_dte_band")
+        with wh3:
+            csp_k_lo, csp_k_hi = st.slider(
+                "CSP strike band (× spot)", 0.70, 1.00,
+                tuple(getattr(seed, "csp_strike_band", (0.85, 0.97))), 0.01,
+                key="cust_csp_strike_band")
+            iv_min = st.slider("Min IV rank (CSP & CC)", 0.0, 0.8,
+                               float(getattr(seed, "csp_min_iv_rank", 0.25)), 0.05,
+                               key="cust_wheel_iv_min")
+        with wh4:
+            csp_sma200 = st.checkbox(
+                "No CSP below 200-day avg",
+                value=bool(getattr(seed, "csp_require_above_sma200", True)),
+                key="cust_csp_sma200",
+                help="Fails closed: no CSP when the 200-day average is unknown.")
+            csp_per_sector = st.number_input(
+                "CSP tickers per sector", 0, 5, int(getattr(seed, "csp_max_per_sector", 1)), 1,
+                key="cust_csp_per_sector", help="0 = no sector limit.")
+
         # ── Debit structures + bounce bull put (skill 59) ─────────────
         st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
         db_c1, db_c2, db_c3 = st.columns(3)
@@ -2798,6 +2833,15 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "calendar_profit_target_pct":   cal_tp,
         "bounce_lookback_days":         int(bounce_lookback),
         "max_total_risk_pct":           max_total_risk_pct,
+        "csp_max_short_delta":          csp_max_delta,
+        "cc_max_short_delta":           cc_max_delta,
+        "csp_dte_band":                 [int(csp_dte_lo), int(csp_dte_hi)],
+        "cc_dte_band":                  [int(cc_dte_lo), int(cc_dte_hi)],
+        "csp_strike_band":              [float(csp_k_lo), float(csp_k_hi)],
+        "csp_min_iv_rank":              iv_min,
+        "cc_min_iv_rank":               iv_min,
+        "csp_require_above_sma200":     csp_sma200,
+        "csp_max_per_sector":           int(csp_per_sector),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to
