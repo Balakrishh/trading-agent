@@ -1032,6 +1032,10 @@ class PositionMonitor:
                     "reason": s.exit_reason,
                     "expiration": s.expiration,
                     "short_strikes": s.short_strikes,
+                    # Per-contract max loss ($) and contracts — the
+                    # agent's total-risk cap sums these (2026-10-05).
+                    "max_loss": s.max_loss,
+                    "contracts": s.contracts_open,
                 }
                 for s in spreads
             ],

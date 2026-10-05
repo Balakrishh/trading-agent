@@ -647,6 +647,7 @@ class OrderExecutor:
 
                 result = {
                     "status": "submitted",
+                    "qty": int(order_payload.get("qty") or 0),
                     "order_id": order_id,
                     "client_order_id": client_order_id,
                     "retry_attempts": attempt,

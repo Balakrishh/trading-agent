@@ -278,6 +278,7 @@ class TradingAgent:
         # Skill 58: the market risk-state size multiplier scales this base
         # each cycle on BOTH RiskManager and the executor's sizer.
         self._base_max_risk_pct = max_risk_pct
+        self._cycle_risk_pct = max_risk_pct     # base × market-state multiplier
         self._market_state = None
 
         # ── .env-vs-preset mismatch warning ──────────────────────────────
@@ -900,6 +901,11 @@ class TradingAgent:
                     sorted(tickers_with_open_orders),
                 )
                 tickers_with_positions |= tickers_with_open_orders
+                # A pending order will become a position: count it toward
+                # its sector cap too (2026-10-05 sector-cap fix).
+                for t in sorted(tickers_with_open_orders - set(positions_per_ticker)):
+                    tickers_with_positions |= self._register_open(
+                        t, tickers, positions_per_ticker, positions_per_sector)
         except Exception as exc:  # noqa: skill-34-exempt — open-order dedup is best-effort; next cycle retries
             logger.warning("Open-order dedup failed: %s", exc)
 
@@ -964,6 +970,8 @@ class TradingAgent:
                 },
             }
 
+        risk_used, risk_budget = self._total_risk_state(monitor_results, account_balance)
+
         new_trade_results = []
         for ticker in tickers:
             # Check for shutdown between tickers so a SIGTERM mid-cycle
@@ -1009,12 +1017,21 @@ class TradingAgent:
                 })
                 continue
 
+            skip = self._total_risk_gate(ticker, risk_used, risk_budget, account_balance)
+            if skip is not None:
+                new_trade_results.append(skip)
+                continue
+
             try:
                 result = self._process_ticker(
                     ticker, account_balance, account_buying_power,
                     account_type, market_open,
                 )
                 new_trade_results.append(result)
+                if ((result or {}).get("execution") or {}).get("status") in ("submitted", "dry_run"):
+                    risk_used += self._submitted_risk(result)
+                    tickers_with_positions |= self._register_open(
+                        ticker, tickers, positions_per_ticker, positions_per_sector)
             except InsufficientDataError as exc:
                 # Expected condition — ticker has too little history for a
                 # reliable SMA-200 classification. Log as a warning and
@@ -1054,6 +1071,8 @@ class TradingAgent:
                     "status": "error",
                     "reason": str(exc),
                 })
+
+        self._set_trade_risk_pct(self._cycle_risk_pct)
 
         # ------------------------------------------------------------------
         # Order status summary
@@ -2254,7 +2273,54 @@ class TradingAgent:
                 logger.warning("Market state journal row failed: %s", exc)
 
     def _apply_risk_multiplier(self, mult: float) -> None:
-        pct = self._base_max_risk_pct * mult
+        self._cycle_risk_pct = self._base_max_risk_pct * mult
+        self._set_trade_risk_pct(self._cycle_risk_pct)
+
+    @staticmethod
+    def _register_open(ticker, tickers, per_ticker, per_sector):
+        """Count a new position / pending order toward the per-ticker and
+        per-sector caps; returns the tickers now blocked (skill 37)."""
+        from trading_agent.position_caps import register_open
+        return register_open(ticker, tickers, per_ticker, per_sector,
+                             sector_for=sector_for,
+                             max_positions_per_ticker=MAX_POSITIONS_PER_TICKER,
+                             max_positions_per_sector=MAX_POSITIONS_PER_SECTOR)
+
+    def _total_risk_state(self, monitor_results: Dict, account_balance: float):
+        """(open defined risk $, total budget $) for the total-risk cap."""
+        from trading_agent.position_caps import open_defined_risk
+        pct = float(getattr(self.preset, "max_total_risk_pct", 1.0))
+        used, budget = open_defined_risk(monitor_results), pct * account_balance
+        logger.info("Open defined risk $%.2f of $%.2f budget (%.0f%% of equity)",
+                    used, budget, 100 * pct)
+        return used, budget
+
+    def _total_risk_gate(self, ticker: str, risk_used: float, risk_budget: float,
+                         account_balance: float) -> Optional[Dict]:
+        """Skip result when the total-risk budget is spent; otherwise size
+        this trade into what remains and return None."""
+        remaining = risk_budget - risk_used
+        if remaining > 0 and account_balance > 0:
+            self._set_trade_risk_pct(min(self._cycle_risk_pct, remaining / account_balance))
+            return None
+        logger.info("[%s] Total risk cap reached ($%.2f ≥ $%.2f) — skipping",
+                    ticker, risk_used, risk_budget)
+        self.journal_kb.log_signal(
+            ticker=ticker, action="skipped_total_risk_cap",
+            price=self._cached_price(ticker),
+            raw_signal={"reason": "total_risk_cap", "risk_used": round(risk_used, 2),
+                        "risk_budget": round(risk_budget, 2)})
+        return {"ticker": ticker, "status": "skipped", "reason": "Total risk cap"}
+
+    @staticmethod
+    def _submitted_risk(result: Dict) -> float:
+        """Max loss ($) a just-submitted trade adds: per-contract × qty."""
+        qty = int((result.get("execution") or {}).get("qty") or 1)
+        return float(result.get("max_loss") or 0.0) * qty
+
+    def _set_trade_risk_pct(self, pct: float) -> None:
+        """Per-trade max_risk_pct on BOTH the RiskManager and the executor
+        sizer, so validation and sizing never disagree."""
         self.risk_manager.max_risk_pct = pct
         if hasattr(self.executor, "max_risk_pct"):
             self.executor.max_risk_pct = pct
@@ -2463,6 +2529,7 @@ class TradingAgent:
             "strategy": plan.strategy_name,
             "plan_valid": plan.valid,
             "risk_approved": verdict.approved,
+            "max_loss": plan.max_loss,          # per contract — total-risk cap
             "execution": exec_result,
             "analysis": self._analysis_dict(analysis),
         }

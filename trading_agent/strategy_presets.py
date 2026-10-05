@@ -295,6 +295,16 @@ class PresetConfig:
     bounce_lookback_days:              int   = 5        # stabilisation = reclaim the N-day high close
 
     # ------------------------------------------------------------------
+    # Total open-risk cap (added 2026-10-05). Σ max loss of all open
+    # defined-risk positions (plus anything submitted earlier in the same
+    # cycle) may not exceed this fraction of equity; each new trade is
+    # sized into the remaining budget. Wheel legs are excluded (their
+    # collateral has its own 40 %-of-equity rule). First live debit cycle
+    # opened 3 positions = 7.2 % of equity at once with no such limit.
+    # ------------------------------------------------------------------
+    max_total_risk_pct:                float = 0.10
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
@@ -350,7 +360,8 @@ class PresetConfig:
                 f"{self._debit_tag()} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
-                f"Max risk {self.max_risk_pct*100:.0f}%"
+                f"Max risk {self.max_risk_pct*100:.0f}% "
+                f"(total {self.max_total_risk_pct*100:.0f}%)"
             )
         return (
             f"{self.name.title()} • {self.directional_bias.replace('_', ' ')} • "
@@ -362,7 +373,8 @@ class PresetConfig:
             f"{self._debit_tag()} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
-            f"Max risk {self.max_risk_pct*100:.0f}%"
+            f"Max risk {self.max_risk_pct*100:.0f}% "
+            f"(total {self.max_total_risk_pct*100:.0f}%)"
         )
 
     def to_short_summary(self) -> str:
