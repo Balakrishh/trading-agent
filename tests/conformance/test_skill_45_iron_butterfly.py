@@ -291,11 +291,23 @@ def test_decide_iron_butterfly_produces_candidate():
     assert c.strategy == "iron_butterfly"
     assert c.center_strike == 100.0
     assert c.wing_width == 5.0
-    # Credit: mid(100C) + mid(100P) - mid(105C) - mid(95P)
-    #       = 1.25 + 1.25 - 0.20 - 0.20 = 2.10
-    assert c.credit == pytest.approx(2.10, abs=0.02)
+    # Credit at natural (fill_model default, backlog §6.1):
+    #   bid(100C) + bid(100P) − ask(105C) − ask(95P) = 1.20 + 1.20 − 0.25 − 0.25 = 1.90
+    assert c.credit == pytest.approx(1.90, abs=0.01)
     assert c.max_profit == pytest.approx(c.credit)
     assert c.max_loss == pytest.approx(5.0 - c.credit, abs=0.02)
+
+
+def test_decide_iron_butterfly_mid_fill_model_uses_leg_mids():
+    """Legacy fill_model="mid": mid(100C)+mid(100P)−mid(105C)−mid(95P) = 2.10."""
+    from trading_agent.decision_engine import ChainSlice, DecisionInput, decide_iron_butterfly
+
+    class _MidPreset(_StubPreset):
+        fill_model = "mid"
+    out = decide_iron_butterfly(DecisionInput(
+        side="iron_butterfly", preset=_MidPreset(),
+        chain_slices=[ChainSlice(expiration="2026-08-01", dte=30, contracts=_make_ib_chain())]))
+    assert out.candidates[0].credit == pytest.approx(2.10, abs=0.02)
 
 
 def test_decide_iron_butterfly_empty_chain_produces_no_candidate():

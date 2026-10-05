@@ -153,6 +153,7 @@ def decide(inp: DecisionInput, *, max_candidates: int = 10) -> DecisionOutput:
     # loop so we don't repeatedly read the same fields per grid point.
     max_leg_spread_cents   = float(getattr(preset, "max_leg_spread_cents", 0.15))
     max_leg_spread_pct_mid = float(getattr(preset, "max_leg_spread_pct_mid", 0.05))
+    fill_model = str(getattr(preset, "fill_model", "natural"))   # backlog §6.1
 
     n_dte   = len(inp.chain_slices)
     n_delta = len(delta_grid)
@@ -226,6 +227,7 @@ def decide(inp: DecisionInput, *, max_candidates: int = 10) -> DecisionOutput:
                     short_ask=float(short_contract["ask"]),
                     long_bid =float(long_contract["bid"]),
                     long_ask =float(long_contract["ask"]),
+                    model=fill_model,
                 )
                 short_delta = float(short_contract["delta"])
 
@@ -389,11 +391,19 @@ def decide_iron_butterfly(
                 diag.record(REJECT_NO_LONG_CONTRACT)
                 continue
 
-            # Compute per-share credit: shorts collect mid, longs pay mid.
-            credit = (
-                _mid(short_call) + _mid(short_put)
-                - _mid(long_call) - _mid(long_put)
-            )
+            # Per-share credit. fill_model="natural" (backlog §6.1): shorts
+            # at their bid, longs at their ask — the paper fill reality.
+            # "mid": legacy four-leg mids.
+            if getattr(preset, "fill_model", "natural") == "natural":
+                credit = (
+                    float(short_call.get("bid", 0) or 0) + float(short_put.get("bid", 0) or 0)
+                    - float(long_call.get("ask", 0) or 0) - float(long_put.get("ask", 0) or 0)
+                )
+            else:
+                credit = (
+                    _mid(short_call) + _mid(short_put)
+                    - _mid(long_call) - _mid(long_put)
+                )
             credit = round(max(0.0, credit), 2)
 
             result = _score_iron_butterfly_with_reason(
@@ -607,6 +617,7 @@ def _score_covered_call_with_reason(
     credit = _quote_credit_single(
         bid=float(short_call.get("bid", 0.0)),
         ask=float(short_call.get("ask", 0.0)),
+        model=str(getattr(preset, "fill_model", "natural")),   # backlog §6.1
     ) * 100.0
     if credit <= 0:
         return {"status": "rejected", "reason": LT_REJECT_CREDIT_NON_POSITIVE_LT}
@@ -736,6 +747,7 @@ def _score_cash_secured_put_with_reason(
     credit = _quote_credit_single(
         bid=float(short_put.get("bid", 0.0)),
         ask=float(short_put.get("ask", 0.0)),
+        model=str(getattr(preset, "fill_model", "natural")),   # backlog §6.1
     ) * 100.0
     if credit <= 0:
         return {"status": "rejected", "reason": LT_REJECT_CREDIT_NON_POSITIVE_LT}

@@ -51,6 +51,9 @@ WidthMode = Literal["pct_of_spot", "fixed_dollar"]
 ScanMode = Literal["static", "adaptive"]
 
 
+FILL_MODELS = ("natural", "mid")
+
+
 @dataclass(frozen=True)
 class PresetConfig:
     """Concrete trading parameters that drive Strategy + RiskManager."""
@@ -108,6 +111,17 @@ class PresetConfig:
     # Relative spread cap (fraction of mid). Reject if (ask − bid)/mid > X.
     # Applied alongside the absolute cap — both must pass.
     max_leg_spread_pct_mid:  float = 0.05
+
+    # ------------------------------------------------------------------
+    # Fill model (added 2026-10-05 — backlog §6.1, skill 03 §4).
+    # How credits / debits are estimated everywhere a candidate is scored:
+    #   "natural" — sell at the bid, buy at the ask (what the Alpaca paper
+    #               account actually filled at: 3 of 3 fills in week 1).
+    #   "mid"     — legacy NBBO mid minus DEFAULT_FILL_HAIRCUT.
+    # Also selects the price the profit target is judged at (natural =
+    # cost to buy back at the ask). Stops stay on the mid valuation.
+    # ------------------------------------------------------------------
+    fill_model:              str   = "natural"
 
     # ------------------------------------------------------------------
     # Profit-target management (added 2026-05-19 — see skill 30).
@@ -283,6 +297,7 @@ class PresetConfig:
                 f"Edge ≥ {self.edge_buffer:.0%} • POP ≥ {self.min_pop:.0%} • "
                 f"LegSpread ≤ ${self.max_leg_spread_cents:.2f}/"
                 f"{self.max_leg_spread_pct_mid:.0%}mid • "
+                f"Fills @ {self.fill_model} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
                 f"Max risk {self.max_risk_pct*100:.0f}%"
@@ -292,6 +307,7 @@ class PresetConfig:
             f"Vert@{self.dte_vertical}d Δ-{self.max_delta:.2f} w={wstr} • "
             f"IC@{self.dte_iron_condor}d • MR@{self.dte_mean_reversion}d • "
             f"C/W ≥ {self.min_credit_ratio} • "
+            f"Fills @ {self.fill_model} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
             f"Max risk {self.max_risk_pct*100:.0f}%"
@@ -578,6 +594,13 @@ def load_active_preset(path: Optional[Path] = None) -> PresetConfig:
             "Invalid max_leg_spread_cents %r — keeping profile default %r",
             max_leg_spread_cents, preset.max_leg_spread_cents)
 
+    fill_model = data.get("fill_model")
+    if fill_model in FILL_MODELS:
+        overlay["fill_model"] = fill_model
+    elif fill_model is not None:
+        logger.warning("Invalid fill_model %r — keeping profile default %r",
+                       fill_model, preset.fill_model)
+
     defensive_roll_enabled = data.get("defensive_roll_enabled")
     if isinstance(defensive_roll_enabled, bool):
         overlay["defensive_roll_enabled"] = defensive_roll_enabled
@@ -599,6 +622,7 @@ def save_active_preset(profile: ProfileName,
                        min_pop: Optional[float] = None,
                        max_leg_spread_cents: Optional[float] = None,
                        defensive_roll_enabled: Optional[bool] = None,
+                       fill_model: Optional[str] = None,
                        path: Optional[Path] = None) -> Path:
     """
     Persist the active preset selection to ``STRATEGY_PRESET.json``.
@@ -633,6 +657,10 @@ def save_active_preset(profile: ProfileName,
         payload["max_leg_spread_cents"] = float(max_leg_spread_cents)
     if defensive_roll_enabled is not None:
         payload["defensive_roll_enabled"] = bool(defensive_roll_enabled)
+    if fill_model is not None:
+        if fill_model not in FILL_MODELS:
+            raise ValueError(f"fill_model must be one of {FILL_MODELS}")
+        payload["fill_model"] = fill_model
     if profile == "custom" and custom:
         # Only persist the dataclass-known keys.
         valid = {f.name for f in PresetConfig.__dataclass_fields__.values()}

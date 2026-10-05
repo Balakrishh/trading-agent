@@ -375,10 +375,11 @@ def wheel_screen(
     def fundamentals(ticker: str) -> Optional[Dict[str, Any]]:
         return _market.get_fundamentals(ticker).get("fundamentals") or None
 
+    preset = load_active_preset()
     evaluator = LongTermEvaluator(
         positions_provider=_positions_provider(),   # held ≥100 → covered calls
         call_chain_fetcher=call_chain,
-        preset=load_active_preset(),
+        preset=preset,
         config=EvaluatorConfig(csp_max_collateral=cap),
         put_chain_fetcher=put_chain,
         fundamentals_fetcher=fundamentals,
@@ -406,14 +407,15 @@ def wheel_screen(
         "expiration_by_ticker": {tk: e for (tk, ot), e in used_expiration.items() if ot == "put"},
         "max_collateral": cap,
         "earnings_policy": earnings_policy,
-        "recommendations": [_wheel_rec_row(r, used_expiration, _earnings_fields)
+        "recommendations": [_wheel_rec_row(r, used_expiration, _earnings_fields,
+                                           getattr(preset, "fill_model", "natural"))
                             for r in recs],
         "diagnostics": diagnostics,
     }
 
 
 def _wheel_rec_row(r: Any, used_expiration: Dict[tuple, str],
-                   earnings_fields: Any) -> Dict[str, Any]:
+                   earnings_fields: Any, fill_model: str = "natural") -> Dict[str, Any]:
     """One recommendation → MCP row, including the stageable ``plan``
     (SpreadPlan dict) that /propose writes to pending_orders/."""
     from trading_agent.wheel_policy import (
@@ -427,7 +429,7 @@ def _wheel_rec_row(r: Any, used_expiration: Dict[tuple, str],
         strategy_name=CSP_STRATEGY if option_type == "put" else CC_STRATEGY,
         symbol=r.legs[0].occ_symbol, strike=m["strike"], option_type=option_type,
         delta=m["delta"], bid=m["bid"], ask=m["ask"],
-        expiration=expiration or "", reasoning=r.rationale,
+        expiration=expiration or "", reasoning=r.rationale, fill_model=fill_model,
     ).to_dict() if expiration else None
     return {
         "ticker": r.ticker,

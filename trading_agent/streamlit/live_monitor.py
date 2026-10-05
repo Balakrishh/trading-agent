@@ -2597,6 +2597,15 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                      "5–8% per-leg spreads without rejecting XLF's "
                      "penny-cheap-but-fractionally-wide options.",
             )
+        fill_model = st.selectbox(
+            "Fill model (credit / EV / profit-target pricing)",
+            ["natural", "mid"],
+            index=0 if getattr(seed, "fill_model", "natural") == "natural" else 1,
+            key="cust_fill_model",
+            help="natural = sell at the bid, buy at the ask — what the paper "
+                 "account actually fills at (week 1: 3 of 3 fills). mid = "
+                 "legacy NBBO mid minus a 2¢ haircut (optimistic).",
+        )
 
         # ── Profit-target management (skill 30, added 2026-05-19) ──────
         # Close any position once unrealized P&L ≥ X × initial credit.
@@ -2679,6 +2688,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "min_pop":            min_pop,
         "max_leg_spread_cents":   max_leg_spread_cents,
         "max_leg_spread_pct_mid": max_leg_spread_pct_mid,
+        "fill_model":             fill_model,
         "profit_target_pct":  profit_target_pct,
         # Iron Butterfly knobs (skill 45).
         "iron_butterfly_enabled":       ib_enabled,

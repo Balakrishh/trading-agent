@@ -90,6 +90,10 @@ class PositionSnapshot:
     # "broker" = Alpaca's last-trade mark; "mid" = re-marked from the
     # live bid/ask by ``remark_positions_at_mid`` (skill 44 §4).
     mark_source: str = "broker"
+    # P&L if the leg were closed at its natural price right now (short →
+    # buy back at the ask, long → sell at the bid). Set by the re-mark;
+    # None when no usable quote. Drives the profit target (backlog §6.1).
+    natural_unrealized_pl: Optional[float] = None
 
 
 def remark_positions_at_mid(positions: List[PositionSnapshot],
@@ -119,6 +123,8 @@ def remark_positions_at_mid(positions: List[PositionSnapshot],
             unrealized_pl=pl,
             unrealized_plpc=(pl / abs(p.cost_basis)) if p.cost_basis else 0.0,
             mark_source="mid",
+            natural_unrealized_pl=round(
+                ((ask if p.qty < 0 else bid) - p.avg_entry_price) * p.qty * 100, 2),
         ))
     return out
 
@@ -172,6 +178,14 @@ class SpreadPosition:
     # filled by the agent from the option chain. None = unknown → the delta
     # stop cannot fire (profit target still works).
     short_delta: Optional[float] = None
+    # Sum of legs' natural_unrealized_pl (cost to close at natural); None
+    # when any leg lacks a usable quote. Profit target basis (§6.1).
+    net_natural_pl: Optional[float] = None
+
+
+def _sum_natural(legs) -> Optional[float]:
+    vals = [getattr(leg, "natural_unrealized_pl", None) for leg in legs]
+    return None if not vals or any(v is None for v in vals) else round(sum(vals), 2)
 
 
 def attach_wheel_short_deltas(spreads: List[SpreadPosition],
@@ -223,7 +237,8 @@ class PositionMonitor:
                  profit_target_pct: float = 0.50,  # 50% profit taker
                  hard_stop_multiplier: float = 3.0,
                  strike_proximity_pct: float = 0.01,
-                 post_fill_grace_seconds: int = 60):
+                 post_fill_grace_seconds: int = 60,
+                 profit_target_basis: str = "natural"):
         """
         Additional parameter
         --------------------
@@ -243,6 +258,15 @@ class PositionMonitor:
         self.hard_stop_multiplier = hard_stop_multiplier
         self.post_fill_grace_seconds = int(post_fill_grace_seconds)
         self.strike_proximity_pct = strike_proximity_pct
+        # "natural": judge the profit target on the cost to close at the
+        # natural price (PresetConfig.fill_model, backlog §6.1); "mid":
+        # legacy mid valuation. Stops always use the mid valuation.
+        self.profit_target_basis = profit_target_basis
+
+    def _profit_pl(self, spread: "SpreadPosition") -> float:
+        if self.profit_target_basis == "natural" and spread.net_natural_pl is not None:
+            return spread.net_natural_pl
+        return spread.net_unrealized_pl
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -481,6 +505,7 @@ class PositionMonitor:
                 max_loss=tp.get("max_loss", 0),
                 spread_width=tp.get("spread_width", 0),
                 net_unrealized_pl=net_pl,
+                net_natural_pl=_sum_natural(matched_legs),
                 expiration=tp.get("expiration", ""),
                 short_strikes=short_strikes,
                 origin="trade_plan",
@@ -638,6 +663,7 @@ class PositionMonitor:
                 max_loss=round(max_loss, 2),
                 spread_width=spread_width,
                 net_unrealized_pl=net_pl,
+                net_natural_pl=_sum_natural([d["leg"] for d in decoded]),
                 expiration=expiration,
                 short_strikes=short_strikes,
                 origin="inferred",
@@ -649,16 +675,16 @@ class PositionMonitor:
     # Evaluate exit signals
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _check_wheel_exit(spread: SpreadPosition):
+    def _check_wheel_exit(self, spread: SpreadPosition):
         """Profit target at TAKE_PROFIT_PCT_OF_CREDIT; CSP delta stop at
         CSP_STOP_ABS_DELTA; otherwise hold (assignment accepted)."""
         contracts = max(1, spread.contracts_open)
         credit_position = spread.original_credit * 100 * contracts
         target = credit_position * TAKE_PROFIT_PCT_OF_CREDIT
-        if spread.net_unrealized_pl >= target > 0:
+        profit_pl = self._profit_pl(spread)
+        if profit_pl >= target > 0:
             return (ExitSignal.PROFIT_TARGET,
-                    f"Wheel: profit ${spread.net_unrealized_pl:.2f} ≥ "
+                    f"Wheel: profit ${profit_pl:.2f} ({self.profit_target_basis}) ≥ "
                     f"{TAKE_PROFIT_PCT_OF_CREDIT:.0%} of credit ${credit_position:.2f}")
         if (spread.strategy_name == CSP_STRATEGY and spread.short_delta is not None
                 and abs(spread.short_delta) >= CSP_STOP_ABS_DELTA):
@@ -785,10 +811,11 @@ class PositionMonitor:
 
         # --- 3. Profit target: 50% of credit captured ---
         profit_threshold = credit_position * self.profit_target_pct
-        if spread.net_unrealized_pl >= profit_threshold > 0:
+        profit_pl = self._profit_pl(spread)
+        if profit_pl >= profit_threshold > 0:
             return (
                 ExitSignal.PROFIT_TARGET,
-                f"Profit ${spread.net_unrealized_pl:.2f} ≥ "
+                f"Profit ${profit_pl:.2f} ({self.profit_target_basis}) ≥ "
                 f"{self.profit_target_pct*100:.0f}% of credit "
                 f"${credit_position:.2f} ({contracts}×${credit_per_contract:.2f})"
             )

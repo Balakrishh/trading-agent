@@ -86,6 +86,8 @@ A condor loses if price finishes past **either** short, so P(loss) ≈ |Δput| +
 - **Negative credit** — defensive check elsewhere; this formula assumes `C > 0` and would otherwise produce a negative floor with weird semantics.
 - **IC priced below its Δ-sum (2026-09-29 SPY)** — C/W 0.48 passed the max-|Δ| floor (0.29) but P(loss) ≈ 0.28 + 0.30 = 0.58 → negative EV. The Δ-sum gate rejects it with `Iron Condor C/W … < Δ-sum floor …`. Applies in static and adaptive modes; `edge_buffer` scales it like the vertical floor.
 
+- **Credit is priced at natural by default (2026-10-05, backlog §6.1).** `PresetConfig.fill_model` selects how `_quote_credit` / `_quote_credit_single` estimate credit: `"natural"` (default) = short bid − long ask, no haircut; `"mid"` = legacy NBBO mid − `DEFAULT_FILL_HAIRCUT`. The C/W floor formula `|Δ| × (1 + edge_buffer)` is unchanged (invariant #1); only its credit input is honest now. Week 1 evidence: 3/3 paper fills at natural. Example: a 95/90 put spread at 2.00/2.10 and 0.70/0.80 passes at mid (1.28/5 = 0.256 ≥ 0.25) and is rejected at natural (1.20/5 = 0.24). The helpers' own default stays `"mid"` so callers without a preset (backtest fixtures, doctests) are unchanged; `decide()` passes the preset's value.
+
 ## 5. Cross-References
 
 - [01 POP from short delta](01_pop_from_delta.md) — the math derivation depends on `POP ≈ 1 − |Δ|`.
@@ -94,4 +96,4 @@ A condor loses if price finishes past **either** short, so P(loss) ≈ |Δput| +
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

@@ -286,6 +286,8 @@ self.risk_manager = RiskManager(
 - **Scan-mode/edge-buffer as overlays, not Custom** — the loader treats `scan_mode` and `edge_buffer` as top-level overlays (mirroring `directional_bias`) so the user can pick "Balanced + Adaptive" without the Custom profile. The Custom path is reserved for full re-specification of the dataclass.
 - **Class constants in `StrategyPlanner` are LEGACY fallbacks** — `TARGET_DTE`, `DTE_RANGE`, `SPREAD_WIDTH` only fire when the planner is instantiated without a preset (older tests, scripts predating the preset system). New code should always pass `preset=…`.
 
+- **`fill_model` (2026-10-05).** `"natural"` (default) | `"mid"`. Top-level overlay in `STRATEGY_PRESET.json` (validated against `FILL_MODELS`; invalid → profile default with a warning) or a key inside `custom`. Shown in `to_summary_line()` as `Fills @ …`, exposed in the Strategy-Profile panel, and threaded to `decide()` (credit), the Wheel scorers and `PositionMonitor(profit_target_basis=…)`.
+
 ## 5. Cross-References
 
 - [03 Credit/Width floor](03_credit_to_width_floor.md) — the `min_credit_ratio` knob in static mode; `edge_buffer` in adaptive mode.

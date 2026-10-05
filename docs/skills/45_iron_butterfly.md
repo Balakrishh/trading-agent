@@ -177,6 +177,8 @@ iron_butterfly_wing_width_pct:     Tuple[float, ...] = (0.020, 0.030, 0.040)
 - **No CI-invariant scanner rule for IB yet.** The vertical invariant is `|Δ_short| × (1 + edge_buffer)`. IB has no analogous scan-time invariant because the equivalent breakeven condition (`2C/W = 1`) is degenerate (implies zero max-loss). The gate here is the EV > 0 check, which is a structural guarantee at the scoring-function level rather than an AST-walker check at the source-file level. When Phase 2 (broken-wing) or Phase 4 (calendar) land, the CI scanner will need an extension to check per-strategy scoring invariants — that's tracked in the additional-strategies plan doc's cross-cutting decision #3.
 - **Live-cycle wiring is future work.** This skill's Phase 1 delivers the scorer, the reject taxonomy, the preset knobs, and the tests. The chain-scanner orchestration (finding the ATM strike, sweeping the wing-width grid, packaging accepted candidates as SpreadCandidate objects) is deliberately NOT in this session — it's the follow-on, alongside the backtester enablement. The pattern matches how skill 40's long-term evaluator shipped as scorer + design doc first, orchestrator second.
 
+- **Credit at natural (2026-10-05, §6.1).** `decide_iron_butterfly` prices shorts at the bid and wings at the ask under `fill_model="natural"` (legacy four-leg mids under `"mid"`).
+
 ## 5. Live Dispatch Wiring (added 2026-07-05)
 
 `Strategy._plan_iron_butterfly` is the strategy-planner's IB entry point. Wired into the sideways-regime branch of `Strategy.plan_trade` — when `preset.iron_butterfly_enabled` is True, the planner tries IB first; if `decide_iron_butterfly` returns no positive-EV candidate the planner falls back to `_plan_iron_condor` so the SIDEWAYS branch is never left empty.
@@ -221,4 +223,4 @@ Hot-reloads on the next cycle (skill 13). Set back to `false` to disable without
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

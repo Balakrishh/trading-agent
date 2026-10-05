@@ -97,7 +97,7 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 
 Order (paper only, one at a time, each with skill doc + tests + scoring in `decision_engine.py`):
 
-- [ ] **6.1 Fill-realistic pricing.** Compute EV, credit floors and screen yields at natural prices (sell at bid, buy at ask) instead of mid in all scorers — paper filled only at natural on 2026-09-30 (VZ entry) and 2026-10-01 (SPY close). Small change; makes every other number honest.
+- [x] **6.1 Fill-realistic pricing.** *(Done 2026-10-05: `PresetConfig.fill_model`, default natural; scorers, Wheel, iron butterfly, profit target.)* Compute EV, credit floors and screen yields at natural prices (sell at bid, buy at ask) instead of mid in all scorers — paper filled only at natural on 2026-09-30 (VZ entry) and 2026-10-01 (SPY close). Small change; makes every other number honest.
 - [ ] **6.2 Regime-state classifier + playbook table.** Per cycle: trend × IV Rank × RSI extreme → one playbook from the table above (extends §1's market risk-state overlay). Fully deterministic; journal the chosen playbook on every row.
 - [ ] **6.3 Debit spreads** for trend + low IV (call debit in uptrend, put debit in downtrend). Biggest trade-count gain in low-IV tapes.
 - [ ] **6.4 Bounce bull put:** bearish + RSI < 30 + IV Rank elevated + stabilisation trigger (e.g. close reclaims the 5-day high) → bull put below the recent low.
