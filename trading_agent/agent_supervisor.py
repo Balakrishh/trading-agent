@@ -47,6 +47,19 @@ _MAX_SLEEP_SEC = 12 * 60 * 60
 _CRASH_BACKOFF_SEC = 60
 
 
+def in_session_sleep_sec() -> int:
+    """Seconds to wait between agent cycles during market hours.
+
+    ``AGENT_CYCLE_SLEEP_SEC`` (default 60), clamped to [_MIN_SLEEP_SEC,
+    900]. Invalid values fall back to the default."""
+    raw = os.environ.get("AGENT_CYCLE_SLEEP_SEC", "").strip()
+    try:
+        val = int(raw) if raw else _MIN_SLEEP_SEC
+    except ValueError:
+        val = _MIN_SLEEP_SEC
+    return max(_MIN_SLEEP_SEC, min(900, val))
+
+
 def seconds_until_next_open(now: Optional[datetime] = None) -> int:
     """Return seconds until the next NYSE regular-session open.
 
@@ -66,9 +79,12 @@ def seconds_until_next_open(now: Optional[datetime] = None) -> int:
     else:
         now = now.astimezone(tz)
 
-    # If already inside the session, no sleep needed.
+    # Inside the session: this sleep IS the gap between agent cycles
+    # (each cycle runs ~15 s, so the default 60 s gives a cycle about
+    # every 75 s — not every 5 minutes as older docs said). Tunable via
+    # AGENT_CYCLE_SLEEP_SEC; e.g. 285 restores a ~5-minute cadence.
     if is_within_market_hours(now, profile):
-        return _MIN_SLEEP_SEC
+        return in_session_sleep_sec()
 
     # Candidate today's open in the profile's timezone.
     today_open = now.replace(

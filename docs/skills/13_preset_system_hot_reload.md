@@ -279,7 +279,7 @@ self.risk_manager = RiskManager(
 - **JSON gives lists; dataclass wants tuples** — `dte_grid`, `delta_grid`, `width_grid_pct` are `Tuple[...]` because `frozen=True` requires hashable fields. `_coerce_overrides()` round-trips lists → tuples; without it, custom-profile loads would crash on the dataclass instantiation.
 - **`_make_custom()` ignores unknown keys** — forward-compat: an older preset file that lacks a newer field still loads; a newer file with an extra field on an older agent silently ignores it. This lets the dashboard ship new fields ahead of the agent.
 - **Frozen dataclass = use `replace()`, never mutate** — `preset.max_delta = 0.4` raises `FrozenInstanceError`. To override at load time, use `replace(preset, max_delta=0.4)`. The overlay pattern in `load_active_preset()` (for `directional_bias`, `scan_mode`, `edge_buffer`) shows the canonical approach.
-- **Hot-reload is per-cycle, not real-time** — a dashboard change made at 14:32:10 takes effect at the next 5-min cycle boundary (14:35:00), not immediately. In-flight orders complete under the previous preset. This is intentional; mid-cycle preset changes would create inconsistent risk decisions.
+- **Hot-reload is per-cycle, not real-time** — a dashboard change made at 14:32:10 takes effect at the next cycle (≈75 s by default) boundary (14:35:00), not immediately. In-flight orders complete under the previous preset. This is intentional; mid-cycle preset changes would create inconsistent risk decisions.
 - **Subprocess isolation** — the agent reads the preset in its own process; the dashboard reads it for display in another. They don't share memory. The file is the only sync point. This is why atomic writes matter.
 - **`directional_bias` coerces invalid → `"auto"`** — silently. Logged, but not an error. Same forward-compat philosophy: a typo or future bias label still produces a working agent.
 - **`edge_buffer` validated range [0.0, 1.0]** — anything outside falls back to the profile default + warning. Negative values would invert the C/W floor; values >1 would be uneconomical (demanding C/W > 100% of width).
@@ -295,4 +295,4 @@ self.risk_manager = RiskManager(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-01.*
+*Last verified against repo HEAD on 2026-10-05.*

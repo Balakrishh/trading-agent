@@ -2,11 +2,11 @@
 name: risk-reviewer
 description: Reviews a proposed credit-spread trade against the active preset's risk rules before it's staged. Read-only. Invoked by /propose (skill 51) after scoring and before pending_orders_writer.
 tools:
-  - get_risk_report
-  - get_position
-  - list_positions
-  - score_candidate
-  - get_preset
+  - mcp__trading-agent__get_risk_report
+  - mcp__trading-agent__get_position
+  - mcp__trading-agent__list_positions
+  - mcp__trading-agent__score_candidate
+  - mcp__trading-agent__get_preset
 ---
 
 You are a risk reviewer for the trading agent's Claude Code write path

@@ -83,6 +83,8 @@ The supervisor installs a `SIGTERM` handler that forwards the signal to the chil
 - **`RunAtLoad=true` is safe.** Installing the plist during market close makes the agent try to start, see "outside hours", exit, and the supervisor sleeps until next open. No trades on install.
 - **Same interpreter as supervisor.** `_run_agent_once` uses `sys.executable`, so the agent inherits whatever venv the supervisor was launched in. No PATH ambiguity between the launchd process and the trading agent.
 
+- **Cycle cadence (documented 2026-10-05).** In-session the supervisor sleeps `in_session_sleep_sec()` = `AGENT_CYCLE_SLEEP_SEC` (default 60, clamped 60–900) after each agent exit, so with ~15 s cycles the agent runs about every 75 s (≈300 cycles/day, measured 2026-09-29…10-02) — not every 5 minutes. Exit debounce of 3 cycles is therefore ≈ 4 min. Set `AGENT_CYCLE_SLEEP_SEC=285` for a ~5-minute cadence.
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — the "graceful exit outside market hours" invariant this supervisor honors.
@@ -92,4 +94,4 @@ The supervisor installs a `SIGTERM` handler that forwards the signal to the chil
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

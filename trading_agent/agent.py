@@ -1159,6 +1159,14 @@ class TradingAgent:
         spreads = self.position_monitor.evaluate(
             spreads, current_regimes, underlying_prices)
 
+        # Skill 50 — publish the monitor's own valuation so /triage reads
+        # the same mid P&L the exit rules just used (not a second feed).
+        try:
+            from trading_agent.position_snapshot import build_snapshot, write_snapshot
+            write_snapshot(build_snapshot(spreads, underlying_prices))
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — snapshot is a read-side convenience
+            logger.warning("Position valuation snapshot not written: %s", exc)
+
         # ── PDT same-day-open detection ─────────────────────────────────
         # Build the set of tickers with action="submitted" today (UTC).
         # Used below to suppress REGIME_SHIFT exits on small accounts so
@@ -2486,7 +2494,14 @@ class TradingAgent:
             "regime": analysis.regime.value,
             "strategy": plan.strategy_name,
             "plan_valid": plan.valid,
-            "rejection_reason": plan.rejection_reason if not plan.valid else None,
+            # Valid plan vetoed by RiskManager → the first failed check is
+            # the reason (pre-2026-10-05 these rows had None and showed as
+            # "(no reason recorded)" in the reject histogram).
+            "rejection_reason": (
+                plan.rejection_reason if not plan.valid
+                else (f"risk: {verdict.checks_failed[0]}"
+                      if not verdict.approved and verdict.checks_failed else None)
+            ),
             "risk_approved": verdict.approved,
             "net_credit": plan.net_credit if plan.valid else None,
             "max_loss": plan.max_loss if plan.valid else None,

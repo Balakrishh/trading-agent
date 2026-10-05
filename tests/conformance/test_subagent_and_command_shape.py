@@ -97,10 +97,13 @@ def test_every_subagent_tool_in_readonly_set():
     tools in READONLY_TOOLS.
     """
     ro = _readonly_tools()
+    prefix = "mcp__trading-agent__"
     offenders = []
     for md in sorted(_AGENTS.glob("*.md")):
         for t in _tools_list(md.read_text()):
-            if t not in ro:
+            # Full MCP name required: a bare name spawns the subagent with
+            # zero tools (2026-10-02). The stripped name must be read-only.
+            if not t.startswith(prefix) or t[len(prefix):] not in ro:
                 offenders.append((md.name, t))
     assert not offenders, (
         f"Subagent tool(s) not in READONLY_TOOLS: {offenders}. "

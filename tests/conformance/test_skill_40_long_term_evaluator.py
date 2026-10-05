@@ -642,3 +642,16 @@ def test_evaluator_reports_liquidity_rejects():
     ev = _csp_evaluator(chain=[_short_put(bid=0.40, ask=1.11)])
     assert ev.recommend(["KO"]) == []
     assert "leg_spread_wide" in ev.last_diagnostics["KO"][0]
+
+
+@pytest.mark.parametrize("wl", ['["KO"]', "['KO']", "KO", " KO , ", ["KO"]])
+def test_wheel_screen_accepts_list_shapes(monkeypatch, wl):
+    """Regression 2026-09-30: '["VZ"]' (a JSON list sent as text) was
+    treated as a single ticker → missing:fundamentals."""
+    import trading_agent.mcp.tools.strategy as st
+    monkeypatch.setattr(st, "_positions_provider", lambda: ManualPositionsProvider.from_dicts([]))
+    monkeypatch.setattr(st, "_earnings_days", lambda t: None)
+    monkeypatch.setattr(st._market, "get_quote", lambda t: {"price": 100.0})
+    monkeypatch.setattr(st._market, "get_fundamentals", lambda t: {"fundamentals": _GOOD})
+    monkeypatch.setattr(st, "_chain_from_dataserver", lambda t, e, o: [_short_put()])
+    assert st.wheel_screen(wl)["watchlist"] == ["KO"]

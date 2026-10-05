@@ -102,7 +102,7 @@ resp = requests.post(
 )
 ```
 
-A 5-second timeout caps the worst case so a slow Telegram API can't tank a 5-minute cycle.
+A 5-second timeout caps the worst case so a slow Telegram API can't tank a cycle.
 
 ### 3.4 Dedup helper (journal-derived, date-keyed)
 
@@ -197,7 +197,7 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 ## 4. Edge Cases / Guardrails
 
 - **Notifier silently no-op when env unset.** `is_active` returns False, every `notify_*` returns False, `_send_telegram_alert` short-circuits before the network call. Existing installs that don't set `TELEGRAM_BOT_TOKEN` see zero behavior change.
-- **5-second timeout protects the cycle.** A slow Telegram API can't make a 5-min cycle miss its tick. Hard cap; no retries.
+- **5-second timeout protects the cycle.** A slow Telegram API can't make a cycle miss its tick. Hard cap; no retries.
 - **Bare `Exception` catch in `_send`.** Network, JSON, DNS, timeout, schema — anything Telegram-side becomes a single WARNING log line and a `False` return. The agent's primary job (execute trades) must never fail because the paging system has a problem.
 - **Dedup fail-open.** If the journal can't be read (file corruption, permission, etc.), `_telegram_alert_already_sent_today` returns False — preferring one extra alert over zero. Operator-side noise is recoverable; a missed stuck-position alert is not.
 - **Journal write failure after successful send.** If the alert reaches Telegram but the dedup-journal write fails, the operator may receive a duplicate alert next cycle. Logged at WARNING; intentional fallback because re-attempting an already-delivered alert is harmless.
@@ -216,4 +216,4 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 
 ---
 
-*Last verified against repo HEAD on 2026-10-01.*
+*Last verified against repo HEAD on 2026-10-05.*

@@ -56,6 +56,8 @@ Claude then applies the three predicates in priority order (profit target → st
 - **Backtest mode.** For "how would this have played historically", the operator invokes `/triage` with a `--backtest` flag; the playbook then routes `score_candidate` through `decide()` in backtest mode (invariant #3).
 - **Position fields (2026-09-29)** — `get_position` now searches all open positions (not just today's) and returns `short_strikes` (list), `width`, `max_loss`, `opened_at`. Use `short_strikes` for the proximity predicate; if null (trade plan aged out), read strikes from the broker legs.
 
+- **One valuation source (2026-10-05).** Triage reads `get_position_valuations()` — the monitor's own mid P&L / exit signal written each cycle to `trade_journal/position_valuations.json` (`trading_agent/position_snapshot.py`) — instead of pricing legs itself. Mixing feeds produced a −$392 vs −$112 disagreement and a wrong "close now" verdict on 2026-09-30.
+
 ## 5. Cross-References
 
 - `30_profit_target_management.md` — the profit-take predicate this playbook re-uses.
@@ -65,4 +67,4 @@ Claude then applies the three predicates in priority order (profit target → st
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

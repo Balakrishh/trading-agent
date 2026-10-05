@@ -27,6 +27,7 @@ from trading_agent.mcp.tools import market as _market
 _HANDLERS: Dict[str, Callable[..., Any]] = {
     "list_positions":     _positions.list_positions,
     "get_position":       _positions.get_position,
+    "get_position_valuations": _positions.get_position_valuations,
     "list_recent_trades": _positions.list_recent_trades,
     "get_journal_summary": _positions.get_journal_summary,
     "get_preset":         _strategy.get_preset,

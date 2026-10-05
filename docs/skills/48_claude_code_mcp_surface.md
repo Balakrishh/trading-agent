@@ -56,6 +56,7 @@ SERVER_READ_ONLY: bool = True
 READONLY_TOOLS: tuple[str, ...] = (
     "list_positions",
     "get_position",
+    "get_position_valuations",
     "list_recent_trades",
     "get_journal_summary",
     "get_preset",
@@ -123,6 +124,10 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 
 - **`.env` loading (2026-09-29).** `python -m trading_agent.mcp` calls `load_dotenv()` at startup, the same source the data server reads via `load_config()`, so `SCHWAB_API_SERVER_KEY` / `SCHWAB_API_BASE_URL` in `.env` reach the MCP. As with `load_config()`, a variable already exported in the launching shell (e.g. `~/.zshrc`) wins over `.env` — keep the key in exactly one place or the two servers can disagree (every data-server call then surfaces as "unreachable", since the client swallows 401s).
 
+- **`get_position_valuations()` (2026-10-05).** Reads `trade_journal/position_valuations.json`, written by the agent after every exit evaluation (`trading_agent/position_snapshot.py`): per-position mid P&L, exit signal, short delta, underlying price, `age_seconds`. `/triage` uses it so it never re-prices legs from a second feed.
+- **Fundamentals `short_int_to_float`:** Schwab's explicit 0.0 is mapped to `None` (not provided).
+- **Subagent tool names** must be the full `mcp__trading-agent__<tool>` form; bare names leave the subagent with zero tools (Claude Code refuses to spawn it). `scan_subagent_allowlists.py` enforces the prefix.
+
 ## 5. Cross-References
 
 - `47_schwab_data_api.md` — the HTTP data server this MCP layer prefers for quotes/chains/market-status. When it's up, `_data_server_get()` uses it; when it's down, the tools return `{"source": "unavailable"}` structured rows.
@@ -132,4 +137,4 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

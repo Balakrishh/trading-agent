@@ -167,7 +167,7 @@ if isinstance(exec_result, dict) and exec_result.get("status") == "error":
 
 - **Worst-case dedup behaviour.** If the network is so degraded that BOTH attempts time out before getting a response — but Alpaca actually accepted the first one — the agent returns `status="error"` and the trade looks like it failed. The journal warning row tells the operator to search by `client_order_id`. The order IS at the broker, and a manual cycle on the operator's end can either let it ride or cancel it. The dedup property has held: there's still only ONE order, just one we don't know about until the operator checks.
 
-- **The retry budget is per-call, not per-cycle.** If the next 5-min cycle re-submits the same plan, that's a *new* `client_order_id` and a *new* order. This is correct behaviour — by then the operator should have triaged the previous warning, and the trade plan's pre-conditions (regime, credit, sizing) have been re-evaluated.
+- **The retry budget is per-call, not per-cycle.** If the next cycle re-submits the same plan, that's a *new* `client_order_id` and a *new* order. This is correct behaviour — by then the operator should have triaged the previous warning, and the trade plan's pre-conditions (regime, credit, sizing) have been re-evaluated.
 
 - **Time-budget interaction with `_cycle_lock`.** The cycle-singleton lock holds throughout a cycle; retries don't release it. Worst-case 31s of order-submission latency means subsequent triggers (Streamlit watchdog, auto-refresh) skip cleanly via `status="skipped_concurrent"` rather than racing past the lock. See `tests/test_cycle_singleton.py`.
 
@@ -182,4 +182,4 @@ if isinstance(exec_result, dict) and exec_result.get("status") == "error":
 
 ---
 
-*Last verified against repo HEAD on 2026-10-01.*
+*Last verified against repo HEAD on 2026-10-05.*

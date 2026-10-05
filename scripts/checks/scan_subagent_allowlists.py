@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[2]
 AGENTS_DIR = ROOT / ".claude" / "agents"
 
 
+MCP_PREFIX = "mcp__trading-agent__"
+
+
 def _parse_tools_from_frontmatter(text: str) -> List[str]:
     """Return the ``tools:`` YAML list from the file's frontmatter.
 
@@ -73,7 +76,12 @@ def main() -> int:
         tools = _parse_tools_from_frontmatter(md.read_text())
         total += 1
         for t in tools:
-            if t not in readonly:
+            # Claude Code resolves MCP tools only by their full name
+            # (mcp__<server>__<tool>). A bare name spawns the subagent with
+            # zero tools — the 2026-10-02 weekly review failure.
+            if not t.startswith(MCP_PREFIX):
+                offenders.append(f"{md.name}: {t!r} must be {MCP_PREFIX}<tool>")
+            elif t[len(MCP_PREFIX):] not in readonly:
                 offenders.append(f"{md.name}: {t!r} not in READONLY_TOOLS")
 
     print(f"SDD subagent-allowlist check — scanned {total} subagent(s), "

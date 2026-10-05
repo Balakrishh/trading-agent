@@ -22,6 +22,7 @@ SERVER_READ_ONLY: bool = True
 READONLY_TOOLS: tuple[str, ...] = (
     "list_positions",
     "get_position",
+    "get_position_valuations",
     "list_recent_trades",
     "get_journal_summary",
     "get_preset",

@@ -40,7 +40,7 @@ Project-specific terms used across skills, code, and the journal. When a term ha
 | **scan_mode** | `"static"` (single-point planner) or `"adaptive"` (grid scanner). Preset field. See [14](14_adaptive_vs_static_scan_modes.md). |
 | **Wilder smoothing** | EMA with `alpha = 1 / window` (slower than standard EMA). Used for ADX. See [10](10_adx_wilder_smoothing.md). |
 | **Sentinel pattern** | A `*_signal_available: bool` companion field that distinguishes "RPC failed → 0.0 default" from "real 0.0 reading." Used everywhere a missing macro overlay must not be silently treated as a real value. |
-| **Cycle** | One full execution of `TradingAgent.run_cycle()`. Default cadence is 5 minutes during market hours. The unit at which presets reload. |
+| **Cycle** | One full execution of `TradingAgent.run_cycle()`. Cadence during market hours ≈ 75 s: each cycle runs ~15 s, then the supervisor sleeps `AGENT_CYCLE_SLEEP_SEC` (default 60 s; skill 57). The unit at which presets reload. |
 | **`STRATEGY_PRESET.json`** | Sentinel JSON file at the repo root. Dashboard writes; agent reads each cycle. Atomic temp+rename. See [13](13_preset_system_hot_reload.md). |
 | **AGENT_RUNNING / DRY_RUN_MODE** | Sibling sentinel files at the repo root, same write-once-read-each-cycle pattern. |
 | **Static mode** | Planning algorithm that picks one (Δ, DTE, width) point. C/W gated by `min_credit_ratio`. Original behaviour. |
@@ -299,4 +299,4 @@ External documents:
 
 ---
 
-*Last verified against repo HEAD on 2026-05-05.*
+*Last verified against repo HEAD on 2026-10-05.*

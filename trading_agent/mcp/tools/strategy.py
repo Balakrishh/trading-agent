@@ -11,6 +11,8 @@ token refresh).
 """
 from __future__ import annotations
 
+import json
+
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -305,7 +307,18 @@ def wheel_screen(
     from trading_agent.long_term_evaluator import EvaluatorConfig, LongTermEvaluator
 
     if isinstance(watchlist, str):
-        watchlist = [t for t in watchlist.replace(" ", "").split(",") if t]
+        # Some MCP clients send a list as its JSON text ('["VZ"]'); without
+        # this it became one ticker and failed with missing:fundamentals
+        # (2026-09-30 /propose VZ).
+        s = watchlist.strip()
+        if s.startswith("["):
+            try:
+                watchlist = [str(x) for x in json.loads(s)]
+            except ValueError:
+                watchlist = [x for x in s.strip("[]").replace('"', "").replace("'", "")
+                             .replace(" ", "").split(",") if x]
+        else:
+            watchlist = [t for t in s.replace(" ", "").split(",") if t]
     if not watchlist:
         raise ValueError("watchlist must be a non-empty list of tickers")
     try:
