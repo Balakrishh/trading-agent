@@ -2983,8 +2983,28 @@ class TradingAgent:
     # Order status check
     # ==================================================================
 
+    def _reconcile_entry_fills(self) -> None:
+        """Backlog §2: write actual multi-leg entry fills into the trade
+        plans the monitor reads (``fill_reconciler.py``)."""
+        if self.config.trading.dry_run:
+            return
+        from trading_agent.executor import OrderExecutor
+        from trading_agent.fill_reconciler import reconcile_fills
+        try:
+            counts = reconcile_fills(
+                self.config.logging.trade_plan_dir,
+                get_order=self.order_tracker.get_order_by_id,
+                record_fill=lambda path, run, fill: OrderExecutor._record_fill_credit(
+                    path, run, None, fill),
+                mark_unfilled=OrderExecutor._mark_run_unfilled)
+            if counts["recorded"] or counts["unfilled"]:
+                logger.info("Entry fills reconciled: %s", counts)
+        except Exception as exc:  # noqa: skill-34-exempt — fill reconciliation is best-effort; next cycle retries
+            logger.warning("Entry-fill reconciliation failed: %s", exc)
+
     def _check_order_statuses(self) -> Dict:
         """Fetch recent orders and log a summary."""
+        self._reconcile_entry_fills()
         try:
             open_orders = self.order_tracker.fetch_open_orders()
             recent_fills = self.order_tracker.fetch_recent_fills(limit=10)
