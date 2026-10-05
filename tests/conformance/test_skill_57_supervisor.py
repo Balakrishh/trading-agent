@@ -161,3 +161,23 @@ def test_skill_57_in_session_sleep_is_configurable(monkeypatch):
     for raw, want in (("285", 285), ("5", 60), ("99999", 900), ("abc", 60)):
         monkeypatch.setenv("AGENT_CYCLE_SLEEP_SEC", raw)
         assert in_session_sleep_sec() == want
+
+
+def test_skill_57_wall_clock_sleep_survives_system_sleep():
+    """2026-10-05: time.sleep pauses while a Mac sleeps, so a 12 h wait
+    overran the open. wall_clock_sleep re-checks the wall clock every slice:
+    a jump (system sleep) ends the wait at the next slice."""
+    from trading_agent.agent_supervisor import wall_clock_sleep
+    now = [0.0]
+    slept = []
+
+    def fake_sleep(s):
+        slept.append(s)
+        now[0] += s + (50_000 if len(slept) == 2 else 0)   # lid closed 14 h during slice 2
+
+    wall_clock_sleep(43_200, clock=lambda: now[0], sleep=fake_sleep, slice_sec=300)
+    assert slept == [300, 300]          # woke right after the jump, not 12 h later
+    slept.clear(); now[0] = 0.0
+    wall_clock_sleep(650, clock=lambda: now[0], sleep=lambda s: (slept.append(s), now.__setitem__(0, now[0] + s)))
+    assert slept == [300, 300, 50]
+    wall_clock_sleep(0, clock=lambda: 0.0, sleep=lambda s: (_ for _ in ()).throw(AssertionError))
