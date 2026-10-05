@@ -2717,6 +2717,9 @@ class TradingAgent:
                 exec_result.get("order_id") if exec_result else None
             ),
             "run_id": exec_result.get("run_id") if exec_result else None,
+            # Contracts submitted (2026-10-05) — the playbook scorecard
+            # needs it for return on risk; spread rows lacked it before.
+            "contracts": exec_result.get("qty") if exec_result else None,
             "thesis": thesis,
         }
 

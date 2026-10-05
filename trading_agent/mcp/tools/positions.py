@@ -133,6 +133,39 @@ def get_journal_summary() -> Dict[str, Any]:
     }
 
 
+def get_playbook_scorecard(days: Any = 365, min_trades: Any = 20) -> Dict[str, Any]:
+    """Per-playbook track record over the last ``days`` (backlog §6.6).
+
+    Round trips (open → real close) grouped by the playbook they were
+    opened under: trades, win rate, avg win / loss, expectancy, return on
+    risk, entry slippage, and an advisory verdict + suggested risk % once
+    ``min_trades`` round trips exist. Never changes the preset.
+    """
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    from trading_agent.journal_reader import JournalReader
+    from trading_agent.playbook_scorecard import scorecard_dict
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+
+    def recent(rows):
+        for rec in rows:
+            try:
+                ts = datetime.fromisoformat(str(rec.get("timestamp", "")).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                yield rec
+
+    out = scorecard_dict(recent(JournalReader()._iter_rows()),
+                         plan_dir=os.environ.get("TRADE_PLAN_DIR", "trade_plans"),
+                         min_trades=int(min_trades))
+    return {**out, "days": int(days)}
+
+
 def get_position_valuations() -> Dict[str, Any]:
     """The agent monitor's latest per-position valuation (mid P&L, exit signal).
 
