@@ -87,6 +87,19 @@ def test_covered_call_requires_shares():
     assert ok == [] and any("not covered" in f for f in naked)
 
 
+def test_csp_paused_by_market_state_cc_unaffected():
+    """Skill 58: CAUTION / DEFENSIVE / CAPITULATION pause new CSPs."""
+    snap = {"state": "DEFENSIVE", "gate": {"allow_new_csp": False}, "age_seconds": 60}
+    args = {"qty": 1, "equity": 30_000, "options_buying_power": 30_000,
+            "market_state_snapshot": snap}
+    assert check_wheel_order(_csp_plan(), shares_held=0, **args) == [
+        "market_state_DEFENSIVE_pauses_new_csp"]
+    assert check_wheel_order(_cc_plan(), shares_held=100, **args) == []
+    stale = {**snap, "age_seconds": 5 * 24 * 3600}               # agent not running
+    assert check_wheel_order(_csp_plan(), shares_held=0,
+                             **{**args, "market_state_snapshot": stale}) == []
+
+
 # ── single-leg open ───────────────────────────────────────────────────────
 
 def _resp(body):

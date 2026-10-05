@@ -28,6 +28,7 @@ _HANDLERS: Dict[str, Callable[..., Any]] = {
     "list_positions":     _positions.list_positions,
     "get_position":       _positions.get_position,
     "get_position_valuations": _positions.get_position_valuations,
+    "get_market_state":   _market.get_market_state,
     "list_recent_trades": _positions.list_recent_trades,
     "get_journal_summary": _positions.get_journal_summary,
     "get_preset":         _strategy.get_preset,

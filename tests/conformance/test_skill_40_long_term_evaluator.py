@@ -523,6 +523,25 @@ def test_wheel_screen_mcp_tool(monkeypatch):
     assert out["diagnostics"]["ZZZ"] == ["missing:fundamentals"]
 
 
+def test_wheel_screen_pauses_csp_in_market_state(monkeypatch):
+    """Skill 58: a CAUTION snapshot removes CSP rows and says why."""
+    import trading_agent.mcp.tools.strategy as st
+    from trading_agent import market_state
+    monkeypatch.setattr(st, "_positions_provider", lambda: ManualPositionsProvider.from_dicts([]))
+    monkeypatch.setattr(st, "_earnings_days", lambda t: None)
+    monkeypatch.setattr(st._market, "get_quote", lambda t: {"price": 100.0})
+    monkeypatch.setattr(st._market, "get_fundamentals", lambda t: {"fundamentals": _GOOD})
+    monkeypatch.setattr(st, "_chain_from_dataserver", lambda t, e, o: [_short_put()])
+    caution = market_state.classify_market_state(market_state.MarketInputs(
+        spy_price=100.0, spy_sma20=101.0, spy_sma50=102.0, spy_sma200=90.0))
+    market_state.write_state(caution)
+    out = st.wheel_screen(["KO"], max_collateral=12000)
+    assert out["recommendations"] == []
+    assert out["market_state"] == "CAUTION"
+    assert out["csp_paused"] == "market_state_CAUTION_pauses_new_csp"
+    assert out["diagnostics"]["KO"] == ["market_state_CAUTION_pauses_new_csp"]
+
+
 def test_wheel_screen_falls_back_to_monthly_expiration(monkeypatch):
     """Regression 2026-09-29: the weekly (11/13) had no KO chain; the 11/20
     monthly did. The tool must try the next candidate, not report no_chain."""

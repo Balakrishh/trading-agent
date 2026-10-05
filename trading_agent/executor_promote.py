@@ -265,7 +265,8 @@ def _submit_via_executor(
 
 def check_wheel_order(plan, *, qty: int, equity: float,
                       options_buying_power: Optional[float],
-                      shares_held: int) -> List[str]:
+                      shares_held: int,
+                      market_state_snapshot: Optional[Dict[str, Any]] = None) -> List[str]:
     """Pre-submit checks for a Wheel leg. Returns failure reasons; empty
     means OK. Pure so it is unit-testable without a broker.
 
@@ -274,6 +275,8 @@ def check_wheel_order(plan, *, qty: int, equity: float,
       put may not tie up more than MAX_CSP_COLLATERAL_PCT_OF_EQUITY.
     * Covered call: ≥ 100 × qty shares must already be held — otherwise
       the "covered" call is naked and must never be sent.
+    * CSP while the market risk state pauses new puts (CAUTION /
+      DEFENSIVE / CAPITULATION — skill 58), given ``market_state_snapshot``.
     """
     from trading_agent.wheel_policy import (                    # noqa: PLC0415
         CC_STRATEGY, CSP_STRATEGY, MAX_CSP_COLLATERAL_PCT_OF_EQUITY)
@@ -297,6 +300,10 @@ def check_wheel_order(plan, *, qty: int, equity: float,
         if equity <= 0 or collateral > cap:
             fails.append(f"collateral ${collateral:,.0f} > "
                          f"{MAX_CSP_COLLATERAL_PCT_OF_EQUITY:.0%} of equity (${cap:,.0f})")
+        from trading_agent.market_state import csp_pause_reason   # noqa: PLC0415
+        paused = csp_pause_reason(market_state_snapshot)
+        if paused:
+            fails.append(paused)
     elif plan.strategy_name == CC_STRATEGY:
         if leg.option_type != "call":
             fails.append("Covered Call leg is not a call")
@@ -338,8 +345,13 @@ def _submit_wheel(plan, *, qty: int, dry_run: bool) -> Dict[str, Any]:
         cfg.alpaca.api_key, cfg.alpaca.secret_key, cfg.alpaca.base_url).snapshot()
         if p.ticker == plan.ticker)
 
+    from trading_agent import market_state                     # noqa: PLC0415
+    from trading_agent.strategy_presets import load_active_preset  # noqa: PLC0415
+    ms_snap = (market_state.read_state()
+               if load_active_preset().market_state_enabled else None)
     fails = check_wheel_order(plan, qty=qty, equity=equity,
-                              options_buying_power=obp, shares_held=shares)
+                              options_buying_power=obp, shares_held=shares,
+                              market_state_snapshot=ms_snap)
     if fails:
         return {"status": "risk_rejected", "reason": "; ".join(fails)}
 

@@ -85,6 +85,34 @@ def get_market_status() -> Dict[str, Any]:
         return {"open": None, "source": "unavailable", "error": str(exc)}
 
 
+def get_market_state() -> Dict[str, Any]:
+    """The agent's latest whole-market risk state (skill 58).
+
+    Reads ``trade_journal/market_state.json`` (written every cycle):
+    state, reasons, inputs (SPY trend, VIX, VIX/VIX3M, breadth), the
+    entry gate (size multiplier, allowed strategies, CSP pause) and
+    ``age_seconds``. In CAUTION / DEFENSIVE it adds a SPY put-spread
+    hedge suggestion sized to half the account — a suggestion to stage
+    through /propose, never an order.
+    """
+    from trading_agent import market_state
+
+    snap = market_state.read_state()
+    if snap is None:
+        return {"state": None, "source": "unavailable",
+                "note": "no snapshot yet — the agent writes one each cycle "
+                        "when market_state_enabled is on"}
+    out = {**snap, "source": "agent_cycle"}
+    spy = (snap.get("inputs") or {}).get("spy_price")
+    if snap.get("state") in (market_state.CAUTION, market_state.DEFENSIVE) and spy:
+        out["hedge_suggestion"] = market_state.hedge_suggestion(
+            float(snap.get("account_balance") or 0.0), float(spy))
+    elif snap.get("state") == market_state.CAPITULATION:
+        out["hedge_note"] = ("Puts are most expensive at capitulation — reduce "
+                             "exposure rather than buying protection now.")
+    return out
+
+
 def get_fundamentals(ticker: str) -> Dict[str, Any]:
     """Return the fundamentals block for one equity ticker.
 

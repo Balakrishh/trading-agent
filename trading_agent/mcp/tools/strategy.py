@@ -387,6 +387,17 @@ def wheel_screen(
     )
     recs = evaluator.recommend(tickers)
     diagnostics = dict(evaluator.last_diagnostics)
+
+    # Skill 58: CAUTION / DEFENSIVE / CAPITULATION pause new cash-secured
+    # puts; covered calls (on shares already held) are unaffected.
+    from trading_agent import market_state
+    ms_snap = market_state.read_state() if preset.market_state_enabled else None
+    csp_paused = market_state.csp_pause_reason(ms_snap)
+    if csp_paused:
+        for r in recs:
+            if r.strategy == "cash_secured_put":
+                diagnostics.setdefault(r.ticker, []).append(csp_paused)
+        recs = [r for r in recs if r.strategy != "cash_secured_put"]
     for tkr, days in earnings_blocked.items():
         diagnostics[tkr] = [f"earnings_in_{days}d (no listed expiration ≥21d before it)"]
 
@@ -411,6 +422,8 @@ def wheel_screen(
                                            getattr(preset, "fill_model", "natural"))
                             for r in recs],
         "diagnostics": diagnostics,
+        "market_state": ms_snap.get("state") if ms_snap else None,
+        "csp_paused": csp_paused,
     }
 
 

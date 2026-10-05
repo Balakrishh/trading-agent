@@ -39,16 +39,16 @@ The agent runs unchanged all week on the paper account. The goal is to learn fro
 
 Motivation: the agent judges each ticker alone. In a broad 10–20 % correction, single tickers can still read "sideways" and receive bull puts or condors, and the Wheel keeps selling puts into a falling market.
 
-- [ ] **Risk-state classifier (new skill).** Each cycle, rate the market Normal / Caution / Defensive / Capitulation / Recovery from:
+- [x] **Risk-state classifier (new skill).** Each cycle, rate the market Normal / Caution / Defensive / Capitulation / Recovery from:
   - SPY vs 50- and 200-day averages
   - VIX level and z-score
   - Breadth: share of watchlist ETFs above their 50-day average
   - VIX / VIX3M term structure (needs the data source below)
-- [ ] **Gates by state:** position-size multiplier (1.0 / 0.5 / 0.25 / 0), allowed strategies per state (Defensive = bear calls only), journal the state every cycle, show it in `/portfolio`.
-- [ ] **Wheel pause:** `wheel_screen` refuses new cash-secured puts in Caution and Defensive; covered calls unaffected. Resume in Recovery at half size.
-- [ ] **VIX3M data source** for term structure (Schwab `$VIX3M.X` or equivalent).
-- [ ] **Hedge suggestion in `/portfolio`:** in Defensive, propose an SPY put spread sized to beta-weighted holdings; staged through `/propose`, never automatic.
-- [ ] **Validate thresholds** on 2020, 2022 and 2025 SPY/VIX history. The backtester's synthetic option pricing cannot validate the option P&L itself.
+- [x] **Gates by state:** position-size multiplier (1.0 / 0.5 / 0.25 / 0), allowed strategies per state (Defensive = bear calls only), journal the state every cycle, show it in `/portfolio`.
+- [x] **Wheel pause:** `wheel_screen` refuses new cash-secured puts in Caution and Defensive; covered calls unaffected. Resume in Recovery at half size.
+- [x] **VIX3M data source** for term structure (Schwab `$VIX3M.X` or equivalent).
+- [x] **Hedge suggestion in `/portfolio`:** in Defensive, propose an SPY put spread sized to beta-weighted holdings; staged through `/propose`, never automatic.
+- [x] **Validate thresholds** on 2020, 2022 and 2025 SPY/VIX history. The backtester's synthetic option pricing cannot validate the option P&L itself.
 
 ## 2. Wheel improvements
 
@@ -98,7 +98,7 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 Order (paper only, one at a time, each with skill doc + tests + scoring in `decision_engine.py`):
 
 - [x] **6.1 Fill-realistic pricing.** *(Done 2026-10-05: `PresetConfig.fill_model`, default natural; scorers, Wheel, iron butterfly, profit target.)* Compute EV, credit floors and screen yields at natural prices (sell at bid, buy at ask) instead of mid in all scorers — paper filled only at natural on 2026-09-30 (VZ entry) and 2026-10-01 (SPY close). Small change; makes every other number honest.
-- [ ] **6.2 Regime-state classifier + playbook table.** Per cycle: trend × IV Rank × RSI extreme → one playbook from the table above (extends §1's market risk-state overlay). Fully deterministic; journal the chosen playbook on every row.
+- [x] **6.2 Regime-state classifier + playbook table.** Per cycle: trend × IV Rank × RSI extreme → one playbook from the table above (extends §1's market risk-state overlay). Fully deterministic; journal the chosen playbook on every row. *(Done 2026-10-05, Phase 3 — `trading_agent/market_state.py`, skill 58: `playbook`/`playbook_implemented` on every signal row; market state gates entries; validation via `scripts/research/validate_market_state.py`.)*
 - [ ] **6.3 Debit spreads** for trend + low IV (call debit in uptrend, put debit in downtrend). Biggest trade-count gain in low-IV tapes.
 - [ ] **6.4 Bounce bull put:** bearish + RSI < 30 + IV Rank elevated + stabilisation trigger (e.g. close reclaims the 5-day high) → bull put below the recent low.
 - [ ] **6.5 Calendar spreads** for sideways + low IV.

@@ -287,6 +287,7 @@ self.risk_manager = RiskManager(
 - **Class constants in `StrategyPlanner` are LEGACY fallbacks** — `TARGET_DTE`, `DTE_RANGE`, `SPREAD_WIDTH` only fire when the planner is instantiated without a preset (older tests, scripts predating the preset system). New code should always pass `preset=…`.
 
 - **`fill_model` (2026-10-05).** `"natural"` (default) | `"mid"`. Top-level overlay in `STRATEGY_PRESET.json` (validated against `FILL_MODELS`; invalid → profile default with a warning) or a key inside `custom`. Shown in `to_summary_line()` as `Fills @ …`, exposed in the Strategy-Profile panel, and threaded to `decide()` (credit), the Wheel scorers and `PositionMonitor(profit_target_basis=…)`.
+- **`market_state_enabled` (2026-10-05).** `bool`, default `True`. Top-level overlay (non-bool → profile default with a warning) or a key inside `custom`; `save_active_preset(market_state_enabled=…)`. Shown in `to_summary_line()` as `MarketState on|off`, a checkbox in the Strategy-Profile panel, and read by `TradingAgent._update_market_state`, `wheel_screen` and `executor_promote` (skill 58). `False` = no market-wide gates, `max_risk_pct` unscaled.
 
 ## 5. Cross-References
 
