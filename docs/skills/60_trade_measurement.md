@@ -89,7 +89,7 @@ def prob_above(spot: float, level: float, dte: int, sigma: float) -> float:
 
 ```python
 # trading_agent/playbook_scorecard.py:127-141
-def _verdict(s: PlaybookStats, min_trades: int):
+def _verdict(s: PlaybookStats, min_trades: int) -> Tuple[str, Optional[float]]:
     if s.trades < min_trades:
         return f"collecting ({s.trades}/{min_trades} trades)", None
     if s.return_on_risk is None or s.risk_known_trades < min_trades:

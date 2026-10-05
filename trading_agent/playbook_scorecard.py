@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Strategy → playbook for rows journaled before the playbook tag.
 _STRATEGY_PLAYBOOK = {
@@ -124,7 +124,7 @@ def round_trips(rows: Iterable[Dict[str, Any]], *,
     return out
 
 
-def _verdict(s: PlaybookStats, min_trades: int):
+def _verdict(s: PlaybookStats, min_trades: int) -> Tuple[str, Optional[float]]:
     if s.trades < min_trades:
         return f"collecting ({s.trades}/{min_trades} trades)", None
     if s.return_on_risk is None or s.risk_known_trades < min_trades:
