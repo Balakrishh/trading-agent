@@ -52,9 +52,9 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_position_snapshot.py | ❌ MISSING | — |
 | 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | test_position_snapshot.py | ❌ MISSING | — |
 | 51 | pre trade approval | mcp/tools/strategy.py, pending_orders_writer.py, executor_promote.py | test_wheel_integration.py | ❌ MISSING | — |
-| 52 | watchlist curation | mcp/tools/positions.py, watchlist_store.py, journal_reader.py | test_position_snapshot.py, test_watchlist_store.py | ❌ MISSING | — |
-| 53 | incident response | mcp/tools/market.py, exception_monitor.py, journal_reader.py | — | ❌ MISSING | — |
-| 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | test_position_snapshot.py | ❌ MISSING | — |
+| 52 | watchlist curation | mcp/tools/positions.py, watchlist_store.py, journal_reader.py | test_ladder.py, test_position_snapshot.py, test_watchlist_store.py | ❌ MISSING | — |
+| 53 | incident response | mcp/tools/market.py, exception_monitor.py, journal_reader.py | test_ladder.py | ❌ MISSING | — |
+| 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | test_ladder.py, test_position_snapshot.py | ❌ MISSING | — |
 | 55 | pending orders promotion | executor_promote.py, pending_orders_writer.py, strategy_presets.py | test_chain_scanner.py, test_debit_strategies.py, test_fill_model.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_streamlit/test_backtest_ui.py, test_wheel_filters.py, test_wheel_integration.py | conformance/test_skill_55_promote_gate.py | — |
 | 56 | daily journal reviewer | daily_reviewer.py, daily_reviewer_main.py, pending_preset_updates_writer.py, apply_preset_update.py | eval/test_daily_reviewer_scenarios.py | conformance/test_skill_56_daily_reviewer.py | — |
 | 57 | agent supervisor | agent_supervisor.py | — | conformance/test_skill_57_supervisor.py | — |
