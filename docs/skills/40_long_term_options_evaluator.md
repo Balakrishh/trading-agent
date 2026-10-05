@@ -251,7 +251,7 @@ def _score_covered_call(
 
 `_quote_credit_single` is a single-leg sibling of `_quote_credit` (skill 03) — bid-ask mid with the same fill-haircut. Defined alongside `_quote_credit` in `chain_scanner.py` so the C/W floor invariant scanner still sees the spread-side `_quote_credit` it expects.
 
-### 3.3 PresetConfig fields added (next session, listed here for design completeness)
+### 3.3 PresetConfig fields (CSP / CC wired 2026-10-05; LEAPS / debit-spread rows still design-only)
 
 ```python
 # trading_agent/strategy_presets.py — PresetConfig additions
@@ -310,7 +310,7 @@ def render_long_term_evaluator() -> None:
 - `decision_engine._score_cash_secured_put[_with_reason]` — reject taxonomy adds `LT_REJECT_STRIKE_OUT_OF_BAND`, `LT_REJECT_COLLATERAL_OVER_BUDGET`.
 - `LongTermEvaluator(..., put_chain_fetcher=, fundamentals_fetcher=, spot_fetcher=)` — CSP path runs only when all three are supplied; `EvaluatorConfig.csp_*` holds TP (50 % of credit), stop (|Δ| ≥ 0.45, `stop_kind="delta_threshold"`), `csp_max_collateral`, and `wheel_screen: WheelScreenConfig`. `evaluator.last_diagnostics[ticker]` explains every skip.
 - MCP `wheel_screen(watchlist, target_dte=35, max_collateral=None)` (skill 48) — read-only; picks the weekly expiration nearest `target_dte` via `calendar_utils.next_weekly_expiration`.
-- Tunables follow the covered-call precedent: `getattr(preset, "csp_*", default)` until the PresetConfig wiring of §3.3 lands.
+- Tunables: `PresetConfig.cc_max_short_delta / cc_dte_band / cc_min_iv_rank / csp_max_short_delta / csp_dte_band / csp_min_iv_rank / csp_strike_band` (2026-10-05) with the same defaults as the `_CC_DEFAULT_*` / `_CSP_DEFAULT_*` fallbacks, so wiring changed no behaviour; summary token `Wheel CSP Δ≤… • CC Δ≤…`, Streamlit "Wheel" block.
 
 ## 4. Edge Cases / Guardrails
 
@@ -350,6 +350,9 @@ def render_long_term_evaluator() -> None:
 - **Watchlist shapes (2026-10-05).** `wheel_screen` accepts a list, a comma string, or a list sent as JSON text (`'["VZ"]'`, as some MCP clients send). Before the fix that last form became a single ticker and failed `missing:fundamentals`.
 
 - **Wheel credits at natural (2026-10-05, §6.1).** Both Wheel scorers and `build_single_leg_plan` price the short leg at the bid under the default `fill_model`, so screen yields match what the paper account fills (VZ: mid 0.28 vs fill 0.21).
+
+- **200-day filter (2026-10-05, backlog §2).** `LongTermEvaluator(trend_fetcher=…)` returns the 200-day SMA; a CSP is refused when spot < SMA (`below_200d_sma (…)`) and **fails closed** when the SMA is unknown (`trend_unavailable`). `PresetConfig.csp_require_above_sma200` (default True) turns it off. `wheel_screen` supplies yfinance daily closes (cached per process). Legacy callers without a `trend_fetcher` are unaffected.
+- **One pick per sector (2026-10-05).** `sector_fetcher` + `PresetConfig.csp_max_per_sector` (default 1, 0 = off): CSPs from at most N distinct tickers per sector survive, best score first (several strikes of a kept ticker stay); dropped tickers get `sector_cap (<sector>: <kept> ranked higher)`. Sector = `sector_map.TICKER_SECTOR_MAP` (now incl. common Wheel names: banks, telecom, staples, pharma, energy, utilities), else yfinance `info["sector"]` translated to SPDR names, else the ticker itself — unknown names are never lumped together.
 
 ## 5. Cross-References
 

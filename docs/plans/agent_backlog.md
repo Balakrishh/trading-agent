@@ -54,15 +54,15 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 
 - [x] Bid/ask width gate in `_score_cash_secured_put` / covered calls, reusing the spread scanner's `max_leg_spread_pct_mid` (5 %) and `max_leg_spread_cents`. Found 2026-09-30 pre-market: BMY $60P 0.40/1.11, VZ $44P 0.32/0.85 — mid-based yields of 20 %+ on untradeable quotes.
 - [x] `wheel_screen` treats a JSON-array string (`'["VZ"]'`, as some MCP clients send lists) as one ticker → `missing:fundamentals`. Parse JSON-looking strings before the comma split. Found 2026-09-30 during `/propose VZ`.
-- [ ] Spread entries have the same estimate-vs-fill gap (SPY IC: plan 0.49, fill 0.48). Spread orders are fire-and-forget, so record the fill when the order tracker (skill 26/`order_tracker.py`) sees it filled, reusing `OrderExecutor._record_fill_credit`.
-- [ ] 200-day trend filter: no cash-secured puts on a stock below its 200-day average.
-- [ ] One pick per sector (banks and telecom cluster today).
-- [ ] Wire `csp_*` / `cc_*` tunables into `PresetConfig` (skill 40 §3.3): `to_summary_line()`, Streamlit Strategy-Profile panel, `agent.py`.
+- [x] Spread entries have the same estimate-vs-fill gap (SPY IC: plan 0.49, fill 0.48). Spread orders are fire-and-forget, so record the fill when the order tracker (skill 26/`order_tracker.py`) sees it filled, reusing `OrderExecutor._record_fill_credit`. *(Done 2026-10-05 — `fill_reconciler.py`, skill 60.)*
+- [x] 200-day trend filter: no cash-secured puts on a stock below its 200-day average. *(Done 2026-10-05 — fails closed when unknown; skill 40.)*
+- [x] One pick per sector (banks and telecom cluster today). *(Done 2026-10-05 — `csp_max_per_sector`, skill 40.)*
+- [x] Wire `csp_*` / `cc_*` tunables into `PresetConfig` (skill 40 §3.3): `to_summary_line()`, Streamlit Strategy-Profile panel, `agent.py`. *(Done 2026-10-05.)*
 - [x] Fundamentals: map `short_int_to_float` to `None` when Schwab returns 0.0.
 
 ## 3. Strategy research
 
-- [ ] Shadow mode: log a realized-volatility probability of profit next to the delta-based one on every candidate, no trading effect. Compare after 4+ weeks of paper data.
+- [x] Shadow mode: log a realized-volatility probability of profit next to the delta-based one on every candidate, no trading effect. Compare after 4+ weeks of paper data. *(Done 2026-10-05 — `pop_delta` / `pop_rv` / `rv_20d` on every journaled plan; skill 60.)*
 - [ ] Quality + momentum stock sleeve with ATR trailing stops (after the Wheel has a track record).
 
 ## 4. Hygiene
@@ -102,9 +102,9 @@ Order (paper only, one at a time, each with skill doc + tests + scoring in `deci
 - [x] **6.3 Debit spreads** for trend + low IV (call debit in uptrend, put debit in downtrend). Biggest trade-count gain in low-IV tapes. *(Done 2026-10-05, Phase 4 — skill 59; fallback after the credit plan in low volatility.)*
 - [x] **6.4 Bounce bull put:** bearish + RSI < 30 + IV Rank elevated + stabilisation trigger (e.g. close reclaims the 5-day high) → bull put below the recent low. *(Done 2026-10-05, Phase 4 — trigger: price > N-day high close; short strike below the 2N-day low; replaces the bear call when RSI < 30.)*
 - [x] **6.5 Calendar spreads** for sideways + low IV. *(Done 2026-10-05, Phase 4 — Black-Scholes model over the near-expiry distribution.)*
-- [ ] **6.6 Per-playbook scorecard:** tag every trade with regime + playbook; after 20–30 trades per playbook report win rate, avg win/loss, slippage vs mid, EV realised; use it to size (1–3 % risk by track record) or disable a playbook.
+- [x] **6.6 Per-playbook scorecard:** tag every trade with regime + playbook; after 20–30 trades per playbook report win rate, avg win/loss, slippage vs mid, EV realised; use it to size (1–3 % risk by track record) or disable a playbook. *(Done 2026-10-05 — MCP `get_playbook_scorecard`; sizing advisory; skill 60.)*
 - [ ] **6.7 More shots at the same risk:** add liquid single names (via the Wheel fundamentals screen), ladder weekly expirations, smaller size per trade.
-- [ ] **6.8 Start now, in parallel:** the §3 realized-vol POP shadow log (no trading effect) so evidence accumulates while 6.1–6.5 are built.
+- [x] **6.8 Start now, in parallel:** the §3 realized-vol POP shadow log (no trading effect) so evidence accumulates while 6.1–6.5 are built. *(Done 2026-10-05 with the §3 shadow log.)*
 
 **Expectation, stated plainly:** with the full playbook the agent might move from ~0 to roughly 5–15 smaller trades a week across conditions. Whether that is profitable is for the 6.6 scorecard to show after 1–2 months of paper data — no playbook makes money in every market; the aim is always having a fitting, small, measured trade.
 
