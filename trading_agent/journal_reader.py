@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import PurePath
 from dataclasses import dataclass
 from datetime import datetime, timezone, date, timedelta
 from typing import Iterator, List, Optional, Set
@@ -166,7 +167,13 @@ class JournalReader:
         agent log; the reader silently drops them so a single
         corrupt row doesn't blank the dashboard).
         """
-        if not self.jsonl_path or not os.path.isfile(self.jsonl_path):
+        # A real path only (str / pathlib). A MagicMock journal (tests)
+        # passes an os.PathLike check (it implements __fspath__) and also
+        # __index__ → 1; reading it closed stdout (fd 1) and pytest -v died
+        # with INTERNALERROR "Bad file descriptor" (CI exit code 3,
+        # 2026-10-05) once Stage 2 read the journal every cycle.
+        if (not isinstance(self.jsonl_path, (str, PurePath)) or not str(self.jsonl_path)
+                or not os.path.isfile(self.jsonl_path)):
             return
         try:
             with open(self.jsonl_path, "r", encoding="utf-8") as fh:
