@@ -359,6 +359,8 @@ class TradingAgent:
             # banks at 40%. A mismatch between agent.py and the
             # PositionMonitor default would silently apply the wrong rule.
             profit_target_pct=self.preset.profit_target_pct,
+            # §6.1: profit target judged at the cost to close at natural.
+            profit_target_basis=self.preset.fill_model,
         )
         self.order_tracker: OrdersPort = OrderTracker(
             api_key=config.alpaca.api_key,

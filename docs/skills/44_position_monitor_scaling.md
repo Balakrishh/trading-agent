@@ -142,6 +142,8 @@ Called by `agent.py` right after `fetch_open_positions()` and before `group_into
 - **Quote RPC fails** — the whole re-mark is skipped with a WARNING; broker marks are used for that cycle.
 - **Wheel legs bypass spread exits (2026-09-29).** `SpreadPosition.strategy_name ∈ WHEEL_STRATEGIES` routes to `_check_wheel_exit` (skill 40 §2.9): profit target at 50 % of `original_credit × 100 × contracts_open`, CSP `DELTA_STOP` from the append-only `short_delta` field, otherwise HOLD. `ExitSignal.DELTA_STOP` is debounced (not in `IMMEDIATE_EXIT_SIGNALS`).
 
+- **`natural_unrealized_pl` (2026-10-05).** `remark_positions_at_mid` also records each leg's P&L at its natural closing price; `group_into_spreads` / inference sum it into `net_natural_pl` (None if any leg is unquoted). Used only for the profit target (skill 30 §4).
+
 ## 5. Cross-References
 
 - `06_stale_spread_risk_gate.md` — companion invariant on the scan side (rejects wide bid-ask legs at scan time); this skill's grace period is the monitor-side symmetric protection against stale marks at evaluation time.
@@ -151,4 +153,4 @@ Called by `agent.py` right after `fetch_open_positions()` and before `group_into
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

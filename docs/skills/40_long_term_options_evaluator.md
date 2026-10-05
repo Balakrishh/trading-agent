@@ -349,6 +349,8 @@ def render_long_term_evaluator() -> None:
 
 - **Watchlist shapes (2026-10-05).** `wheel_screen` accepts a list, a comma string, or a list sent as JSON text (`'["VZ"]'`, as some MCP clients send). Before the fix that last form became a single ticker and failed `missing:fundamentals`.
 
+- **Wheel credits at natural (2026-10-05, §6.1).** Both Wheel scorers and `build_single_leg_plan` price the short leg at the bid under the default `fill_model`, so screen yields match what the paper account fills (VZ: mid 0.28 vs fill 0.21).
+
 ## 5. Cross-References
 
 - `41_positions_provider.md` — the holdings-input contract (`PositionsProvider` ABC + `ManualPositionsProvider`).

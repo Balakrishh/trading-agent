@@ -44,6 +44,7 @@ def build_single_leg_plan(
     ask: float,
     expiration: str,
     reasoning: str = "",
+    fill_model: str = "natural",
 ) -> SpreadPlan:
     """SpreadPlan for one short option (the shape the executor, trade-plan
     file and position monitor already understand).
@@ -56,7 +57,8 @@ def build_single_leg_plan(
     """
     if strategy_name not in WHEEL_STRATEGIES:
         raise ValueError(f"not a Wheel strategy: {strategy_name!r}")
-    credit = round(_quote_credit_single(bid=float(bid), ask=float(ask)), 2)
+    credit = round(_quote_credit_single(bid=float(bid), ask=float(ask),
+                                        model=fill_model), 2)
     strike = float(strike)
     max_loss = round((strike - credit) * 100, 2) if strategy_name == CSP_STRATEGY else 0.0
     return SpreadPlan(

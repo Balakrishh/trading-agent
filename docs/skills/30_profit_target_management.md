@@ -105,6 +105,8 @@ signal, reason = pos.evaluate_exit(
 - **Overlay validation** — overlays in `STRATEGY_PRESET.json` are bounded to `[0.10, 0.95]` at load time. Out-of-range values log a warning and fall back to the preset default rather than crashing the cycle.
 - **Backtester parity** — both the live `position_monitor` and the backtest's `_handle_intraday_decision` read from the same preset field; a divergence (e.g., backtester hardcodes 0.50, live uses 0.40) breaks skill 15's parity invariant and would silently produce backtest results that overstate aggressive-preset performance.
 
+- **Profit target judged at the cost to close (2026-10-05, §6.1).** With `fill_model="natural"`, `PositionMonitor._profit_pl` uses `SpreadPosition.net_natural_pl` — each leg valued at its natural closing price (short → ask, long → bid) — so the 50 % target fires only when it can actually be captured. Falls back to the mid valuation when any leg lacks a quote. Stops and the hard stop keep using the mid valuation so bid/ask noise does not trigger them.
+
 ## 5. Cross-References
 
 - `13_preset_system_hot_reload.md` — `profit_target_pct` is hot-reloadable like the other preset knobs; changes apply on the next cycle without a restart.
@@ -113,4 +115,4 @@ signal, reason = pos.evaluate_exit(
 
 ---
 
-*Last verified against repo HEAD on 2026-09-29.*
+*Last verified against repo HEAD on 2026-10-05.*

@@ -71,14 +71,23 @@ def test_score_covered_call_happy_path():
     )
     assert out is not None
     score, metrics, _ = out
-    # credit = mid(1.20, 1.30) − $0.02 haircut = $1.23 → × 100 = $123
-    assert metrics["credit"] == pytest.approx(123.0, abs=0.01)
-    # capital_at_risk = $200 × 100 − $123 = $19,877
-    assert metrics["capital_at_risk"] == pytest.approx(19_877.0, abs=0.01)
+    # credit at natural (fill_model default, backlog §6.1) = bid $1.20 → $120
+    assert metrics["credit"] == pytest.approx(120.0, abs=0.01)
+    # capital_at_risk = $200 × 100 − $120 = $19,880
+    assert metrics["capital_at_risk"] == pytest.approx(19_880.0, abs=0.01)
     assert metrics["pop"] == pytest.approx(0.80, abs=1e-6)  # 1 − |0.20|
     assert metrics["dte"] == 45.0
     # score = annualised_return × pop > 0
     assert score > 0
+
+
+def test_score_covered_call_mid_fill_model():
+    """Legacy fill_model="mid": mid(1.20, 1.30) − $0.02 haircut = $1.23."""
+    class _Mid(_StubPreset):
+        fill_model = "mid"
+    _, metrics, _ = _score_covered_call(short_call=_short_call(), cost_basis=200.0,
+                                        preset=_Mid())
+    assert metrics["credit"] == pytest.approx(123.0, abs=0.01)
 
 
 def test_strike_below_cost_basis_rejects():

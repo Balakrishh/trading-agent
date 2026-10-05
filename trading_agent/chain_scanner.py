@@ -210,7 +210,8 @@ DEFAULT_FILL_HAIRCUT: float = 0.02
 def _quote_credit(short_bid: float, short_ask: float,
                   long_bid:  float, long_ask:  float,
                   *,
-                  fill_haircut: float = DEFAULT_FILL_HAIRCUT) -> float:
+                  fill_haircut: float = DEFAULT_FILL_HAIRCUT,
+                  model: str = "mid") -> float:
     """
     Estimate the credit a vertical spread would fill at, in dollars.
 
@@ -231,6 +232,12 @@ def _quote_credit(short_bid: float, short_ask: float,
     to zero (scanner's caller still rejects them as ``credit_non_positive``,
     but no point letting them go negative).
     """
+    # ``model="natural"`` (PresetConfig.fill_model, 2026-10-05): sell the
+    # short at its bid, buy the long at its ask — what the paper account
+    # actually fills at (backlog §6.1). No haircut: natural is already
+    # the worst displayed price.
+    if model == "natural":
+        return round(max(0.0, short_bid - long_ask), 2)
     # Pick the midpoint when both quotes are present and positive; fall
     # back to the conservative side otherwise so a stale quote can't
     # accidentally inflate credit.
@@ -652,6 +659,7 @@ def _quote_credit_single(
     bid: float, ask: float,
     *,
     fill_haircut: float = DEFAULT_FILL_HAIRCUT,
+    model: str = "mid",
 ) -> float:
     """Single-leg sibling of :func:`_quote_credit` — for skill 40's
     long-term evaluator (covered call, cash-secured put).
@@ -671,7 +679,11 @@ def _quote_credit_single(
     0.0
     >>> _quote_credit_single(1.20, 0.0)
     1.18
+    >>> _quote_credit_single(1.20, 1.30, model="natural")
+    1.2
     """
+    if model == "natural":          # sell at the bid (backlog §6.1)
+        return round(max(0.0, bid), 2)
     mid = ((bid + ask) / 2.0
            if bid > 0 and ask > 0
            else bid)
