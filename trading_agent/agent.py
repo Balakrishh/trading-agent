@@ -2276,6 +2276,30 @@ class TradingAgent:
         self._cycle_risk_pct = self._base_max_risk_pct * mult
         self._set_trade_risk_pct(self._cycle_risk_pct)
 
+    def _shadow_pop_fields(self, plan, analysis) -> Dict:
+        """Backlog §3 / §6.8 shadow log: delta POP vs realized-vol POP for
+        the journaled plan. No trading effect. ``shadow_pop_available`` is
+        set only when the realized-vol inputs were read successfully."""
+        if not getattr(plan, "legs", None):
+            return {}
+        from datetime import date as _date
+        from trading_agent.shadow_pop import realized_vol, shadow_pop
+        out: Dict = {"shadow_pop_available": False}
+        sigma = None
+        try:
+            df = self.data_provider.fetch_historical_prices(plan.ticker, period_days=200)
+            sigma = realized_vol([float(x) for x in df["Close"].dropna().tolist()])
+            out["shadow_pop_available"] = sigma is not None
+        except Exception as exc:  # noqa: skill-34-exempt — shadow log only; never affects trading
+            logger.debug("[%s] shadow POP history unavailable: %s", plan.ticker, exc)
+        try:
+            dte = max(1, (_date.fromisoformat(plan.expiration) - _date.today()).days)
+        except (TypeError, ValueError):
+            dte = 1
+        out.update(shadow_pop(plan, float(analysis.current_price or 0.0), sigma, dte))
+        out["rv_20d"] = round(sigma, 4) if sigma is not None else None
+        return out
+
     @staticmethod
     def _register_open(ticker, tickers, per_ticker, per_sector):
         """Count a new position / pending order toward the per-ticker and
@@ -2707,6 +2731,7 @@ class TradingAgent:
             analysis.rsi_14)
         raw["playbook"] = pb.name
         raw["playbook_implemented"] = pb.implemented
+        raw.update(self._shadow_pop_fields(plan, analysis))
 
         # Adaptive-scan diagnostics: top-K candidates + selected pick. Only
         # set when the planner ran the scanner this cycle; static mode emits
