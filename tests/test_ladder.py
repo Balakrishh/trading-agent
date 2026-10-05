@@ -59,3 +59,17 @@ def test_agent_ladder_block_and_per_ticker_cap():
     assert a._ladder_block("SPY", "2026-11-13") is None
     a.preset = SimpleNamespace(ladder_min_gap_days=7)        # legacy preset → constant 1
     assert a._max_per_ticker() == 1
+
+
+def test_opened_today_ignores_non_path_journal():
+    """A MagicMock journal_kb must never reach open(): its __index__ (1)
+    made open() close stdout and crash pytest -v (CI exit code 3)."""
+    from unittest.mock import MagicMock
+    from trading_agent.agent import TradingAgent
+    import os
+    from trading_agent.journal_reader import JournalReader
+    a = TradingAgent.__new__(TradingAgent)
+    a.journal_kb = MagicMock()
+    assert a._tickers_opened_today() == set()
+    assert list(JournalReader(MagicMock())._iter_rows()) == []
+    os.fstat(1)                                   # stdout still open
