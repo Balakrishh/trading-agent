@@ -2,6 +2,8 @@
 
 **Working document — not a skill doc yet.** Each phase becomes its own skill under `docs/skills/45+_*.md` as it lands.
 
+> **Status (2026-10-05).** Shipped and live: **Iron Butterfly** (skill 45, opt-in, tried before the IC on sideways tickers), **call / put debit spreads** and **calendar spreads** (skill 59 — the low-volatility fallback when the credit plan finds nothing; calendar = sell ≈21 DTE / buy +28 d at the strike nearest spot), the **bounce bull put** (skill 59), and the Wheel (skill 40). Scored, not live: **Broken-Wing Butterfly** (skill 46). Not started: debit butterfly, diagonal. The routing that picks among them is the playbook table (skill 58). Where this plan and the skills disagree, the skills are current.
+
 **One-line intent.** Expand the credit-spread agent from three strategies (Bull Put, Bear Call, Iron Condor) into a broader menu that works across different volatility and directional regimes. Butterflies capture range-bound expectations, calendars monetise theta + IV expansion, broken-wing structures let you take directional bets with defined risk. Every addition backtests first; nothing goes live until the backtester says the edge holds.
 
 **Why the current book struggles to trade today.** The 2026-07-02 diagnosis showed the agent correctly skipping trades because market premium isn't clearing the invariant C/W floor at Δ=0.18-0.25. That's a *regime-fit* problem — Bull Put / Bear Call / IC all price identically off the vertical-spread breakeven formula, so when the market underprices verticals, ALL three strategies sit out simultaneously. Adding structures with *different* breakeven math (butterfly = ATM peak, calendar = time-decay slope) gives the agent options when verticals are dead.

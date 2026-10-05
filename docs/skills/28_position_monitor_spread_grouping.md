@@ -90,7 +90,7 @@ inferred = self._infer_spreads_from_legs(unmatched)
 spreads.extend(inferred)
 ```
 
-`_infer_spreads_from_legs` buckets legs by `(underlying, expiration)` then classifies the strategy by leg-count + put/call/short/long mix. 4 legs spanning both sides → "Iron Condor"; 2 puts → "Bull Put Spread"; 2 calls → "Bear Call Spread"; 1 short → "Naked Short"; everything else → "Multi-leg Position".
+`_infer_spreads_from_legs` buckets legs by `(underlying, expiration)` then classifies the strategy by leg-count + put/call/short/long mix. 4 legs spanning both sides → "Iron Condor"; 2 puts → "Bull Put Spread" (or "Put Debit Spread" when the entry was a net debit); 2 calls → "Bear Call Spread" (or "Call Debit Spread" for a net debit); 1 short → "Naked Short"; everything else → "Multi-leg Position". Before bucketing, `_infer_calendars` pairs a short and a long leg with the same underlying, type and strike but different expiries into a "Calendar Spread" (expiration = the near leg) — the per-expiry buckets would otherwise split it (skill 59, 2026-10-05).
 
 ## 4. Edge Cases / Guardrails
 

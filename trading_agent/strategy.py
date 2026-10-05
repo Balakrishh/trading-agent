@@ -100,14 +100,22 @@ class StrategyPlanner:
     """
     Maps regime → strategy and picks strikes from the option chain.
 
-    Regime            Strategy
-    ──────────────    ───────────────────────────────────────────
-    MEAN_REVERSION    Mean Reversion Spread (highest priority)
-    BULLISH           Bull Put Spread
-    BULLISH + RS_Z    Bull Put Spread  (Z-scored leadership bias)
-    BEARISH           Bear Call Spread
-    SIDEWAYS          Iron Condor
-    SIDEWAYS + RS_Z   Bull Put Spread  (Z-scored leadership bias)
+    Regime                    Strategy (first match wins — see plan())
+    ──────────────────────    ───────────────────────────────────────────
+    MEAN_REVERSION            Mean Reversion Spread (highest priority)
+    BULLISH / SIDEWAYS + VIX  Bear Call Spread (inter-market inhibit)
+    BULLISH / SIDEWAYS + RS_Z Bull Put Spread  (Z-scored leadership bias)
+    BEARISH + RSI < 30        Bounce Bull Put after price reclaims the
+                              N-day high close (vol rank ≥ 30), else no
+                              trade — never a bear call into RSI < 30
+    BULLISH                   Bull Put Spread  → Call Debit Spread *
+    BEARISH                   Bear Call Spread → Put Debit Spread *
+    SIDEWAYS                  Iron Butterfly (opt-in) → Iron Condor
+                              → Calendar Spread *
+
+    * low-volatility fallback (vol rank < 30) when the credit plan finds
+      no positive-EV candidate — skill 59; routing table
+      ``market_state.playbook_for`` (skill 58).
 
     Inter-market gate (Item 3 of the ETF macro patch)
     ─────────────────────────────────────────────────

@@ -54,6 +54,33 @@ Skills 32–35 ship alongside the live-deployment hardening pass. Phase 1 covers
 | 38 | [Backtester slippage + commissions](38_backtest_slippage.md) | backtest | `backtest/runner.py`, `backtest/account.py`, `backtest/cycle.py` |
 | 39 | [Backtester volatility skew](39_skew_model.md) | backtest | `backtest/skew_model.py`, `backtest/synthetic_chain.py` |
 
+## Phase 3 (Wheel, MCP surface, ops, playbooks — 2026-06 → 2026-10)
+
+Skills 40–60: the long-term / Wheel evaluator, the Claude Code MCP surface and slash-command playbooks, the supervisor, and the 2026-10 backlog phases — market risk state + playbook table (58), debit spreads / calendars / bounce bull put (59), trade measurement (60). Rows generated from each skill's header.
+
+| # | Skill | Group | Source of truth |
+|---|---|---|---|
+| 40 | [Long-term options evaluator](40_long_term_options_evaluator.md) | strategy | `trading_agent/long_term_evaluator.py`, `trading_agent/decision_engine.py`, `trading_agent/streamlit/long_term_evaluator_ui.py` |
+| 41 | [Positions provider — uniform holdings input](41_positions_provider.md) | data_quality | `trading_agent/positions_provider.py` |
+| 42 | [Portfolio alert scheduler](42_portfolio_alert_scheduler.md) | ops | `trading_agent/portfolio_alert_scheduler.py`, `trading_agent/telegram_notifier.py:notify_portfolio_review`, `trading_agent/agent.py:_maybe_run_portfolio_review` |
+| 44 | [Position-Monitor Scaling — Contract Count + Post-Fill Grace](44_position_monitor_scaling.md) | risk | `trading_agent/position_monitor.py:_check_exit`, `trading_agent/position_monitor.py:SpreadPosition` |
+| 45 | [Iron Butterfly Scoring](45_iron_butterfly.md) | strategy | `trading_agent/chain_scanner.py:_score_iron_butterfly`, `trading_agent/chain_scanner.py:_pop_from_ib_structure`, `trading_agent/strategy_presets.py:PresetConfig` |
+| 46 | [Broken-Wing Butterfly Scoring](46_broken_wing_butterfly.md) | strategy | `trading_agent/chain_scanner.py:_score_broken_wing_butterfly`, `trading_agent/chain_scanner.py:_pop_from_bwb_structure`, `trading_agent/strategy_presets.py:PresetConfig` |
+| 47 | [Schwab Data API — Local HTTP Server](47_schwab_data_api.md) | ops | `trading_agent/data_server/app.py`, `trading_agent/data_server/auth.py`, `trading_agent/data_server/cache.py` |
+| 48 | [Claude Code MCP Surface — Read-Only Tools](48_claude_code_mcp_surface.md) | ops | `trading_agent/mcp/__init__.py`, `trading_agent/mcp/server.py`, `trading_agent/mcp/tools/positions.py` |
+| 49 | [Daily Portfolio Review — Playbook](49_daily_portfolio_review.md) | ops | `trading_agent/mcp/tools/positions.py`, `trading_agent/mcp/tools/strategy.py`, `trading_agent/mcp/tools/market.py` |
+| 50 | [Position Triage — Playbook](50_position_triage.md) | ops | `trading_agent/mcp/tools/positions.py`, `trading_agent/mcp/tools/strategy.py`, `trading_agent/defensive_roll_evaluator.py` |
+| 51 | [Pre-Trade Approval — Playbook](51_pre_trade_approval.md) | ops | `trading_agent/mcp/tools/strategy.py`, `trading_agent/pending_orders_writer.py`, `trading_agent/executor_promote.py` |
+| 52 | [Watchlist Curation — Playbook](52_watchlist_curation.md) | ops | `trading_agent/mcp/tools/positions.py`, `trading_agent/watchlist_store.py`, `trading_agent/journal_reader.py` |
+| 53 | [Incident Response — Playbook](53_incident_response.md) | ops | `trading_agent/mcp/tools/market.py`, `trading_agent/exception_monitor.py`, `trading_agent/journal_reader.py` |
+| 54 | [Tax-Lot Review — Playbook](54_tax_lot_review.md) | ops | `trading_agent/mcp/tools/positions.py`, `trading_agent/journal_reader.py` |
+| 55 | [Pending-Orders Promotion — Write Gate](55_pending_orders_promotion.md) | ops | `trading_agent/executor_promote.py`, `trading_agent/pending_orders_writer.py`, `trading_agent/strategy_presets.py` |
+| 56 | [End-of-Day Trade Journal Reviewer](56_daily_journal_reviewer.md) | ops | `trading_agent/daily_reviewer.py`, `trading_agent/daily_reviewer_main.py`, `trading_agent/pending_preset_updates_writer.py` |
+| 57 | [Agent Supervisor — Long-running Wrapper](57_agent_supervisor.md) | ops | `trading_agent/agent_supervisor.py`, `ops/launchd/com.trading-agent.headless.plist` |
+| 58 | [Market Risk State & Playbook Table](58_market_state_playbook.md) | risk / regime | `trading_agent/market_state.py` |
+| 59 | [Debit Spreads, Calendars & the Bounce Bull Put](59_debit_spreads_calendars.md) | strategy | `trading_agent/debit_policy.py`, `trading_agent/decision_engine.py` |
+| 60 | [Trade Measurement — Entry Fills, Shadow POP, Playbook Scorecard](60_trade_measurement.md) | architecture / risk | `trading_agent/fill_reconciler.py`, `trading_agent/shadow_pop.py`, `trading_agent/playbook_scorecard.py` |
+
 ## Phase 2 (planned, not yet written)
 
 Hygiene and diagnostics. Useful but not edge-defining.
@@ -64,7 +91,7 @@ Hygiene and diagnostics. Useful but not edge-defining.
 - `23_trend_conflict_detector.md` — 200-SMA slope vs short-term — diagnostic only.
 - `24_bollinger_bandwidth_regime.md` — The 4 % SIDEWAYS rule, in isolation.
 - `25_account_risk_pct_sizing.md` — Conservative 1 % / Balanced 2 % / Aggressive 3 %.
-- `26_regime_to_strategy_routing.md` — The dispatch table from `README.md:82-89`.
+- `26_regime_to_strategy_routing.md` — The dispatch table (now README "Strategy Selection"; routing is covered by skills 58 + 59).
 - `27_width_aware_max_loss.md` — `(width − credit) × multiplier`.
 
 ---
@@ -102,6 +129,8 @@ If you have a full afternoon, read 00 first, then all 21 in order. Skills 28, 29
 - 32 (Telegram operator alerts), 33 (PDT-aware DTE cap), 34 (exception monitor) make the running system visible to the operator without log-scraping.
 - 35 (close-event collaborators) decouples the ~300-line `_journal_close_event` into four constructor-injected classes — read after 17 + 19 + 32 since it integrates all three.
 
+For **what the agent trades today**, read 58 → 59 → 37 → 60 (market state and playbook routing → debit structures → portfolio caps → measurement), then 40 for the Wheel.
+
 ---
 
-*Last updated: 2026-05-22 against repo HEAD.*
+*Last updated: 2026-10-05 against repo HEAD.*
