@@ -160,3 +160,43 @@ Re-estimate for $50k if the market stays like this week and rules stay as they a
 1. **Quick hygiene first (≈ 1 hour):** fix the three subagents' `tools:` names (the weekly review's own analyst could not run) and the after-hours `test_after_hours_shutdown.py` SIGKILL (CI risk on evening pushes).
 2. **Then backlog §6.1 — fill-realistic pricing.** The strongest evidence of the week: paper filled only at natural (3/3), and slippage was the largest part of the only loss. Every EV, credit floor, yield and profit target is currently computed at mid and is therefore optimistic. Small change; makes every later decision honest.
 3. **Then §6.2 regime → playbook table**, which subsumes §1's market risk-state overlay. The week's reject mix (8,433 no-EV in a low-IV tape) shows the agent has no tool for that regime; 6.2 is the foundation that 6.3 (debit spreads) builds on.
+
+---
+
+## 2026-10-05 (Mon) — first live day of the full playbook
+
+**Cycles:** 313 agent runs (366 cycle-minutes), first at 09:44 ET — the supervisor overslept the 09:25 start because macOS sleep stretched its 12 h wait (fixed: wall-clock sleep). 0 errors, 0 silenced alerts, clean 16:05 shutdown. Daily reviewer ran at 16:15 but its LLM step returned empty (Ollama down) — stats only, no proposal staged.
+
+**Account:** $29,765 → $29,632 (−$133, all unrealized). Realized $0.
+
+**Trades:** 4 opened 13:29–13:37 ET (first trades from the new debit / calendar playbooks), 0 closed.
+
+| Ticker | Structure | Size | Fill (debit) | Mid at entry | Paid over mid | Mid P&L at close |
+|---|---|---|---|---|---|---|
+| SPY | Calendar 774 call, Oct 30 / Nov 20 | 1 | 5.79 | 5.72 | $7 | −$2.50 |
+| QQQ | Call debit 756/772, Nov 6 | 1 | 7.91 | 7.81 | $10.50 | +$8 |
+| IWM | Put debit 283/278, Nov 6 | 4 | 1.92 | 1.85 | $28 | −$44 |
+| GLD | Put debit 379/369, Nov 6 | 2 | 4.25 | 4.05 | $40 (4.9 %) | −$70 |
+
+Still open from before: VZ $43 CSP (Oct 23), +$8.
+
+**Top reject reasons — verdict**
+
+| Count | Reason | Verdict |
+|---|---|---|
+| 1,219 | No positive-EV credit spread | Correct; the debit / calendar fallback now acts on these. |
+| 933 | Total-risk cap (10 %) | Correct, but the budget was spent in 8 minutes and the agent was idle the last 2.5 h. |
+| 593 | Existing position / pending order | Correct. |
+| 186 | XLF RSI 23.5 → no bear call | Correct (oversold rule). |
+| 112 | IWM sideways, RSI 25.9 → no condor | Correct. |
+
+**Exit signals:** IWM put debit voted `regime_shift` 2 of 3 (13:31, 13:32) when IWM flickered bearish → sideways one cycle after filling — **noise**. Fixed before the third vote: debit spreads now regime-exit only on a trend reversal. Nothing closed.
+
+**Slippage:** all 4 filled at the planned natural price (fill reconciler 4/4); vs mid they cost $86 in total (1.2–4.9 % of the debit), which is most of today's −$100 mid P&L.
+
+**Errors / alerts:** none from the agent. Fixed during the day (all merged): sector cap ignored in-cycle submissions (SPY + QQQ + IWM opened together), no total-risk cap, the IWM regime-flicker exit, a CI crash from a mock journal path. CI on the last pushes could not run — GitHub Actions incident (runners not acquired). XLE July condor reconciled as P&L unknown (the MCP server still lists it until `/mcp` reconnect).
+
+**SPY iron condor (exp 2026-10-23):** closed Thu 2026-10-01 at −$176 (strike proximity, $752 short strike). Nothing left to track.
+
+**Question for Friday:** debit entries go straight to the natural price and paid $86 over mid today (GLD 4.9 %). Would a mid → halfway → natural ladder, like the Wheel's, still fill on paper and recover most of that? Compare this week's debit fills against their mids before deciding.
+
