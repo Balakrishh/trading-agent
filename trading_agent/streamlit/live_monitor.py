@@ -2740,6 +2740,54 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Ladder min expiry gap (days)", 1, 60,
                 int(getattr(seed, "ladder_min_gap_days", 7)), 1, key="cust_ladder_gap")
 
+        # ── Entry confirmation + trailing profit (skills 61, 30) ─────────
+        st.markdown("**Entry confirmation and trailing profit** *(skills 61, 30)*")
+        ec1, ec2, ec3 = st.columns(3)
+        with ec1:
+            entry_confirm_cycles = st.number_input(
+                "Confirm entry over N cycles", 1, 10,
+                int(getattr(seed, "entry_confirm_cycles", 3)), 1, key="cust_entry_confirm",
+                help="Same ticker, strategy and expiry on N consecutive cycles (~75 s apart) "
+                     "before an order goes out. 1 = order on the first cycle.")
+        with ec2:
+            no_entry_before = st.text_input(
+                "No new entries before (ET)", str(getattr(seed, "no_entry_before_et", "09:45")),
+                key="cust_no_entry_before", help="HH:MM, e.g. 09:45. Empty = no window.")
+        with ec3:
+            max_entries_hour = st.number_input(
+                "Max new entries per hour", 0, 10,
+                int(getattr(seed, "max_new_entries_per_hour", 1)), 1, key="cust_entries_hour",
+                help="0 = no limit.")
+        tr1, tr2, tr3, tr4 = st.columns(4)
+        with tr1:
+            trail_mode = st.selectbox(
+                "Trailing profit", ["shadow", "live", "off"],
+                index=["shadow", "live", "off"].index(getattr(seed, "profit_trail_mode", "shadow")),
+                key="cust_trail_mode",
+                help="shadow: close at the target as before, record what trailing would have "
+                     "earned · live: trailing decides · off: close at the target.")
+        with tr2:
+            trail_giveback = st.slider("Give back from peak", 0.10, 0.50,
+                                       float(getattr(seed, "trail_giveback_pct", 0.25)), 0.05,
+                                       key="cust_trail_giveback")
+            trail_dte = st.number_input("Close trailing trades at DTE ≤", 0, 21,
+                                        int(getattr(seed, "trail_max_hold_dte", 7)), 1,
+                                        key="cust_trail_dte")
+        with tr3:
+            trail_credit_floor = st.slider("Credit: lock at least (% of credit)", 0.10, 0.60,
+                                           float(getattr(seed, "trail_credit_floor_pct", 0.40)), 0.05,
+                                           key="cust_trail_floor")
+            trail_credit_ceiling = st.slider("Credit: bank at (% of credit)", 0.50, 0.95,
+                                             float(getattr(seed, "trail_credit_ceiling_pct", 0.75)), 0.05,
+                                             key="cust_trail_credit_ceiling")
+        with tr4:
+            trail_debit_ceiling = st.slider("Debit: bank at (% of max profit)", 0.50, 1.00,
+                                            float(getattr(seed, "trail_debit_ceiling_pct", 0.90)), 0.05,
+                                            key="cust_trail_debit_ceiling")
+            trail_cal_ceiling = st.slider("Calendar: bank at (% of debit)", 0.20, 1.00,
+                                          float(getattr(seed, "trail_calendar_ceiling_pct", 0.40)), 0.05,
+                                          key="cust_trail_cal_ceiling")
+
         # ── Debit structures + bounce bull put (skill 59) ─────────────
         st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
         db_c1, db_c2, db_c3 = st.columns(3)
@@ -2857,6 +2905,16 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "csp_max_per_sector":           int(csp_per_sector),
         "max_positions_per_ticker":     int(max_per_ticker),
         "ladder_min_gap_days":          int(ladder_gap),
+        "entry_confirm_cycles":         int(entry_confirm_cycles),
+        "no_entry_before_et":           no_entry_before.strip(),
+        "max_new_entries_per_hour":     int(max_entries_hour),
+        "profit_trail_mode":            trail_mode,
+        "trail_giveback_pct":           trail_giveback,
+        "trail_credit_floor_pct":       trail_credit_floor,
+        "trail_credit_ceiling_pct":     trail_credit_ceiling,
+        "trail_debit_ceiling_pct":      trail_debit_ceiling,
+        "trail_calendar_ceiling_pct":   trail_cal_ceiling,
+        "trail_max_hold_dte":           int(trail_dte),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

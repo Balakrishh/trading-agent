@@ -49,20 +49,59 @@ Preset defaults:
 ### 3.1 The exit predicate (live)
 
 ```python
-# trading_agent/position_monitor.py
+# trading_agent/position_monitor.py:950-959
 # --- 3. Profit target: 50% of credit captured ---
-# Skill 44 (2026-07-02) — the threshold now scales by contracts_open so
-# a multi-contract position hits profit-target at 50% of TOTAL credit,
-# not per-contract credit.
-profit_threshold = credit_position * self.profit_target_pct
-if spread.net_unrealized_pl >= profit_threshold > 0:
+_, _, profit_threshold = self.profit_basis(spread)
+profit_pl = self._profit_pl(spread)
+if profit_pl >= profit_threshold > 0:
     return (
         ExitSignal.PROFIT_TARGET,
-        f"Profit ${spread.net_unrealized_pl:.2f} ≥ "
+        f"Profit ${profit_pl:.2f} ({self.profit_target_basis}) ≥ "
         f"{self.profit_target_pct*100:.0f}% of credit "
         f"${credit_position:.2f} ({contracts}×${credit_per_contract:.2f})"
     )
 ```
+
+### 3.1b Trailing profit (2026-10-05, `profit_trail.py`)
+
+`PositionMonitor.profit_basis(spread)` is the single source for each structure's yardstick and target (credit / debit vertical / calendar / wheel). `TradingAgent._apply_profit_trail` runs right after `evaluate()`; `profit_trail.evaluate` arms at the target and then:
+
+```python
+def evaluate(state: TrailState, profit: float, *, basis: float, target: float,
+             params: TrailParams, dte: Optional[int]) -> Tuple[TrailState, str, str]:
+    """Advance ``state`` with this cycle's ``profit`` ($, position scale).
+    Returns (state, decision, reason). Pure — no I/O."""
+    state.last_pl = round(profit, 2)
+    if not state.armed:
+        if target <= 0 or profit < target:
+            return state, HOLD_UNARMED, ""
+        state.armed = True
+        state.basis, state.target = basis, target
+        state.armed_at = datetime.now(timezone.utc).isoformat()
+        state.peak_pl = profit
+    state.peak_pl = max(state.peak_pl, profit)
+    ceiling = params.ceiling(state.kind, basis)
+    if ceiling > 0 and profit >= ceiling:
+        return state, CLOSE_CEILING, (f"trail ceiling: profit ${profit:.2f} ≥ "
+                                      f"${ceiling:.2f}")
+    lock = max(params.floor(state.kind, basis), state.peak_pl * (1.0 - params.giveback_pct))
+    if profit <= lock:
+        return state, CLOSE_GIVEBACK, (f"trail giveback: profit ${profit:.2f} ≤ lock "
+                                       f"${lock:.2f} (peak ${state.peak_pl:.2f})")
+    if dte is not None and dte <= params.max_hold_dte:
+        return state, CLOSE_TIME, f"trail time stop: {dte} DTE ≤ {params.max_hold_dte}"
+    return state, HOLD_ARMED, (f"trail armed: profit ${profit:.2f}, peak "
+                               f"${state.peak_pl:.2f}, lock ${lock:.2f}, ceiling ${ceiling:.2f}")
+```
+
+| Mode (`profit_trail_mode`) | Effect |
+|---|---|
+| `off` | close at the target (legacy) |
+| `shadow` (default) | close at the target; armed winners keep being priced after the close until the trail would have closed → journal `profit_trail_shadow` with `actual_exit_pl`, `trail_exit_pl`, `trail_minus_actual` |
+| `live` | the trail decides: target → HOLD (armed); ceiling / giveback / time stop → PROFIT_TARGET (still through the 3-cycle debounce) |
+
+Defaults: giveback 25 % of the peak; credit floor 40 % and ceiling 75 % of the credit; debit ceiling 90 % of max profit; calendar ceiling 40 % of the debit; time stop at ≤ 7 DTE. Wheel legs are excluded.
+
 
 ### 3.2 PresetConfig field
 
@@ -106,6 +145,8 @@ signal, reason = pos.evaluate_exit(
 - **Backtester parity** — both the live `position_monitor` and the backtest's `_handle_intraday_decision` read from the same preset field; a divergence (e.g., backtester hardcodes 0.50, live uses 0.40) breaks skill 15's parity invariant and would silently produce backtest results that overstate aggressive-preset performance.
 
 - **Profit target judged at the cost to close (2026-10-05, §6.1).** With `fill_model="natural"`, `PositionMonitor._profit_pl` uses `SpreadPosition.net_natural_pl` — each leg valued at its natural closing price (short → ask, long → bid) — so the 50 % target fires only when it can actually be captured. Falls back to the mid valuation when any leg lacks a quote. Stops and the hard stop keep using the mid valuation so bid/ask noise does not trigger them.
+
+- **Trailing profit (2026-10-05).** Stops always win — the trail only rewrites HOLD / PROFIT_TARGET. Profit is the natural-price P&L (cost to close now), and a trail close still needs 3 consecutive votes, so one bad quote cannot end a winner. The trail watches intraday only: an overnight gap through the lock closes at the next open, possibly below it (bounded by the ceiling and the 7-DTE stop). State lives in `trade_journal/profit_trail.json` (atomic) because the agent restarts every cycle; positions that close without ever arming are dropped. A ghost leg with no usable quote is retried next cycle; a ghost past expiry records its last P&L.
 
 ## 5. Cross-References
 

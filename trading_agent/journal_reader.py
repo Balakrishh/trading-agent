@@ -470,6 +470,24 @@ class JournalReader:
         out.sort(key=lambda s: (-s.count, s.source))
         return out
 
+    def submission_times_since(self, hours: float = 1.0) -> List[datetime]:
+        """UTC times of ``submitted`` rows within the last ``hours`` — the
+        entry-rate limit (``max_new_entries_per_hour``) counts these."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        out: List[datetime] = []
+        for rec in self._iter_rows():
+            if rec.get("action") != "submitted":
+                continue
+            try:
+                ts = datetime.fromisoformat(str(rec.get("timestamp", "")))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= cutoff:
+                out.append(ts)
+        return out
+
     def tickers_opened_today_utc(self) -> Set[str]:
         """Return underlyings that submitted a new spread today (UTC).
 
