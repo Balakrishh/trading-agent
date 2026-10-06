@@ -1038,7 +1038,7 @@ class TradingAgent:
                 if ((result or {}).get("execution") or {}).get("status") in ("submitted", "dry_run"):
                     risk_used += self._submitted_risk(result)
                     self._entries_last_hour += 1
-                    self._entry_confirm.consumed(ticker)
+                    self._consume_entry(ticker, result)
                     self._open_expirations.setdefault(ticker, []).append(
                         str(result.get("expiration", "")))
                     self._opened_today.add(ticker)
@@ -1085,10 +1085,7 @@ class TradingAgent:
                 })
 
         self._set_trade_risk_pct(self._cycle_risk_pct)
-        try:
-            self._entry_confirm.save()
-        except OSError as exc:
-            logger.warning("Entry-confirmation state not saved: %s", exc)
+        self._finish_entry_gates()
 
         # ------------------------------------------------------------------
         # Order status summary
@@ -2325,11 +2322,48 @@ class TradingAgent:
         from trading_agent.entry_confirmation import EntryConfirmations
         self._entry_confirm = EntryConfirmations(
             int(getattr(self.preset, "entry_confirm_cycles", 1))).begin()
+        self._entry_plans = {}
         self._entries_last_hour = 0
         jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
         if isinstance(jsonl_path, str) and jsonl_path:
             from trading_agent.journal_reader import JournalReader
             self._entries_last_hour = len(JournalReader(jsonl_path).submission_times_since(1.0))
+
+    def _finish_entry_gates(self) -> None:
+        """End of Stage 2: advance shadow entry timing, persist candidates."""
+        self._advance_entry_timing_shadow()
+        try:
+            self._entry_confirm.save()
+        except OSError as exc:
+            logger.warning("Entry-confirmation state not saved: %s", exc)
+
+    def _consume_entry(self, ticker: str, result: Dict) -> None:
+        """Clear the ticker's candidate after a submission; in shadow timing
+        mode hand the filled plan to the timing tracker."""
+        from trading_agent.entry_confirmation import TimingParams
+        qty = int(((result or {}).get("execution") or {}).get("qty") or 1)
+        self._entry_confirm.consumed(
+            ticker, plan=self._entry_plans.pop(ticker, None), qty=qty,
+            shadow=str(getattr(self.preset, "entry_timing_mode", "off")) == "shadow",
+            params=TimingParams.from_preset(self.preset))
+
+    def _advance_entry_timing_shadow(self) -> None:
+        """Shadow timing: re-quote filled entries and journal resolved
+        ``entry_timing_shadow`` outcomes. Never affects trading."""
+        tracker = getattr(self, "_entry_confirm", None)
+        if tracker is None or not (tracker.timing or tracker.resolved):
+            return
+        from trading_agent.entry_confirmation import TimingParams
+        try:
+            outcomes = tracker.advance_shadow(self.data_provider.fetch_option_quotes,
+                                              TimingParams.from_preset(self.preset))
+        except Exception as exc:  # noqa: skill-34-exempt — shadow log only; never affects trading
+            logger.warning("Entry-timing shadow skipped: %s", exc)
+            return
+        for o in outcomes:
+            logger.info("[%s] entry timing (shadow): %s — %s", o["ticker"], o["decision"], o["reason"])
+            self.journal_kb.log_signal(ticker=o["ticker"], action="entry_timing_shadow",
+                                       price=0.0, raw_signal=o)
 
     def _entry_rate_gate(self, ticker: str) -> Optional[Dict]:
         """Skip result when ``max_new_entries_per_hour`` submissions already
@@ -2359,6 +2393,17 @@ class TradingAgent:
         if not conf.confirmed:
             logger.info("[%s] %s", ticker, conf.reason)
             return f"entry_confirming ({conf.count}/{conf.required})"
+        if str(getattr(self.preset, "entry_timing_mode", "off")) == "live":
+            from trading_agent.entry_confirmation import TimingParams, timing_decision
+            decision, reason = timing_decision(conf.history, conf.required,
+                                               TimingParams.from_preset(self.preset))
+            logger.info("[%s] %s", ticker, reason)
+            if decision == "wait":
+                return "entry_timing_wait"
+            if decision == "skip":
+                tracker.consumed(ticker)          # start over; never chase
+                return "entry_timing_skip"
+        self._entry_plans[ticker] = plan
         return None
 
     # ── Trailing profit (2026-10-05, profit_trail.py) ────────────────────

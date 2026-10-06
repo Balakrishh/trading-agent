@@ -2758,6 +2758,29 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Max new entries per hour", 0, 10,
                 int(getattr(seed, "max_new_entries_per_hour", 1)), 1, key="cust_entries_hour",
                 help="0 = no limit.")
+        et1, et2, et3, et4 = st.columns(4)
+        with et1:
+            entry_timing_mode = st.selectbox(
+                "Entry timing", ["shadow", "live", "off"],
+                index=["shadow", "live", "off"].index(getattr(seed, "entry_timing_mode", "shadow")),
+                key="cust_entry_timing",
+                help="After confirmation, wait for the best-priced cycle. shadow: enter at "
+                     "confirmation and record what timing would have saved · live: timing "
+                     "decides · off: enter at confirmation.")
+        with et2:
+            entry_max_wait = st.number_input("Max wait (cycles)", 1, 20,
+                                             int(getattr(seed, "entry_max_wait_cycles", 8)), 1,
+                                             key="cust_entry_max_wait")
+        with et3:
+            entry_best_tol = st.slider("Counts as best within", 0.0, 0.05,
+                                       float(getattr(seed, "entry_best_tolerance_pct", 0.01)), 0.005,
+                                       key="cust_entry_best_tol")
+        with et4:
+            entry_chase = st.slider("Don't chase beyond", 0.0, 0.10,
+                                    float(getattr(seed, "entry_chase_limit_pct", 0.03)), 0.01,
+                                    key="cust_entry_chase",
+                                    help="At max wait, skip if the price is this much worse "
+                                         "than at confirmation.")
         tr1, tr2, tr3, tr4 = st.columns(4)
         with tr1:
             trail_mode = st.selectbox(
@@ -2908,6 +2931,10 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "entry_confirm_cycles":         int(entry_confirm_cycles),
         "no_entry_before_et":           no_entry_before.strip(),
         "max_new_entries_per_hour":     int(max_entries_hour),
+        "entry_timing_mode":            entry_timing_mode,
+        "entry_max_wait_cycles":        int(entry_max_wait),
+        "entry_best_tolerance_pct":     entry_best_tol,
+        "entry_chase_limit_pct":        entry_chase,
         "profit_trail_mode":            trail_mode,
         "trail_giveback_pct":           trail_giveback,
         "trail_credit_floor_pct":       trail_credit_floor,
