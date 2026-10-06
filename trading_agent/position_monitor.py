@@ -756,6 +756,29 @@ class PositionMonitor:
                     f"Wheel CSP: |Δ| {abs(spread.short_delta):.2f} ≥ {CSP_STOP_ABS_DELTA}")
         return (ExitSignal.HOLD, "Wheel: holding — assignment accepted")
 
+    def profit_basis(self, spread: SpreadPosition):
+        """Single source for a position's profit yardstick, used by the
+        exit rules here and by the trailing-profit rule (profit_trail.py).
+
+        Returns ``(kind, basis_dollars, target_dollars)`` at position scale:
+        * ``credit``          — basis = credit collected, target = profit_target_pct × basis
+        * ``debit_vertical``  — basis = max profit (width − debit), target = debit_profit_target_pct × basis
+        * ``calendar``        — basis = debit paid, target = calendar_profit_target_pct × basis
+        * ``wheel``           — basis = credit, target = TAKE_PROFIT_PCT_OF_CREDIT × basis
+        """
+        contracts = max(1, spread.contracts_open)
+        if spread.strategy_name in WHEEL_STRATEGIES:
+            basis = spread.original_credit * 100 * contracts
+            return "wheel", basis, basis * TAKE_PROFIT_PCT_OF_CREDIT
+        if spread.strategy_name in DEBIT_VERTICALS:
+            basis = (spread.spread_width + spread.original_credit) * 100 * contracts
+            return "debit_vertical", basis, basis * self.debit_profit_target_pct
+        if spread.strategy_name in DEBIT_STRATEGIES:
+            basis = -spread.original_credit * 100 * contracts
+            return "calendar", basis, basis * self.calendar_profit_target_pct
+        basis = spread.original_credit * 100 * contracts
+        return "credit", basis, basis * self.profit_target_pct
+
     def _check_debit_exit(self, spread: SpreadPosition,
                           current_regimes: Dict[str, Regime]):
         """Stop at ``debit_stop_loss_pct`` of the debit; profit target at
@@ -772,13 +795,11 @@ class PositionMonitor:
             return (ExitSignal.STOP_LOSS,
                     f"Debit: loss ${loss:.2f} ≥ {self.debit_stop_loss_pct:.0%} of "
                     f"debit ${debit_position:.2f}")
-        if spread.strategy_name in DEBIT_VERTICALS:
-            max_profit = (spread.spread_width + spread.original_credit) * 100 * contracts
-            target = max_profit * self.debit_profit_target_pct
-            label = f"{self.debit_profit_target_pct:.0%} of max profit ${max_profit:.2f}"
+        kind, basis, target = self.profit_basis(spread)
+        if kind == "debit_vertical":
+            label = f"{self.debit_profit_target_pct:.0%} of max profit ${basis:.2f}"
         else:
-            target = debit_position * self.calendar_profit_target_pct
-            label = f"{self.calendar_profit_target_pct:.0%} of debit ${debit_position:.2f}"
+            label = f"{self.calendar_profit_target_pct:.0%} of debit ${basis:.2f}"
         profit_pl = self._profit_pl(spread)
         if profit_pl >= target > 0:
             return (ExitSignal.PROFIT_TARGET,
@@ -927,7 +948,7 @@ class PositionMonitor:
             )
 
         # --- 3. Profit target: 50% of credit captured ---
-        profit_threshold = credit_position * self.profit_target_pct
+        _, _, profit_threshold = self.profit_basis(spread)
         profit_pl = self._profit_pl(spread)
         if profit_pl >= profit_threshold > 0:
             return (

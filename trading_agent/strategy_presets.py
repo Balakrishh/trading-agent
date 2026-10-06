@@ -332,6 +332,43 @@ class PresetConfig:
     ladder_min_gap_days:               int   = 7
 
     # ------------------------------------------------------------------
+    # Entry confirmation (added 2026-10-05). An approved plan is submitted
+    # only after the same ticker produced the same strategy + expiry on
+    # entry_confirm_cycles consecutive cycles (≈ 75 s apart); no entries
+    # before no_entry_before_et; at most max_new_entries_per_hour
+    # submissions in a rolling hour (0 = no limit).
+    # ------------------------------------------------------------------
+    entry_confirm_cycles:              int   = 3
+    no_entry_before_et:                str   = "09:45"
+    max_new_entries_per_hour:          int   = 1
+    # Entry timing (entry_confirmation.py): once confirmed, enter at the
+    # best-scored price of the window (score within entry_best_tolerance_pct
+    # of the best and natural-to-mid gap ≤ the window median); after
+    # entry_max_wait_cycles enter only if no more than entry_chase_limit_pct
+    # worse than at confirmation, else skip. "shadow" enters at
+    # confirmation and records what the rule would have done.
+    entry_timing_mode:                 str   = "shadow"
+    entry_max_wait_cycles:             int   = 8
+    entry_best_tolerance_pct:          float = 0.01
+    entry_chase_limit_pct:             float = 0.03
+
+    # ------------------------------------------------------------------
+    # Trailing profit-taking (added 2026-10-05, profit_trail.py). At the
+    # profit target the trail arms instead of closing; it closes at the
+    # ceiling, after giving back trail_giveback_pct of the peak (never
+    # below the credit floor), or at ≤ trail_max_hold_dte days to expiry.
+    # "shadow" keeps the legacy close and records what the trail would
+    # have done; "live" lets the trail decide; "off" disables it.
+    # ------------------------------------------------------------------
+    profit_trail_mode:                 str   = "shadow"
+    trail_giveback_pct:                float = 0.25
+    trail_credit_floor_pct:            float = 0.40     # of the credit
+    trail_credit_ceiling_pct:          float = 0.75     # of the credit
+    trail_debit_ceiling_pct:           float = 0.90     # of max profit
+    trail_calendar_ceiling_pct:        float = 0.40     # of the debit
+    trail_max_hold_dte:                int   = 7
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
@@ -396,6 +433,9 @@ class PresetConfig:
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
                 f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
+                f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h • "
+                f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
+                f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
                 f"Max risk {self.max_risk_pct*100:.0f}% "
@@ -411,6 +451,9 @@ class PresetConfig:
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
             f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
+            f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h • "
+            f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
+            f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
             f"Max risk {self.max_risk_pct*100:.0f}% "
@@ -585,6 +628,12 @@ _TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct",
 def _coerce_overrides(overrides: Dict) -> Dict:
     """JSON gives us lists; the dataclass wants tuples (frozen=True)."""
     out = dict(overrides)
+    if out.get("entry_timing_mode") not in (None, "off", "shadow", "live"):
+        logger.warning("Invalid entry_timing_mode %r — using the default",
+                       out.pop("entry_timing_mode"))
+    if out.get("profit_trail_mode") not in (None, "off", "shadow", "live"):
+        logger.warning("Invalid profit_trail_mode %r — using the default",
+                       out.pop("profit_trail_mode"))
     for k in _TUPLE_FIELDS:
         if k in out and isinstance(out[k], list):
             out[k] = tuple(out[k])

@@ -971,6 +971,8 @@ class TradingAgent:
             }
 
         risk_used, risk_budget = self._total_risk_state(monitor_results, account_balance)
+        # Entry confirmation + hourly entry limit (2026-10-05).
+        self._begin_entry_gates()
         # Backlog §6.7 laddering inputs (read by the gate in _process_ticker).
         from trading_agent.position_caps import open_expirations
         self._open_expirations = open_expirations(monitor_results)
@@ -1021,7 +1023,8 @@ class TradingAgent:
                 })
                 continue
 
-            skip = self._total_risk_gate(ticker, risk_used, risk_budget, account_balance)
+            skip = (self._entry_rate_gate(ticker)
+                    or self._total_risk_gate(ticker, risk_used, risk_budget, account_balance))
             if skip is not None:
                 new_trade_results.append(skip)
                 continue
@@ -1034,6 +1037,8 @@ class TradingAgent:
                 new_trade_results.append(result)
                 if ((result or {}).get("execution") or {}).get("status") in ("submitted", "dry_run"):
                     risk_used += self._submitted_risk(result)
+                    self._entries_last_hour += 1
+                    self._consume_entry(ticker, result)
                     self._open_expirations.setdefault(ticker, []).append(
                         str(result.get("expiration", "")))
                     self._opened_today.add(ticker)
@@ -1080,6 +1085,7 @@ class TradingAgent:
                 })
 
         self._set_trade_risk_pct(self._cycle_risk_pct)
+        self._finish_entry_gates()
 
         # ------------------------------------------------------------------
         # Order status summary
@@ -1217,6 +1223,7 @@ class TradingAgent:
 
         spreads = self.position_monitor.evaluate(
             spreads, current_regimes, underlying_prices)
+        spreads = self._apply_profit_trail(spreads)
 
         # Skill 50 — publish the monitor's own valuation so /triage reads
         # the same mid P&L the exit rules just used (not a second feed).
@@ -2307,6 +2314,193 @@ class TradingAgent:
         out["rv_20d"] = round(sigma, 4) if sigma is not None else None
         return out
 
+    # ── Entry gates (2026-10-05) ─────────────────────────────────────────
+
+    def _begin_entry_gates(self) -> None:
+        """Load the entry-confirmation candidates and count this hour's
+        submissions (journal) for the rate limit."""
+        from trading_agent.entry_confirmation import EntryConfirmations
+        self._entry_confirm = EntryConfirmations(
+            int(getattr(self.preset, "entry_confirm_cycles", 1))).begin()
+        self._entry_plans = {}
+        self._entries_last_hour = 0
+        jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+        if isinstance(jsonl_path, str) and jsonl_path:
+            from trading_agent.journal_reader import JournalReader
+            self._entries_last_hour = len(JournalReader(jsonl_path).submission_times_since(1.0))
+
+    def _finish_entry_gates(self) -> None:
+        """End of Stage 2: advance shadow entry timing, persist candidates."""
+        self._advance_entry_timing_shadow()
+        try:
+            self._entry_confirm.save()
+        except OSError as exc:
+            logger.warning("Entry-confirmation state not saved: %s", exc)
+
+    def _consume_entry(self, ticker: str, result: Dict) -> None:
+        """Clear the ticker's candidate after a submission; in shadow timing
+        mode hand the filled plan to the timing tracker."""
+        from trading_agent.entry_confirmation import TimingParams
+        qty = int(((result or {}).get("execution") or {}).get("qty") or 1)
+        self._entry_confirm.consumed(
+            ticker, plan=self._entry_plans.pop(ticker, None), qty=qty,
+            shadow=str(getattr(self.preset, "entry_timing_mode", "off")) == "shadow",
+            params=TimingParams.from_preset(self.preset))
+
+    def _advance_entry_timing_shadow(self) -> None:
+        """Shadow timing: re-quote filled entries and journal resolved
+        ``entry_timing_shadow`` outcomes. Never affects trading."""
+        tracker = getattr(self, "_entry_confirm", None)
+        if tracker is None or not (tracker.timing or tracker.resolved):
+            return
+        from trading_agent.entry_confirmation import TimingParams
+        try:
+            outcomes = tracker.advance_shadow(self.data_provider.fetch_option_quotes,
+                                              TimingParams.from_preset(self.preset))
+        except Exception as exc:  # noqa: skill-34-exempt — shadow log only; never affects trading
+            logger.warning("Entry-timing shadow skipped: %s", exc)
+            return
+        for o in outcomes:
+            logger.info("[%s] entry timing (shadow): %s — %s", o["ticker"], o["decision"], o["reason"])
+            self.journal_kb.log_signal(ticker=o["ticker"], action="entry_timing_shadow",
+                                       price=0.0, raw_signal=o)
+
+    def _entry_rate_gate(self, ticker: str) -> Optional[Dict]:
+        """Skip result when ``max_new_entries_per_hour`` submissions already
+        went out in the last hour (0 = no limit)."""
+        limit = int(getattr(self.preset, "max_new_entries_per_hour", 0) or 0)
+        used = int(getattr(self, "_entries_last_hour", 0))
+        if limit <= 0 or used < limit:
+            return None
+        logger.info("[%s] Entry rate limit — %d/%d entries in the last hour", ticker, used, limit)
+        self.journal_kb.log_signal(
+            ticker=ticker, action="skipped_entry_rate", price=self._cached_price(ticker),
+            raw_signal={"reason": "entry_rate_limit", "entries_last_hour": used, "limit": limit})
+        return {"ticker": ticker, "status": "skipped", "reason": "Entry rate limit"}
+
+    def _entry_confirmation_block(self, ticker: str, plan) -> Optional[str]:
+        """Failed-check text while ``plan`` is not yet confirmed on enough
+        consecutive cycles, or before the ET entry window opens; None when
+        the order may go out."""
+        from trading_agent.entry_confirmation import before_entry_window
+        tracker = getattr(self, "_entry_confirm", None)
+        if tracker is None:
+            return None
+        conf = tracker.observe(ticker, plan)
+        not_before = str(getattr(self.preset, "no_entry_before_et", "") or "")
+        if not_before and before_entry_window(datetime.now(timezone.utc), not_before):
+            return f"entry_window (no entries before {not_before} ET)"
+        if not conf.confirmed:
+            logger.info("[%s] %s", ticker, conf.reason)
+            return f"entry_confirming ({conf.count}/{conf.required})"
+        if str(getattr(self.preset, "entry_timing_mode", "off")) == "live":
+            from trading_agent.entry_confirmation import TimingParams, timing_decision
+            decision, reason = timing_decision(conf.history, conf.required,
+                                               TimingParams.from_preset(self.preset))
+            logger.info("[%s] %s", ticker, reason)
+            if decision == "wait":
+                return "entry_timing_wait"
+            if decision == "skip":
+                tracker.consumed(ticker)          # start over; never chase
+                return "entry_timing_skip"
+        self._entry_plans[ticker] = plan
+        return None
+
+    # ── Trailing profit (2026-10-05, profit_trail.py) ────────────────────
+
+    def _apply_profit_trail(self, spreads):
+        """Arm / trail profit-taking per ``preset.profit_trail_mode``.
+        live: replaces the close-at-target with the trail's decision;
+        shadow: leaves exits alone and prices closed winners until the trail
+        would have closed, journaling ``profit_trail_shadow``. Stops are
+        never touched. Best-effort: any failure leaves the signals as-is."""
+        mode = str(getattr(self.preset, "profit_trail_mode", "off"))
+        if mode not in ("shadow", "live"):
+            return spreads
+        from trading_agent import profit_trail as pt
+        try:
+            params = pt.TrailParams.from_preset(self.preset)
+            states = pt.load_states()
+            seen = set()
+            for s in spreads:
+                if not s.legs:
+                    continue
+                kind, basis, target = self.position_monitor.profit_basis(s)
+                if kind == "wheel":
+                    continue
+                key = pt.position_key(l.symbol for l in s.legs)
+                seen.add(key)
+                st = states.get(key) or pt.TrailState(
+                    key=key, ticker=s.underlying, strategy=s.strategy_name,
+                    kind=kind, expiration=s.expiration)
+                st.legs = [{"symbol": l.symbol, "qty": int(l.qty),
+                            "avg_entry": float(l.avg_entry_price)} for l in s.legs]
+                st, decision, reason = pt.evaluate(
+                    st, self.position_monitor._profit_pl(s), basis=basis, target=target,
+                    params=params, dte=pt.days_to(s.expiration))
+                states[key] = st
+                if mode == "live" and s.exit_signal in (ExitSignal.HOLD, ExitSignal.PROFIT_TARGET):
+                    if decision in pt.CLOSE_DECISIONS:
+                        s.exit_signal, s.exit_reason = ExitSignal.PROFIT_TARGET, reason
+                    elif decision == pt.HOLD_ARMED:
+                        s.exit_signal, s.exit_reason = ExitSignal.HOLD, reason
+                    if decision != pt.HOLD_UNARMED:
+                        logger.info("[%s] %s", s.underlying, reason)
+                elif mode == "shadow" and decision in pt.CLOSE_DECISIONS and st.shadow_exit_pl is None:
+                    st.shadow_exit_pl, st.shadow_reason = st.last_pl, reason
+            self._advance_trail_ghosts(states, seen, mode, params)
+            pt.save_states(states)
+        except Exception as exc:  # noqa: skill-34-exempt — trail is an overlay; exits fall back to the monitor's signals
+            logger.warning("Profit trail skipped this cycle: %s", exc)
+        return spreads
+
+    def _advance_trail_ghosts(self, states, seen, mode: str, params) -> None:
+        """Positions that closed for real: drop them, except armed winners in
+        shadow mode, which keep being priced until the trail would have
+        closed; then journal actual vs trail P&L."""
+        from trading_agent import profit_trail as pt
+        for key, st in list(states.items()):
+            if key in seen:
+                continue
+            if mode != "shadow" or not st.armed:
+                del states[key]
+                continue
+            if not st.ghost:
+                st.ghost = True
+                st.actual_exit_pl = self._realized_close_pl(st)
+            if st.shadow_exit_pl is None:
+                dte = pt.days_to(st.expiration)
+                quotes = self.data_provider.fetch_option_quotes([l["symbol"] for l in st.legs]) or {}
+                pl = pt.ghost_profit(st.legs, quotes)
+                if pl is not None:
+                    st, decision, reason = pt.evaluate(st, pl, basis=st.basis, target=st.target,
+                                                       params=params, dte=dte)
+                    if decision in pt.CLOSE_DECISIONS:
+                        st.shadow_exit_pl, st.shadow_reason = pl, reason
+                if st.shadow_exit_pl is None and dte is not None and dte < 0:
+                    st.shadow_exit_pl, st.shadow_reason = st.last_pl, "expired while trailing"
+            if st.shadow_exit_pl is not None:
+                self.journal_kb.log_signal(
+                    ticker=st.ticker, action="profit_trail_shadow", price=0.0,
+                    raw_signal={"strategy": st.strategy, "expiration": st.expiration,
+                                "actual_exit_pl": st.actual_exit_pl,
+                                "trail_exit_pl": st.shadow_exit_pl,
+                                "trail_minus_actual": (None if st.actual_exit_pl is None
+                                                       else round(st.shadow_exit_pl - st.actual_exit_pl, 2)),
+                                "peak_pl": st.peak_pl, "reason": st.shadow_reason})
+                del states[key]
+
+    def _realized_close_pl(self, st) -> Optional[float]:
+        """Realized P&L of the real close of a trailed position (journal),
+        else the last natural P&L the trail saw."""
+        jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
+        if isinstance(jsonl_path, str) and jsonl_path:
+            from trading_agent.journal_reader import JournalReader
+            for c in reversed(JournalReader(jsonl_path).closes_since(3)):
+                if (c.ticker, c.strategy, c.expiration) == (st.ticker, st.strategy, st.expiration):
+                    return c.realized_pl
+        return st.last_pl
+
     def _max_per_ticker(self) -> int:
         """PresetConfig.max_positions_per_ticker (§6.7), legacy constant fallback."""
         return int(getattr(getattr(self, "preset", None), "max_positions_per_ticker",
@@ -2438,7 +2632,8 @@ class TradingAgent:
             block = (market_state.gate_failure(
                          self._market_state, plan.strategy_name,
                          [l.option_type for l in plan.legs if l.action == "sell"])
-                     or self._ladder_block(ticker, plan.expiration))
+                     or self._ladder_block(ticker, plan.expiration)
+                     or self._entry_confirmation_block(ticker, plan))
             if block:
                 logger.info("[%s] %s", ticker, block)
                 verdict = dataclasses.replace(

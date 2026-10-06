@@ -2740,6 +2740,77 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Ladder min expiry gap (days)", 1, 60,
                 int(getattr(seed, "ladder_min_gap_days", 7)), 1, key="cust_ladder_gap")
 
+        # ── Entry confirmation + trailing profit (skills 61, 30) ─────────
+        st.markdown("**Entry confirmation and trailing profit** *(skills 61, 30)*")
+        ec1, ec2, ec3 = st.columns(3)
+        with ec1:
+            entry_confirm_cycles = st.number_input(
+                "Confirm entry over N cycles", 1, 10,
+                int(getattr(seed, "entry_confirm_cycles", 3)), 1, key="cust_entry_confirm",
+                help="Same ticker, strategy and expiry on N consecutive cycles (~75 s apart) "
+                     "before an order goes out. 1 = order on the first cycle.")
+        with ec2:
+            no_entry_before = st.text_input(
+                "No new entries before (ET)", str(getattr(seed, "no_entry_before_et", "09:45")),
+                key="cust_no_entry_before", help="HH:MM, e.g. 09:45. Empty = no window.")
+        with ec3:
+            max_entries_hour = st.number_input(
+                "Max new entries per hour", 0, 10,
+                int(getattr(seed, "max_new_entries_per_hour", 1)), 1, key="cust_entries_hour",
+                help="0 = no limit.")
+        et1, et2, et3, et4 = st.columns(4)
+        with et1:
+            entry_timing_mode = st.selectbox(
+                "Entry timing", ["shadow", "live", "off"],
+                index=["shadow", "live", "off"].index(getattr(seed, "entry_timing_mode", "shadow")),
+                key="cust_entry_timing",
+                help="After confirmation, wait for the best-priced cycle. shadow: enter at "
+                     "confirmation and record what timing would have saved · live: timing "
+                     "decides · off: enter at confirmation.")
+        with et2:
+            entry_max_wait = st.number_input("Max wait (cycles)", 1, 20,
+                                             int(getattr(seed, "entry_max_wait_cycles", 8)), 1,
+                                             key="cust_entry_max_wait")
+        with et3:
+            entry_best_tol = st.slider("Counts as best within", 0.0, 0.05,
+                                       float(getattr(seed, "entry_best_tolerance_pct", 0.01)), 0.005,
+                                       key="cust_entry_best_tol")
+        with et4:
+            entry_chase = st.slider("Don't chase beyond", 0.0, 0.10,
+                                    float(getattr(seed, "entry_chase_limit_pct", 0.03)), 0.01,
+                                    key="cust_entry_chase",
+                                    help="At max wait, skip if the price is this much worse "
+                                         "than at confirmation.")
+        tr1, tr2, tr3, tr4 = st.columns(4)
+        with tr1:
+            trail_mode = st.selectbox(
+                "Trailing profit", ["shadow", "live", "off"],
+                index=["shadow", "live", "off"].index(getattr(seed, "profit_trail_mode", "shadow")),
+                key="cust_trail_mode",
+                help="shadow: close at the target as before, record what trailing would have "
+                     "earned · live: trailing decides · off: close at the target.")
+        with tr2:
+            trail_giveback = st.slider("Give back from peak", 0.10, 0.50,
+                                       float(getattr(seed, "trail_giveback_pct", 0.25)), 0.05,
+                                       key="cust_trail_giveback")
+            trail_dte = st.number_input("Close trailing trades at DTE ≤", 0, 21,
+                                        int(getattr(seed, "trail_max_hold_dte", 7)), 1,
+                                        key="cust_trail_dte")
+        with tr3:
+            trail_credit_floor = st.slider("Credit: lock at least (% of credit)", 0.10, 0.60,
+                                           float(getattr(seed, "trail_credit_floor_pct", 0.40)), 0.05,
+                                           key="cust_trail_floor")
+            trail_credit_ceiling = st.slider("Credit: bank at (% of credit)", 0.50, 0.95,
+                                             float(getattr(seed, "trail_credit_ceiling_pct", 0.75)), 0.05,
+                                             key="cust_trail_credit_ceiling")
+        with tr4:
+            trail_debit_ceiling = st.slider("Debit: bank at (% of max profit)", 0.50, 1.00,
+                                            float(getattr(seed, "trail_debit_ceiling_pct", 0.90)), 0.05,
+                                            key="cust_trail_debit_ceiling")
+            trail_cal_ceiling = st.slider("Calendar: bank at (% of debit)", 0.20, 1.00,
+                                          float(getattr(seed, "trail_calendar_ceiling_pct", 0.40)), 0.05,
+                                          key="cust_trail_cal_ceiling")
+
         # ── Debit structures + bounce bull put (skill 59) ─────────────
         st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
         db_c1, db_c2, db_c3 = st.columns(3)
@@ -2857,6 +2928,20 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "csp_max_per_sector":           int(csp_per_sector),
         "max_positions_per_ticker":     int(max_per_ticker),
         "ladder_min_gap_days":          int(ladder_gap),
+        "entry_confirm_cycles":         int(entry_confirm_cycles),
+        "no_entry_before_et":           no_entry_before.strip(),
+        "max_new_entries_per_hour":     int(max_entries_hour),
+        "entry_timing_mode":            entry_timing_mode,
+        "entry_max_wait_cycles":        int(entry_max_wait),
+        "entry_best_tolerance_pct":     entry_best_tol,
+        "entry_chase_limit_pct":        entry_chase,
+        "profit_trail_mode":            trail_mode,
+        "trail_giveback_pct":           trail_giveback,
+        "trail_credit_floor_pct":       trail_credit_floor,
+        "trail_credit_ceiling_pct":     trail_credit_ceiling,
+        "trail_debit_ceiling_pct":      trail_debit_ceiling,
+        "trail_calendar_ceiling_pct":   trail_cal_ceiling,
+        "trail_max_hold_dte":           int(trail_dte),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

@@ -194,3 +194,12 @@ def _offline_wheel_lookups(monkeypatch):
     import trading_agent.mcp.tools.strategy as st
     monkeypatch.setattr(st, "_sma200", lambda t: 1.0)
     monkeypatch.setattr(st, "_yf_sector", lambda t: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_entry_and_trail_state(tmp_path, monkeypatch):
+    """2026-10-05: entry-confirmation candidates and trailing-profit state
+    are files under trade_journal/ — keep tests from writing the repo's."""
+    from trading_agent import entry_confirmation, profit_trail
+    monkeypatch.setattr(entry_confirmation, "STATE_PATH", tmp_path / "entry_candidates.json")
+    monkeypatch.setattr(profit_trail, "STATE_PATH", tmp_path / "profit_trail.json")
