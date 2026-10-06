@@ -142,4 +142,4 @@ class CloseJournalWriter:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-06.*
