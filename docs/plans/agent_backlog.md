@@ -96,6 +96,25 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 - [ ] **Re-check large-cap option quotes** (AAPL, MSFT, GOOGL, JPM, V, MA, XOM had 7–41 % median leg spreads mid-day on 10/05) at 10:00 and 15:30 ET; if they tighten, add the ones that pass the quality screen (§6.7).
 - [ ] *(Operator)* **Keep the Mac awake for the session:** `sudo pmset repeat wakeorpoweron MTWRF 09:15:00` and no sleep on power during 09:15–16:10 ET. The supervisor fix only helps once the machine is awake.
 
+## 8. Trade repair advisor — fix losing trades with the same intelligence (added 2026-10-06)
+
+**Why:** on 2026-10-06 the GLD 379/369 put debit (2 × $4.25, −$145 at mid) was analysed by hand: hold vs close vs butterfly vs bear-call add vs roll out / out-and-up, each priced at natural and scored with a realized-volatility model. Hold won (worth ≈ $3.92/sh vs $3.35 to exit — every repair paid the bid/ask again, costing ≈ $36–115 of expected value); the butterfly was the only repair that lowered risk ($850 → $508 for ≈ $100). That analysis should run automatically and consistently, not ad hoc.
+
+**Plan (advisory first, shadow-measured, never automatic until proven):**
+
+- [ ] **Trigger.** Each cycle, flag a position for repair review when any holds: loss ≥ 25 % of max loss; the underlying is past the long strike (debit) or within 1 % of a short strike (credit); the thesis weakened (regime no longer matches but has not reversed, or price crossed back over the 20-day average); or ≤ 10 DTE with the position out of the money. Journal `repair_review` once per position per day.
+- [ ] **Repair menu per structure** (pure scorer in `decision_engine.py`, invariant 2):
+  - all: **hold**, **close now**;
+  - debit verticals: **convert to butterfly** (sell the next spread beyond the short strike), **roll out** (same strikes, later expiry), **roll out and re-centre** (at the money);
+  - credit verticals: **roll out for a credit**, **convert to iron condor** (sell the untested side), the existing **defensive roll** (skill 31) as one candidate;
+  - calendars: **roll the short leg**, **close**.
+  Never offer a repair that raises max loss (e.g. the bear-call add, which took GLD's worst case from $850 to $1,550) unless explicitly allowed.
+- [ ] **Score each repair the same way:** cost at natural price now; model value at expiry from a lognormal with 20-day realized volatility (`shadow_pop`), Black-Scholes for multi-expiry legs; Δ expected value vs hold; Δ max loss; P(profit); risk reduced per $ of expected value given up. Recommend hold unless a repair beats it on EV or buys risk reduction at ≤ a set price (e.g. ≤ $0.30 of EV per $1 of max-loss reduction).
+- [ ] **Use the intelligence already built:** market state (no bullish repair in DEFENSIVE / CAPITULATION), regime and SMA position for the thesis check, the playbook scorecard (repairs on a losing playbook lean to close), entry confirmation (a repair must be recommended on 3 consecutive cycles) and entry timing (place the repair order at the best-priced cycle).
+- [ ] **Surface it:** MCP `get_repair_options(ticker)` (read-only) and a `/triage` section; staged only through `/propose` → promote.
+- [ ] **Prerequisite — position families.** A butterfly conversion adds legs that share a strike with the open spread (GLD: two more short 369P). `group_into_spreads` must group an original plan and its repair under one family id, with combined economics for exits, before any repair is staged.
+- [ ] **Shadow measurement first:** journal `repair_shadow` with the recommended repair and what hold vs repair would have returned at expiry or exit; review after 4+ weeks per structure before any auto-repair is considered.
+
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 
 **Why:** two days of paper trading opened 0 new spreads (≈3,100 "no positive-EV" rejects). Causes: (1) the agent only *sells* premium, which is correctly idle when IV Rank is low (3–36 on 2026-09-30/10-01); (2) delta-as-probability assumes zero edge, so EV rarely clears after bid/ask; (3) oversold + high-IV setups — historically the best time to sell puts — are skipped rather than traded the other way. Goal: a deterministic regime → strategy map that always has an appropriate, small, defined-risk trade, measured per playbook.
