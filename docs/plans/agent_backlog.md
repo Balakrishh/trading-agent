@@ -83,6 +83,19 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 - [ ] Refresh the June holdings paste in the dashboard.
 - [ ] Confirm the rotated data-server token is the only valid one.
 
+## 7. Learnings from the first live playbook day (2026-10-05)
+
+- [x] **Stagger entries.** Four positions opened in 8 minutes and used the whole 10 % budget by 13:37; the rest of the day was 933 `total_risk_cap` skips. Add `max_new_entries_per_hour` (e.g. 1) and/or `max_new_entries_per_day` (e.g. 3) to `PresetConfig`, so risk is spread across the session and across days. *(Done 2026-10-05 — `max_new_entries_per_hour` = 1, entries from 09:45 ET; skill 61.)*
+- [ ] **Portfolio direction balance.** The book is net bearish (2 put debits + 1 call debit + calendar) while the market state is NORMAL with SPY above every average. Add a beta-weighted net-delta check (warn, then cap) so single-ticker regimes cannot stack one direction against the index.
+- [ ] **Broader breadth input.** Breadth uses 8 watchlist ETFs (12.5 % steps) and sat exactly on the 50 % CAUTION line all day. Compute it from the 11 Select Sector SPDRs (data only, not traded) for a finer, steadier reading; re-run `validate_market_state.py`.
+- [ ] **Evidence while capped.** The shadow POP log got zero rows after the cap engaged, because capped tickers are skipped before planning. Plan in shadow mode when capped (journal a `would_trade` row with `pop_delta` / `pop_rv`, no order) so the §3 / §6.6 data keeps accumulating.
+- [ ] **Measure slippage vs mid, not vs estimate.** All 4 fills equalled the natural-price estimate, so `entry_slippage` reads 0 while the positions started ~$100 down (≈ 3.4 % of risk = the bid/ask paid on 9 legs). Store the mid at entry in the trade plan and report fill − mid in the scorecard (the §6.6 "slippage vs mid" metric).
+- [x] **Entry regime persistence.** IWM entered as bearish and read sideways one cycle later (price between its 50- and 200-day). Require the regime to hold for N cycles (or a minimum distance from the SMA) before a directional entry; exits already debounce. *(Done 2026-10-05 — entry confirmation: same strategy + expiry on 3 consecutive cycles; skill 61.)*
+- [ ] **Run CI's exact pytest command locally.** `pytest -q` hid an INTERNALERROR that `pytest -v --maxfail=10` (CI) hit. Add `scripts/ci_local.sh` mirroring every CI step in a clean `env -i` worktree, and use it before every push.
+- [ ] **Trailing profit: decide live vs not.** `profit_trail_mode` is `shadow` since 2026-10-05; after 2–4 weeks compare `profit_trail_shadow` rows (`trail_minus_actual`) per structure and switch the winners to `live` (likely debit spreads first).
+- [ ] **Re-check large-cap option quotes** (AAPL, MSFT, GOOGL, JPM, V, MA, XOM had 7–41 % median leg spreads mid-day on 10/05) at 10:00 and 15:30 ET; if they tighten, add the ones that pass the quality screen (§6.7).
+- [ ] *(Operator)* **Keep the Mac awake for the session:** `sudo pmset repeat wakeorpoweron MTWRF 09:15:00` and no sleep on power during 09:15–16:10 ET. The supervisor fix only helps once the machine is awake.
+
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 
 **Why:** two days of paper trading opened 0 new spreads (≈3,100 "no positive-EV" rejects). Causes: (1) the agent only *sells* premium, which is correctly idle when IV Rank is low (3–36 on 2026-09-30/10-01); (2) delta-as-probability assumes zero edge, so EV rarely clears after bid/ask; (3) oversold + high-IV setups — historically the best time to sell puts — are skipped rather than traded the other way. Goal: a deterministic regime → strategy map that always has an appropriate, small, defined-risk trade, measured per playbook.
