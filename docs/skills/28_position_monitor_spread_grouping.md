@@ -110,6 +110,8 @@ spreads.extend(inferred)
 
 - **Manual/orphan positions outside the agent.** No matching plan → falls through to `_infer_spreads_from_legs`, which produces a row with `origin="inferred"` (vs `origin="trade_plan"` for plan-matched rows). The UI uses this to label inferred rows differently.
 
+- **Plan retention + inferred contract count (2026-10-07).** `trade_plan_<T>.json` keeps the last 200 runs, but a ticker re-planned every cycle (GLD, eligible for a laddered 2nd position) pushed its 2026-10-05 submitted run out in under a day, so the open position fell to the inference path — which left `contracts_open` at 1 for a 2-contract put debit (stop / target at half their levels). Now `executor.trim_plan_history` never evicts a submitted, valid run whose expiration ≥ today − 7 days, and inferred spreads / calendars set `contracts_open` = min |qty| of their legs (`_contracts_of`), the same rule as the plan-matched path.
+
 ## 5. Cross-References
 
 - `19_journal_schema.md` — explains why `state_history` retains rejected plans at all (audit trail / replay debugging).
@@ -119,4 +121,4 @@ spreads.extend(inferred)
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-07.*

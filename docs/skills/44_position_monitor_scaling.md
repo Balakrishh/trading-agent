@@ -144,6 +144,8 @@ Called by `agent.py` right after `fetch_open_positions()` and before `group_into
 
 - **`natural_unrealized_pl` (2026-10-05).** `remark_positions_at_mid` also records each leg's P&L at its natural closing price; `group_into_spreads` / inference sum it into `net_natural_pl` (None if any leg is unquoted). Used only for the profit target (skill 30 §4).
 
+- **Inferred positions scale too (2026-10-07).** Positions grouped by leg inference (no trade plan) now carry `contracts_open` = min |qty| of their legs; before, they defaulted to 1 and every threshold was scaled for a single contract (skill 28).
+
 ## 5. Cross-References
 
 - `06_stale_spread_risk_gate.md` — companion invariant on the scan side (rejects wide bid-ask legs at scan time); this skill's grace period is the monitor-side symmetric protection against stale marks at evaluation time.
@@ -153,4 +155,4 @@ Called by `agent.py` right after `fetch_open_positions()` and before `group_into
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-07.*

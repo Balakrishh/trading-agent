@@ -40,7 +40,7 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import requests
 
@@ -117,6 +117,41 @@ def realized_pl_from_close(legs, fill_debit: float) -> Optional[float]:
         return round((credit - float(fill_debit)) * 100 * qtys.pop(), 2)
     except (TypeError, ValueError, AttributeError):
         return None
+
+
+def _keeps_live_position(entry: Dict) -> bool:
+    """A submitted, still-valid run whose expiration has not long passed —
+    the position monitor matches open legs to it (``group_into_spreads``)."""
+    tp = entry.get("trade_plan") or {}
+    return ((entry.get("order_result") or {}).get("status") == "submitted"
+            and tp.get("valid") is not False)
+
+
+def trim_plan_history(history: List[Dict], today, keep: int = None,
+                      settle_days: int = 7) -> List[Dict]:
+    """Keep the most recent ``keep`` (MAX_HISTORY) runs, but never evict a
+    submitted run whose position may still be open (expiration ≥ today −
+    ``settle_days``). 2026-10-07: GLD is re-planned every cycle (laddering),
+    so its 2026-10-05 entry was pushed out of the last 200 runs in under a
+    day; the monitor then inferred the position from its legs as 1 contract
+    instead of 2 — stop and target at half their intended levels."""
+    keep = MAX_HISTORY if keep is None else keep
+    if len(history) <= keep:
+        return history
+    from datetime import date as _date, timedelta as _td
+    cutoff = today - _td(days=settle_days)
+
+    def live(e):
+        if not _keeps_live_position(e):
+            return False
+        try:
+            return _date.fromisoformat(str((e.get("trade_plan") or {}).get("expiration"))) >= cutoff
+        except ValueError:
+            return True                      # unknown expiry: keep (safer than losing it)
+    recent = history[-keep:]
+    recent_ids = {id(e) for e in recent}
+    pinned = [e for e in history[:-keep] if live(e) and id(e) not in recent_ids]
+    return pinned + recent
 
 
 def calculate_position_qty(plan: SpreadPlan, account_balance: float,
@@ -1397,11 +1432,8 @@ class OrderExecutor:
         persistent["last_updated"] = ts
         persistent["state_history"].append(entry)
 
-        # Trim to keep only the most recent MAX_HISTORY runs
-        if len(persistent["state_history"]) > MAX_HISTORY:
-            persistent["state_history"] = (
-                persistent["state_history"][-MAX_HISTORY:]
-            )
+        persistent["state_history"] = trim_plan_history(
+            persistent["state_history"], now.date())
 
         with open(filepath, "w") as fh:
             json.dump(persistent, fh, indent=2)
