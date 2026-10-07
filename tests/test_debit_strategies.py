@@ -429,3 +429,26 @@ def test_debit_regime_exit_only_on_reversal(name, regime, expected):
     sig, _ = mon()._check_exit(_pos(name, -2.0, width, 0.0), {"SPY": regime},
                                underlying_price=103.0)
     assert sig == expected
+
+
+# ── 2026-10-06: calendar exits on a real trend / strike drift only ────────
+
+@pytest.mark.parametrize("regime,price,expected", [
+    (Regime.MEAN_REVERSION, 103.0, ExitSignal.HOLD),          # one-cycle band touch: hold
+    (Regime.SIDEWAYS, 103.0, ExitSignal.HOLD),
+    (Regime.BEARISH, 103.0, ExitSignal.REGIME_SHIFT),         # a real trend breaks the range
+    (Regime.SIDEWAYS, 106.2, ExitSignal.STRIKE_DRIFT),        # 3.1 % from the 103 strike
+    (Regime.SIDEWAYS, 105.9, ExitSignal.HOLD),                # 2.8 %: still inside
+])
+def test_calendar_exit_rules(regime, price, expected):
+    sig, reason = mon()._check_exit(_pos(CALENDAR_STRATEGY, -2.0, 0.0, 0.0), {"SPY": regime},
+                                    underlying_price=price)
+    assert sig == expected, reason
+
+
+def test_calendar_drift_disabled_and_stops_still_win():
+    m = PositionMonitor("k", "s", post_fill_grace_seconds=0, calendar_max_strike_drift_pct=0.0)
+    assert m._check_exit(_pos(CALENDAR_STRATEGY, -2.0, 0.0, 0.0), {}, underlying_price=120.0)[0] \
+        == ExitSignal.HOLD
+    sig, _ = mon()._check_exit(_pos(CALENDAR_STRATEGY, -2.0, 0.0, -120.0), {}, underlying_price=120.0)
+    assert sig == ExitSignal.STOP_LOSS                         # 50 % of the debit first

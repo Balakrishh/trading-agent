@@ -2739,6 +2739,10 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
             ladder_gap = st.number_input(
                 "Ladder min expiry gap (days)", 1, 60,
                 int(getattr(seed, "ladder_min_gap_days", 7)), 1, key="cust_ladder_gap")
+            ladder_winners = st.checkbox(
+                "Add to winners only", value=bool(getattr(seed, "ladder_requires_profit", True)),
+                key="cust_ladder_winners",
+                help="A second position on a ticker only while the open one is at or above breakeven.")
 
         # ── Entry confirmation + trailing profit (skills 61, 30) ─────────
         st.markdown("**Entry confirmation and trailing profit** *(skills 61, 30)*")
@@ -2885,6 +2889,10 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 float(getattr(seed, "calendar_profit_target_pct", 0.25)), 0.05,
                 key="cust_cal_tp")
         with db_e4:
+            cal_drift = st.slider(
+                "Calendar: close when price drifts from strike", 0.01, 0.10,
+                float(getattr(seed, "calendar_max_strike_drift_pct", 0.03)), 0.005,
+                key="cust_cal_drift")
             cal_type = st.selectbox(
                 "Calendar option type", ["call", "put"],
                 index=0 if getattr(seed, "calendar_option_type", "call") == "call" else 1,
@@ -2934,6 +2942,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "csp_max_per_sector":           int(csp_per_sector),
         "max_positions_per_ticker":     int(max_per_ticker),
         "ladder_min_gap_days":          int(ladder_gap),
+        "ladder_requires_profit":       bool(ladder_winners),
+        "calendar_max_strike_drift_pct": cal_drift,
         "entry_confirm_cycles":         int(entry_confirm_cycles),
         "no_entry_before_et":           no_entry_before.strip(),
         "max_new_entries_per_hour":     int(max_entries_hour),

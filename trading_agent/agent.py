@@ -372,6 +372,7 @@ class TradingAgent:
             debit_profit_target_pct=self.preset.debit_profit_target_pct,
             debit_stop_loss_pct=self.preset.debit_stop_loss_pct,
             calendar_profit_target_pct=self.preset.calendar_profit_target_pct,
+            calendar_max_strike_drift_pct=self.preset.calendar_max_strike_drift_pct,
         )
         self.order_tracker: OrdersPort = OrderTracker(
             api_key=config.alpaca.api_key,
@@ -974,8 +975,9 @@ class TradingAgent:
         # Entry confirmation + hourly entry limit (2026-10-05).
         self._begin_entry_gates()
         # Backlog §6.7 laddering inputs (read by the gate in _process_ticker).
-        from trading_agent.position_caps import open_expirations
+        from trading_agent.position_caps import open_expirations, open_pls
         self._open_expirations = open_expirations(monitor_results)
+        self._open_pls = open_pls(monitor_results)
         self._opened_today = self._tickers_opened_today()
 
         new_trade_results = []
@@ -2529,7 +2531,9 @@ class TradingAgent:
         return ladder_failure(ticker, expiration,
                               getattr(self, "_open_expirations", {}) or {},
                               getattr(self, "_opened_today", set()) or set(),
-                              int(getattr(self.preset, "ladder_min_gap_days", 7)))
+                              int(getattr(self.preset, "ladder_min_gap_days", 7)),
+                              open_pls=getattr(self, "_open_pls", {}) or {},
+                              require_profit=bool(getattr(self.preset, "ladder_requires_profit", False)))
 
     def _register_open(self, ticker, tickers, per_ticker, per_sector):
         """Count a new position / pending order toward the per-ticker and

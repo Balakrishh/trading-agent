@@ -60,6 +60,7 @@ class ExitSignal(Enum):
     DTE_SAFETY = "dte_safety"        # Thursday before expiry ≥ 15:30 ET
     EXPIRED = "expired"
     DELTA_STOP = "delta_stop"        # Wheel CSP |Δ| ≥ CSP_STOP_ABS_DELTA (debounced)
+    STRIKE_DRIFT = "strike_drift"    # calendar: underlying ≥ X % from the strike (debounced)
 
 
 # Signals that bypass the 3-cycle debounce — close immediately
@@ -83,10 +84,13 @@ STRATEGY_REGIME_MAP = {
     BOUNCE_BULL_PUT_STRATEGY: None,
 }
 
-# Regimes that reverse a directional debit thesis (skill 59).
+# Regimes that reverse a debit structure's thesis (skill 59). A calendar
+# is a range bet: only a real trend breaks it — a one-cycle 3-σ band touch
+# (MEAN_REVERSION) does not (2026-10-06: SPY calendar voted to close on one).
 _OPPOSITE_TREND = {
     Regime.BULLISH: (Regime.BEARISH,),
     Regime.BEARISH: (Regime.BULLISH,),
+    Regime.SIDEWAYS: (Regime.BULLISH, Regime.BEARISH),
 }
 
 
@@ -257,7 +261,8 @@ class PositionMonitor:
                  profit_target_basis: str = "natural",
                  debit_profit_target_pct: float = 0.50,
                  debit_stop_loss_pct: float = 0.50,
-                 calendar_profit_target_pct: float = 0.25):
+                 calendar_profit_target_pct: float = 0.25,
+                 calendar_max_strike_drift_pct: float = 0.03):
         """
         Additional parameter
         --------------------
@@ -285,6 +290,7 @@ class PositionMonitor:
         self.debit_profit_target_pct = debit_profit_target_pct
         self.debit_stop_loss_pct = debit_stop_loss_pct
         self.calendar_profit_target_pct = calendar_profit_target_pct
+        self.calendar_max_strike_drift_pct = calendar_max_strike_drift_pct
 
     def _profit_pl(self, spread: "SpreadPosition") -> float:
         if self.profit_target_basis == "natural" and spread.net_natural_pl is not None:
@@ -780,7 +786,8 @@ class PositionMonitor:
         return "credit", basis, basis * self.profit_target_pct
 
     def _check_debit_exit(self, spread: SpreadPosition,
-                          current_regimes: Dict[str, Regime]):
+                          current_regimes: Dict[str, Regime],
+                          underlying_price: float = 0.0):
         """Stop at ``debit_stop_loss_pct`` of the debit; profit target at
         ``debit_profit_target_pct`` of max profit (verticals) or
         ``calendar_profit_target_pct`` of the debit (calendars); DTE
@@ -807,16 +814,24 @@ class PositionMonitor:
         dte_signal = self._check_dte_safety(spread.expiration)
         if dte_signal:
             return (ExitSignal.DTE_SAFETY, dte_signal)
+        # A calendar earns most with the price at its strike; once the
+        # underlying has drifted far away the position mostly decays.
+        if (spread.strategy_name == CALENDAR_STRATEGY and underlying_price > 0
+                and spread.short_strikes and self.calendar_max_strike_drift_pct > 0):
+            k = spread.short_strikes[0]
+            drift = abs(underlying_price - k) / k
+            if drift >= self.calendar_max_strike_drift_pct:
+                return (ExitSignal.STRIKE_DRIFT,
+                        f"Calendar: underlying ${underlying_price:.2f} is {drift:.1%} from "
+                        f"the ${k:g} strike (≥ {self.calendar_max_strike_drift_pct:.0%})")
         expected = STRATEGY_REGIME_MAP.get(spread.strategy_name)
         current = current_regimes.get(spread.underlying)
         if expected and current is not None and current != expected:
-            # A debit vertical's thesis breaks only when the trend
-            # REVERSES; a drift to sideways is not a contradiction.
-            # 2026-10-05: IWM flickered bearish → sideways one cycle after
-            # a put debit filled (price between its 50- and 200-day) and
-            # the old rule voted to close it at the bid/ask cost.
-            if (spread.strategy_name in DEBIT_VERTICALS
-                    and current not in _OPPOSITE_TREND.get(expected, ())):
+            # Debit structures exit only when the trend REVERSES: a debit
+            # vertical on the opposite trend (2026-10-05 IWM bearish →
+            # sideways flicker), a calendar on a real trend — never on a
+            # drift to sideways or a one-cycle mean-reversion reading.
+            if current not in _OPPOSITE_TREND.get(expected, ()):
                 return (ExitSignal.HOLD, "")
             return (ExitSignal.REGIME_SHIFT,
                     f"Regime shifted to {current.value} but holding "
@@ -917,7 +932,7 @@ class PositionMonitor:
         # or calendar risks its debit instead. Strike proximity does not
         # apply (a debit vertical WANTS price through the short strike).
         if spread.strategy_name in DEBIT_STRATEGIES:
-            return self._check_debit_exit(spread, current_regimes)
+            return self._check_debit_exit(spread, current_regimes, underlying_price)
 
         # ---------------------------------------------------------------
         # Per-position economics (contract-count-scaled).

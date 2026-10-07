@@ -73,3 +73,33 @@ def test_opened_today_ignores_non_path_journal():
     assert a._tickers_opened_today() == set()
     assert list(JournalReader(MagicMock())._iter_rows()) == []
     os.fstat(1)                                   # stdout still open
+
+
+# ── 2026-10-06: add to winners only ───────────────────────────────────────
+
+@pytest.mark.parametrize("pls,require,reason", [
+    ([-135.0], True, "ladder_existing_losing (open P&L $-135)"),   # GLD: losing → no second
+    ([0.0], True, None),                                            # at breakeven: allowed
+    ([40.0], True, None),
+    ([-135.0], False, None),                                        # rule off: legacy ladder
+])
+def test_add_to_winners_only(pls, require, reason):
+    assert ladder_failure("GLD", "2026-11-20", {"GLD": ["2026-11-06"]}, set(), 7,
+                          open_pls={"GLD": pls}, require_profit=require) == reason
+
+
+def test_open_pls_from_monitor_summary():
+    from trading_agent.position_caps import open_pls
+    mr = {"positions": [{"underlying": "GLD", "pl": -135.0}, {"underlying": "QQQ", "pl": 91.0}]}
+    assert open_pls(mr) == {"GLD": [-135.0], "QQQ": [91.0]}
+
+
+def test_agent_ladder_block_uses_profit_rule():
+    from trading_agent.agent import TradingAgent
+    a = TradingAgent.__new__(TradingAgent)
+    a.preset = PRESETS["balanced"]
+    a._open_expirations, a._opened_today = {"GLD": ["2026-11-06"]}, set()
+    a._open_pls = {"GLD": [-160.0]}
+    assert a._ladder_block("GLD", "2026-11-20").startswith("ladder_existing_losing")
+    a._open_pls = {"GLD": [25.0]}
+    assert a._ladder_block("GLD", "2026-11-20") is None

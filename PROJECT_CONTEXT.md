@@ -203,7 +203,9 @@ high-IV block (skip all entries when realized-vol IV-rank > 95th
 percentile); RSI gate; 3-cycle exit debounce (≈ 4 min; bypassed by
 HARD_STOP / STRIKE_PROXIMITY / DTE_SAFETY). Debit structures have their
 own exits (50 % of debit stop, 50 % of max profit / 25 % of debit
-target, reversal-only regime exit).
+target, regime exit only on a real trend change, calendars also on a
+≥ 3 % drift from the strike). A second (laddered) position on a ticker
+requires the open one to be at or above breakeven.
 
 ### 3.5 Adaptive spread width
 
