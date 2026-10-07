@@ -200,3 +200,40 @@ Still open from before: VZ $43 CSP (Oct 23), +$8.
 
 **Question for Friday:** debit entries go straight to the natural price and paid $86 over mid today (GLD 4.9 %). Would a mid → halfway → natural ladder, like the Wheel's, still fill on paper and recover most of that? Compare this week's debit fills against their mids before deciding.
 
+---
+
+## 2026-10-06 (Tue) — entry confirmation and the 20 % cap go live
+
+**Cycles:** 644 supervisor iterations since Monday's start (387 cycle-minutes today), 0 errors, 0 silenced alerts, clean 16:05 shutdown. Entry confirmation, entry timing (shadow) and trailing profit (shadow) went live at 10:52 ET; the total-risk cap went from 10 % to 20 % at 10:56. Daily reviewer ran at 16:15 — LLM step empty again (Ollama not running), no proposal staged.
+
+**Account:** $29,632 → $29,651 (+$19). Realized $0.
+
+**Trades:** 1 opened, 0 closed.
+
+| Ticker | Structure | Size | Fill (debit) | Mid at entry | Paid over mid | Mid P&L at close |
+|---|---|---|---|---|---|---|
+| AMZN | Call debit 255/265, Nov 6 | 1 | 4.60 | 4.40 | $20 (4.5 %) | −$12.50 |
+
+Entry path: `entry_confirming (1/3)` at 13:35, reset to 1/3 at 13:42 (the streak broke), 2/3 at 13:44, submitted 13:45 — confirmation behaved as designed. Shadow entry timing resolved at 13:51 with $0 improvement (the price never beat the confirmation price within 8 cycles).
+
+Open at the close (mid P&L): IWM +$78, QQQ +$64, SPY calendar +$4.50, VZ CSP +$2, AMZN −$12.50, GLD −$175 (stop at −$425; hold per the morning analysis). Open defined risk $3,448 of a $5,930 budget.
+
+**Top reject reasons — verdict**
+
+| Count | Reason | Verdict |
+|---|---|---|
+| 1,320 | Existing position / pending order (incl. Broad Market sector full, GLD ladder same-expiry) | Correct. |
+| 664 | Total-risk cap | Correct — all before the 10:56 cap change. |
+| 432 | Entry rate limit (1 per hour) | Correct by design — every ticker was held for the hour after AMZN filled (≈ 48 cycles × 9 tickers). |
+| 390 + 250 | No positive-EV credit spread; debit fallback also not acceptable | Correct. |
+
+**Exit signals:** SPY calendar voted `regime_shift` once at 10:00 (SPY classified mean_reversion, a 3-σ band touch) — reset next cycle; noise, absorbed by the debounce. Nothing closed. No trailing position armed (none reached its target).
+
+**Slippage:** AMZN paid $0.20/sh over mid (4.5 %), the same size as Monday's entries (1.2–4.9 %). The fill equalled the natural-price estimate (fill reconciler).
+
+**Errors / alerts:** none. Shadow POP log: 152 rows today (e.g. GLD put debit: delta POP 0.43 vs realized-vol POP 0.46). MCP still lists the XLE July condor until a `/mcp` reconnect loads the reconciliation code.
+
+**SPY iron condor (exp 2026-10-23):** closed Thu 2026-10-01 at −$176 (strike proximity). Nothing to track.
+
+**Question for Friday:** with the cap at 20 % there is room for ~4 more trades, but the 1-entry-per-hour limit held all 9 open tickers for an hour after the single AMZN entry (432 skips) and only one trade opened all day. Should the limit count per sector or per direction instead of globally, or rise to 2 per hour — and does the week's entry flow justify it?
+
