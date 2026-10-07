@@ -19,7 +19,8 @@ signature(plan) = strategy | expiration | far_expiration
 count_t = count_(t−1) + 1   if signature unchanged and the previous sighting is ≤ 180 s old
         = 1                  otherwise (different signature, no approved plan last cycle, or a gap)
 submit only if  count_t ≥ entry_confirm_cycles  AND  ET clock ≥ no_entry_before_et
-                AND  submissions in the last 60 min < max_new_entries_per_hour   (0 = no limit)
+                AND  submissions in the last 60 min in this ticker's scope < max_new_entries_per_hour   (0 = no limit)
+                     scope = sector_for(ticker) when entry_rate_scope = "sector" (default), else one global bucket
 after a submission the ticker's count is cleared (the next entry starts over)
 
 Entry timing (entry_timing_mode, 2026-10-06) — once confirmed:
@@ -161,7 +162,7 @@ def timing_decision(history: List[Dict[str, float]], required: int,
 - **Consecutive means consecutive.** Candidates are rebuilt every cycle: a ticker skipped for any reason (cap, filter, capitulation, no positive-EV plan) loses its count. A sighting older than 180 s also resets.
 - **Strikes may drift.** Only strategy and expiry must match; the order uses the latest plan and still passes the executor's live-price recheck (credit floor / debit cap).
 - **Entry window.** Counting continues before `no_entry_before_et`; at 09:45 a ticker with a full count can go immediately.
-- **Hourly limit.** Counted from the journal's `submitted` rows in the last hour plus in-cycle submissions; a limited ticker is skipped before planning (`skipped_entry_rate`) and starts its count again afterwards.
+- **Hourly limit — per sector by default (2026-10-06).** Counted from the journal's `submitted` rows in the last hour (`JournalReader.submissions_since`, ticker + time) plus in-cycle submissions, bucketed by `sector_for(ticker)`. With the original global count, one AMZN entry held all 9 open tickers for an hour (432 skips, one trade all day); per sector it only holds the other Consumer Discretionary tickers. `entry_rate_scope = "global"` restores one bucket. A limited ticker is skipped before planning (`skipped_entry_rate`, with `scope`) and starts its confirmation count again afterwards.
 - **Restarts.** State is `trade_journal/entry_candidates.json` (atomic temp + rename), because the agent process restarts every cycle.
 - **Entry timing — why ratios.** Strikes can move a grid step between cycles, so raw credit / debit is not comparable; credit ÷ width, reward ÷ risk and debit ÷ mid are. The gap term targets the cost that dominated the first live day (four debit fills $86 over mid).
 - **A higher credit can mean more risk.** At a fixed delta (the scanner re-picks strikes each cycle) a richer credit mostly reflects IV, but the max-wait chase limit and the normal floors still bound it; a plan that stops passing its floors is never entered.

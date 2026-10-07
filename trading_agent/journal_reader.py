@@ -471,10 +471,15 @@ class JournalReader:
         return out
 
     def submission_times_since(self, hours: float = 1.0) -> List[datetime]:
-        """UTC times of ``submitted`` rows within the last ``hours`` — the
-        entry-rate limit (``max_new_entries_per_hour``) counts these."""
+        """UTC times of ``submitted`` rows within the last ``hours``."""
+        return [ts for _, ts in self.submissions_since(hours)]
+
+    def submissions_since(self, hours: float = 1.0) -> List[tuple]:
+        """``(ticker, utc_time)`` of ``submitted`` rows within the last
+        ``hours`` — the entry-rate limit (``max_new_entries_per_hour``,
+        counted per sector by default) reads these."""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        out: List[datetime] = []
+        out: List[tuple] = []
         for rec in self._iter_rows():
             if rec.get("action") != "submitted":
                 continue
@@ -485,7 +490,7 @@ class JournalReader:
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             if ts >= cutoff:
-                out.append(ts)
+                out.append((str(rec.get("ticker") or ""), ts))
         return out
 
     def tickers_opened_today_utc(self) -> Set[str]:

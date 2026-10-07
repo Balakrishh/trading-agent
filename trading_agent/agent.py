@@ -1037,7 +1037,7 @@ class TradingAgent:
                 new_trade_results.append(result)
                 if ((result or {}).get("execution") or {}).get("status") in ("submitted", "dry_run"):
                     risk_used += self._submitted_risk(result)
-                    self._entries_last_hour += 1
+                    self._count_entry(ticker)
                     self._consume_entry(ticker, result)
                     self._open_expirations.setdefault(ticker, []).append(
                         str(result.get("expiration", "")))
@@ -2323,11 +2323,23 @@ class TradingAgent:
         self._entry_confirm = EntryConfirmations(
             int(getattr(self.preset, "entry_confirm_cycles", 1))).begin()
         self._entry_plans = {}
-        self._entries_last_hour = 0
+        self._entries_by_scope: Dict[str, int] = {}
         jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
         if isinstance(jsonl_path, str) and jsonl_path:
             from trading_agent.journal_reader import JournalReader
-            self._entries_last_hour = len(JournalReader(jsonl_path).submission_times_since(1.0))
+            for tk, _ in JournalReader(jsonl_path).submissions_since(1.0):
+                self._count_entry(tk)
+
+    def _entry_scope_key(self, ticker: str) -> str:
+        """Bucket for the hourly entry limit: the ticker's sector, or one
+        global bucket (``entry_rate_scope``)."""
+        if str(getattr(self.preset, "entry_rate_scope", "global")) == "sector":
+            return sector_for(ticker)
+        return "__all__"
+
+    def _count_entry(self, ticker: str) -> None:
+        key = self._entry_scope_key(ticker)
+        self._entries_by_scope[key] = self._entries_by_scope.get(key, 0) + 1
 
     def _finish_entry_gates(self) -> None:
         """End of Stage 2: advance shadow entry timing, persist candidates."""
@@ -2367,15 +2379,19 @@ class TradingAgent:
 
     def _entry_rate_gate(self, ticker: str) -> Optional[Dict]:
         """Skip result when ``max_new_entries_per_hour`` submissions already
-        went out in the last hour (0 = no limit)."""
+        went out in the last hour in this ticker's scope — its sector by
+        default (``entry_rate_scope``) — 0 = no limit."""
         limit = int(getattr(self.preset, "max_new_entries_per_hour", 0) or 0)
-        used = int(getattr(self, "_entries_last_hour", 0))
+        scope = self._entry_scope_key(ticker)
+        used = int((getattr(self, "_entries_by_scope", None) or {}).get(scope, 0))
         if limit <= 0 or used < limit:
             return None
-        logger.info("[%s] Entry rate limit — %d/%d entries in the last hour", ticker, used, limit)
+        logger.info("[%s] Entry rate limit — %d/%d entries in the last hour (%s)",
+                    ticker, used, limit, scope)
         self.journal_kb.log_signal(
             ticker=ticker, action="skipped_entry_rate", price=self._cached_price(ticker),
-            raw_signal={"reason": "entry_rate_limit", "entries_last_hour": used, "limit": limit})
+            raw_signal={"reason": "entry_rate_limit", "entries_last_hour": used, "limit": limit,
+                        "scope": scope})
         return {"ticker": ticker, "status": "skipped", "reason": "Entry rate limit"}
 
     def _entry_confirmation_block(self, ticker: str, plan) -> Optional[str]:

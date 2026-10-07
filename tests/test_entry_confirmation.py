@@ -108,9 +108,11 @@ def test_agent_gates(tmp_path, monkeypatch):
     a._begin_entry_gates()
     assert a._entry_confirmation_block("IWM", plan()) == "entry_confirming (1/2)"
     assert a._entry_rate_gate("IWM") is None
-    a._entries_last_hour = 1
-    skip = a._entry_rate_gate("QQQ")
+    a._count_entry("IWM")                                            # Broad Market used
+    skip = a._entry_rate_gate("QQQ")                                 # same sector → held
     assert skip["reason"] == "Entry rate limit" and rows[-1]["action"] == "skipped_entry_rate"
+    assert rows[-1]["raw_signal"]["scope"] == "Broad Market"
+    assert a._entry_rate_gate("XLF") is None                         # other sector → free
     a._entry_confirm.save()
     a._begin_entry_gates()
     assert a._entry_confirmation_block("IWM", plan()) is None          # 2/2 → go
@@ -212,3 +214,23 @@ def test_shadow_records_agreement_at_entry(tmp_path):
     a._advance_entry_timing_shadow()
     (row,) = [r for r in rows if r["action"] == "entry_timing_shadow"]
     assert row["raw_signal"]["improvement_usd"] == 0.0
+
+
+def test_entry_rate_scope_global_and_journal_seed(tmp_path):
+    """Per-sector by default (2026-10-06: one AMZN entry held all 9 tickers
+    for an hour under the global count); "global" keeps one bucket."""
+    import json
+    from datetime import datetime, timezone
+    a, _ = _agent({"max_new_entries_per_hour": 1, "entry_rate_scope": "global"}, tmp_path)
+    a._begin_entry_gates()
+    a._count_entry("AMZN")
+    assert a._entry_rate_gate("XLF") is not None                     # global: everything held
+    fp = tmp_path / "signals_live.jsonl"
+    fp.write_text(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
+                              "ticker": "AMZN", "action": "submitted", "raw_signal": {}}) + "\n")
+    a, _ = _agent({"max_new_entries_per_hour": 1}, tmp_path)
+    a.journal_kb.jsonl_path = str(fp)
+    a._begin_entry_gates()                                           # seeded from the journal
+    assert a._entries_by_scope == {"Consumer Discretionary": 1}
+    assert a._entry_rate_gate("META") is None                        # Communications free
+    assert a._entry_rate_gate("AMZN") is not None
