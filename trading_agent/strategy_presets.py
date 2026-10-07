@@ -292,6 +292,7 @@ class PresetConfig:
     calendar_gap_days:                 int   = 28       # bought leg ≈ near + gap
     calendar_option_type:              str   = "call"
     calendar_profit_target_pct:        float = 0.25     # of the debit
+    calendar_max_strike_drift_pct:     float = 0.03     # close when the underlying is ≥ 3 % from the strike
     bounce_lookback_days:              int   = 5        # stabilisation = reclaim the N-day high close
 
     # ------------------------------------------------------------------
@@ -330,6 +331,9 @@ class PresetConfig:
     # ------------------------------------------------------------------
     max_positions_per_ticker:          int   = 2
     ladder_min_gap_days:               int   = 7
+    # Add to winners only (2026-10-06): a 2nd+ position on a ticker also
+    # needs every open position on it at or above breakeven.
+    ladder_requires_profit:            bool  = True
 
     # ------------------------------------------------------------------
     # Entry confirmation (added 2026-10-05). An approved plan is submitted
@@ -394,7 +398,7 @@ class PresetConfig:
                          f"TP{self.debit_profit_target_pct:.0%}/SL{self.debit_stop_loss_pct:.0%}")
         if self.calendar_enabled:
             parts.append(f"Cal@{self.dte_calendar_near}+{self.calendar_gap_days}d "
-                         f"TP{self.calendar_profit_target_pct:.0%}")
+                         f"TP{self.calendar_profit_target_pct:.0%} drift≤{self.calendar_max_strike_drift_pct:.0%}")
         if self.bounce_bull_put_enabled:
             parts.append(f"Bounce@{self.bounce_lookback_days}d")
         return " • ".join(parts) if parts else "Debit off"
@@ -436,7 +440,7 @@ class PresetConfig:
                 f"MarketState {'on' if self.market_state_enabled else 'off'} • "
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
-                f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
+                f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
                 f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
                 f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
@@ -454,7 +458,7 @@ class PresetConfig:
             f"MarketState {'on' if self.market_state_enabled else 'off'} • "
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
-            f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
+            f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
             f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
             f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
             f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "

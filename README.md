@@ -155,7 +155,7 @@ Every trade must pass **all eight checks** before execution:
 `Max Loss = (Width − Credit) × 100` for credit structures and `Debit × 100` for debit structures. The sentiment pipeline is advisory only — it can tighten constraints, never loosen them.
 
 **Portfolio caps (skill 37).**
-* **Per ticker:** up to `max_positions_per_ticker` (2) — a second position only on a later day and with an expiration ≥ `ladder_min_gap_days` (7) from the open one (laddering). Pending orders block the ticker.
+* **Per ticker:** up to `max_positions_per_ticker` (2) — a second position only on a later day, with an expiration ≥ `ladder_min_gap_days` (7) from the open one, and only while the open one is at or above breakeven (add to winners only). Pending orders block the ticker.
 * **Per sector:** 2 (`sector_map.py`); counts pending orders and every submission earlier in the same cycle.
 * **Total open risk:** Σ max loss of open defined-risk positions ≤ `max_total_risk_pct` (10 %) of equity; each trade is sized into what remains; Wheel legs excluded (their collateral has its own 40 %-of-equity rule).
 * **Market state:** size multiplier and allowed families (above).
@@ -168,7 +168,7 @@ Every trade must pass **all eight checks** before execution:
 
 **Exits.**
 * *Credit spreads:* profit target 50 % of credit judged at the natural cost to close; `HARD_STOP` at 3× credit; 50 %-of-max-loss stop; `STRIKE_PROXIMITY` (within 1 % of a short strike, optional defensive roll); `DTE_SAFETY` (15:30 ET on the last trading day before expiry); regime shift.
-* *Debit spreads / calendars (skill 59):* stop at 50 % of the debit; target 50 % of max profit (verticals) or 25 % of the debit (calendars); DTE safety on the near expiry; regime exit only on a trend **reversal** (calendars: when no longer sideways).
+* *Debit spreads / calendars (skill 59):* stop at 50 % of the debit; target 50 % of max profit (verticals) or 25 % of the debit (calendars); DTE safety on the near expiry; regime exit only on a real trend change (verticals: the opposite trend; calendars: any bullish or bearish trend, never a one-cycle mean-reversion reading); calendars also close when price drifts ≥ 3 % from the strike.
 * *Wheel:* 50 % of credit; CSP |Δ| ≥ 0.45 stop; otherwise assignment is accepted.
 * Closes go out as one multi-leg order (improved, then natural price); realized P&L is computed from the actual fills.
 

@@ -129,16 +129,24 @@ def register_open(
 
 def ladder_failure(ticker: str, expiration: str,
                    open_expirations: Dict[str, List[str]],
-                   opened_today: Set[str], min_gap_days: int) -> Optional[str]:
+                   opened_today: Set[str], min_gap_days: int,
+                   open_pls: Optional[Dict[str, List[float]]] = None,
+                   require_profit: bool = False) -> Optional[str]:
     """Backlog §6.7 laddering: a second position on a ticker is allowed
     only on a later day than the first entry and only when its expiration
     is ≥ ``min_gap_days`` from every open position's on that ticker.
+    With ``require_profit`` (2026-10-06, "add to winners only") every open
+    position on the ticker must also be at or above breakeven — the GLD
+    put debit was losing while the planner kept proposing a second one.
     Returns a ``ladder_*`` reason, or None when the entry is allowed."""
     existing = open_expirations.get(ticker) or []
     if not existing:
         return None
     if ticker in opened_today:
         return "ladder_same_day_entry"
+    pls = (open_pls or {}).get(ticker) or []
+    if require_profit and pls and min(pls) < 0:
+        return f"ladder_existing_losing (open P&L ${min(pls):.0f})"
     try:
         new = date.fromisoformat(expiration)
     except (TypeError, ValueError):
@@ -151,6 +159,15 @@ def ladder_failure(ticker: str, expiration: str,
         if gap < min_gap_days:
             return f"ladder_gap_{gap}d_lt_{min_gap_days}d (open {exp})"
     return None
+
+
+def open_pls(monitor_results: Dict) -> Dict[str, List[float]]:
+    """underlying → mid P&L ($) of each open position (monitor summary)."""
+    out: Dict[str, List[float]] = {}
+    for sr in monitor_results.get("positions", []) or []:
+        if sr.get("underlying"):
+            out.setdefault(sr["underlying"], []).append(float(sr.get("pl") or 0.0))
+    return out
 
 
 def open_expirations(monitor_results: Dict) -> Dict[str, List[str]]:
@@ -181,4 +198,4 @@ def open_defined_risk(monitor_results: Dict) -> float:
 
 __all__ = ["compute_position_cap_dedup_set", "register_open",
            "open_defined_risk", "TOTAL_RISK_EXCLUDED", "ladder_failure",
-           "open_expirations"]
+           "open_expirations", "open_pls"]

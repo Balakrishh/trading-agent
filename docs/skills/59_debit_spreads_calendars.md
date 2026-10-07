@@ -42,9 +42,11 @@ Exits (position-scale; debit_pos = debit × 100 × contracts)
   stop     loss ≥ debit_stop_loss_pct × debit_pos
   target   verticals: profit ≥ debit_profit_target_pct × (width − debit) × 100 × contracts
            calendars: profit ≥ calendar_profit_target_pct × debit_pos
-  then DTE safety on the (near) expiry, then regime shift: debit verticals only on a
-  REVERSAL (call debit when bearish, put debit when bullish — sideways is a drift, not a
-  contradiction); calendar when no longer sideways; bounce bull put never regime-closed
+  then DTE safety on the (near) expiry; calendars also close when the underlying is
+  ≥ calendar_max_strike_drift_pct (3 %) from the strike (STRIKE_DRIFT, debounced); then
+  regime shift only on a real trend change: call debit when bearish, put debit when
+  bullish, calendar when bullish or bearish — never on sideways or a one-cycle
+  MEAN_REVERSION reading; bounce bull put never regime-closed
 ```
 
 ## 3. Reference Python Implementation
@@ -188,9 +190,10 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 ```
 
 ```python
-# trading_agent/position_monitor.py:759-803
+# trading_agent/position_monitor.py:788-839
     def _check_debit_exit(self, spread: SpreadPosition,
-                          current_regimes: Dict[str, Regime]):
+                          current_regimes: Dict[str, Regime],
+                          underlying_price: float = 0.0):
         """Stop at ``debit_stop_loss_pct`` of the debit; profit target at
         ``debit_profit_target_pct`` of max profit (verticals) or
         ``calendar_profit_target_pct`` of the debit (calendars); DTE
@@ -205,13 +208,11 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
             return (ExitSignal.STOP_LOSS,
                     f"Debit: loss ${loss:.2f} ≥ {self.debit_stop_loss_pct:.0%} of "
                     f"debit ${debit_position:.2f}")
-        if spread.strategy_name in DEBIT_VERTICALS:
-            max_profit = (spread.spread_width + spread.original_credit) * 100 * contracts
-            target = max_profit * self.debit_profit_target_pct
-            label = f"{self.debit_profit_target_pct:.0%} of max profit ${max_profit:.2f}"
+        kind, basis, target = self.profit_basis(spread)
+        if kind == "debit_vertical":
+            label = f"{self.debit_profit_target_pct:.0%} of max profit ${basis:.2f}"
         else:
-            target = debit_position * self.calendar_profit_target_pct
-            label = f"{self.calendar_profit_target_pct:.0%} of debit ${debit_position:.2f}"
+            label = f"{self.calendar_profit_target_pct:.0%} of debit ${basis:.2f}"
         profit_pl = self._profit_pl(spread)
         if profit_pl >= target > 0:
             return (ExitSignal.PROFIT_TARGET,
@@ -219,16 +220,24 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
         dte_signal = self._check_dte_safety(spread.expiration)
         if dte_signal:
             return (ExitSignal.DTE_SAFETY, dte_signal)
+        # A calendar earns most with the price at its strike; once the
+        # underlying has drifted far away the position mostly decays.
+        if (spread.strategy_name == CALENDAR_STRATEGY and underlying_price > 0
+                and spread.short_strikes and self.calendar_max_strike_drift_pct > 0):
+            k = spread.short_strikes[0]
+            drift = abs(underlying_price - k) / k
+            if drift >= self.calendar_max_strike_drift_pct:
+                return (ExitSignal.STRIKE_DRIFT,
+                        f"Calendar: underlying ${underlying_price:.2f} is {drift:.1%} from "
+                        f"the ${k:g} strike (≥ {self.calendar_max_strike_drift_pct:.0%})")
         expected = STRATEGY_REGIME_MAP.get(spread.strategy_name)
         current = current_regimes.get(spread.underlying)
         if expected and current is not None and current != expected:
-            # A debit vertical's thesis breaks only when the trend
-            # REVERSES; a drift to sideways is not a contradiction.
-            # 2026-10-05: IWM flickered bearish → sideways one cycle after
-            # a put debit filled (price between its 50- and 200-day) and
-            # the old rule voted to close it at the bid/ask cost.
-            if (spread.strategy_name in DEBIT_VERTICALS
-                    and current not in _OPPOSITE_TREND.get(expected, ())):
+            # Debit structures exit only when the trend REVERSES: a debit
+            # vertical on the opposite trend (2026-10-05 IWM bearish →
+            # sideways flicker), a calendar on a real trend — never on a
+            # drift to sideways or a one-cycle mean-reversion reading.
+            if current not in _OPPOSITE_TREND.get(expected, ()):
                 return (ExitSignal.HOLD, "")
             return (ExitSignal.REGIME_SHIFT,
                     f"Regime shifted to {current.value} but holding "
@@ -269,6 +278,7 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 - **Live drift** — the executor re-quotes at natural; a live debit above `max_debit`, or a max loss above `max_risk_pct × equity`, aborts (`live_debit_risk`). No extra tick is paid past the natural price.
 - **Order sign** — Alpaca mleg `limit_price` is positive for a debit. A net-credit close of a debit structure with a positive `filled_avg_price` is re-signed so `realized_pl_from_close` stays correct.
 - **RiskManager** — the C/W floor and sold-|Δ| cap do not apply to debit plans (the short leg is a hedge, or ATM by design); the check is `0 < debit ≤ max_debit`. Max loss vs account uses `max_loss` = debit × 100.
+- **Calendar exits (2026-10-06).** The SPY calendar voted `regime_shift` when SPY read MEAN_REVERSION for one cycle (a 3-σ band touch). Calendars now regime-exit only on a bullish or bearish trend, and close on `STRIKE_DRIFT` instead when the price has moved ≥ 3 % from the strike — the measure that actually erodes a calendar.
 - **Regime flicker (2026-10-05)** — IWM (price between its 50- and 200-day) flipped bearish → sideways one cycle after a put debit filled and the old any-change rule voted to close it at the bid/ask cost. Debit verticals now regime-exit only on a reversal; stops and targets still apply.
 - **Strike proximity** — never applied to debit structures (a call debit wants price through the short strike). Defensive rolls only fire on that signal, so they never touch debit positions.
 - **Leg inference** — a 2-leg same-type position with a net debit is inferred as a call / put debit spread; a short and a long at the same strike and type with different expiries is inferred as a calendar (the per-expiry buckets would otherwise split it into "Naked Short" + an orphan long).
@@ -287,4 +297,4 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-06.*
