@@ -46,4 +46,4 @@ Claude Code walks `recent["closes_today"]` (later broader window) for negative-P
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-06.*
