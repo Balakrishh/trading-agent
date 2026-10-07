@@ -2758,6 +2758,12 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Max new entries per hour", 0, 10,
                 int(getattr(seed, "max_new_entries_per_hour", 1)), 1, key="cust_entries_hour",
                 help="0 = no limit.")
+            entry_rate_scope = st.selectbox(
+                "Count the hourly limit", ["sector", "global"],
+                index=0 if getattr(seed, "entry_rate_scope", "sector") == "sector" else 1,
+                key="cust_entry_rate_scope",
+                help="sector: each sector gets its own hourly allowance · global: one "
+                     "allowance for the whole watchlist.")
         et1, et2, et3, et4 = st.columns(4)
         with et1:
             entry_timing_mode = st.selectbox(
@@ -2931,6 +2937,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "entry_confirm_cycles":         int(entry_confirm_cycles),
         "no_entry_before_et":           no_entry_before.strip(),
         "max_new_entries_per_hour":     int(max_entries_hour),
+        "entry_rate_scope":             entry_rate_scope,
         "entry_timing_mode":            entry_timing_mode,
         "entry_max_wait_cycles":        int(entry_max_wait),
         "entry_best_tolerance_pct":     entry_best_tol,

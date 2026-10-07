@@ -341,6 +341,10 @@ class PresetConfig:
     entry_confirm_cycles:              int   = 3
     no_entry_before_et:                str   = "09:45"
     max_new_entries_per_hour:          int   = 1
+    # "sector" (default, 2026-10-06): the hourly limit counts per sector —
+    # an AMZN entry holds back other Consumer Discretionary tickers for the
+    # hour, not the whole watchlist. "global": one count for everything.
+    entry_rate_scope:                  str   = "sector"
     # Entry timing (entry_confirmation.py): once confirmed, enter at the
     # best-scored price of the window (score within entry_best_tolerance_pct
     # of the best and natural-to-mid gap ≤ the window median); after
@@ -433,7 +437,7 @@ class PresetConfig:
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
                 f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
-                f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h • "
+                f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
                 f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
@@ -451,7 +455,7 @@ class PresetConfig:
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
             f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d • "
-            f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h • "
+            f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
             f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
             f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
@@ -628,6 +632,9 @@ _TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct",
 def _coerce_overrides(overrides: Dict) -> Dict:
     """JSON gives us lists; the dataclass wants tuples (frozen=True)."""
     out = dict(overrides)
+    if out.get("entry_rate_scope") not in (None, "sector", "global"):
+        logger.warning("Invalid entry_rate_scope %r — using the default",
+                       out.pop("entry_rate_scope"))
     if out.get("entry_timing_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid entry_timing_mode %r — using the default",
                        out.pop("entry_timing_mode"))
