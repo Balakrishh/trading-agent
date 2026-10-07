@@ -230,6 +230,15 @@ class TelegramNotifier:
     # TELEGRAM_ERROR_BOT_TOKEN / TELEGRAM_ERROR_CHAT_ID, fallback to
     # the info bot if those env vars aren't set.
 
+    def notify_trading_halt(self, reason: str) -> bool:
+        """Kill switch / drawdown governor paused new entries (backlog §9)."""
+        return self._send(
+            "🛑 <b>New entries paused</b>\n"
+            f"{reason}\n"
+            "Exits, stops and profit-taking keep running. Resume with "
+            "<code>python -m trading_agent.trading_halt resume</code>.",
+            channel="error")
+
     def notify_pdt_block(self, ticker: str, strategy: str,
                          exit_signal: str, exit_reason: str,
                          account_balance: float) -> bool:
@@ -541,7 +550,7 @@ class TelegramNotifier:
         otherwise falls back to the info channel (single-bot
         deployments stay unchanged). The dedicated channel keeps the
         hourly digest from flooding the info channel with the
-        credit-spread agent's trade/EOD alerts.
+        spread agent's trade/EOD alerts.
 
         Dedup is OWNED BY THE CALLER (the
         ``portfolio_alert_scheduler``) — the scheduler hashes the body

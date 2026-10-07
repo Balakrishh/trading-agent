@@ -10,7 +10,7 @@
 
 ## 1. Theory & Objective
 
-The credit-spread agent's three current strategies — Bull Put, Bear Call, Iron Condor — all price off the same vertical breakeven: at fair value, C/W ≈ |Δ_short|. When the market underprices verticals (thin premium regime, current 2026-07 environment) all three sit out simultaneously because they're the same trade with different sign conventions. That's a *regime-fit* gap: the agent has no structural coverage for range-bound markets where implied vol is elevated but the market isn't paying enough on OTM verticals to clear the breakeven.
+The agent's three original credit strategies — Bull Put, Bear Call, Iron Condor — all price off the same vertical breakeven: at fair value, C/W ≈ |Δ_short|. When the market underprices verticals (thin premium regime, current 2026-07 environment) all three sit out simultaneously because they're the same trade with different sign conventions. That's a *regime-fit* gap: the agent has no structural coverage for range-bound markets where implied vol is elevated but the market isn't paying enough on OTM verticals to clear the breakeven.
 
 Iron Butterfly (IB) fills that gap. Both short strikes sit at the same ATM strike, so credit collected is roughly 2× the IC equivalent at the same DTE. The trade-off is a much narrower profit zone: an IC wins if the underlying stays inside [K_put_short, K_call_short] (typically ±5-8% at open); IB wins only inside [K−C, K+C] (typically ±1-3% of ATM). IB is the right trade when you expect **pin-precision range-bound behavior + IV mean-reversion**: elevated IV rank on entry, expectation that the underlying will finish near where it started, and enough DTE for theta decay to shrink the mid.
 

@@ -1,6 +1,6 @@
 # Portfolio alert scheduler
 
-> **One-line summary:** Hourly portfolio digest folded INTO the credit-spread agent's 5-minute cycle (no separate cron / Cowork task). Runs the long-term evaluator against the operator's persisted holdings + watchlist, fetches option chains from **Schwab by default** (better coverage than Alpaca's `indicative` feed for the income-overlay scorer), posts covered-call candidates + skipped reasons + watchlist entry-candidate universe + portfolio snapshot to the dedicated Telegram `long_term` channel. Same `journal_kb` body-hash dedup the trade alerts use, so an identical digest within a UTC day stays silent.
+> **One-line summary:** Hourly portfolio digest folded INTO the spread agent's cycle (no separate cron / Cowork task). Runs the long-term evaluator against the operator's persisted holdings + watchlist, fetches option chains from **Schwab by default** (better coverage than Alpaca's `indicative` feed for the income-overlay scorer), posts covered-call candidates + skipped reasons + watchlist entry-candidate universe + portfolio snapshot to the dedicated Telegram `long_term` channel. Same `journal_kb` body-hash dedup the trade alerts use, so an identical digest within a UTC day stays silent.
 > **Source of truth:** [`trading_agent/portfolio_alert_scheduler.py`](../../trading_agent/portfolio_alert_scheduler.py), [`trading_agent/telegram_notifier.py:notify_portfolio_review`](../../trading_agent/telegram_notifier.py), [`trading_agent/agent.py:_maybe_run_portfolio_review`](../../trading_agent/agent.py).
 > **Phase:** 2  •  **Group:** ops
 > **Depends on:** `40_long_term_options_evaluator.md` (the scoring engine), `41_positions_provider.md` (holdings input), `32_telegram_operator_alerts.md` (channel-routing + per-day dedup pattern), `19_journal_schema.md` (the `telegram_alert_sent` action).
@@ -12,7 +12,7 @@
 
 The Long-Term Evaluator Streamlit tab gives the operator a manual review surface: paste holdings, click Parse, scan recommendations. That works during a sit-down review but leaves the rest of the day blind — if a covered-call setup that fits the operator's gates lights up at 11:14 ET, they won't see it until they next open the dashboard.
 
-This skill closes that loop. The credit-spread agent's existing 5-minute cycle is the production invocation path — `agent._maybe_run_portfolio_review` calls `run_scheduler` once per hour on cycles whose wall-clock minute falls in `[30, 34]`. The standalone CLI (`python -m trading_agent.portfolio_alert_scheduler`) is the manual / dev path for `--dry-run` or `--force` testing outside market hours. Both paths share the same `run_scheduler` orchestrator so behavior is bit-for-bit identical. On each invocation the scheduler:
+This skill closes that loop. The spread agent's existing cycle (≈ every 75 s) is the production invocation path — `agent._maybe_run_portfolio_review` calls `run_scheduler` once per hour on cycles whose wall-clock minute falls in `[30, 34]`. The standalone CLI (`python -m trading_agent.portfolio_alert_scheduler`) is the manual / dev path for `--dry-run` or `--force` testing outside market hours. Both paths share the same `run_scheduler` orchestrator so behavior is bit-for-bit identical. On each invocation the scheduler:
 
 1. Gates on env opt-out (`PORTFOLIO_ALERTS_ENABLED=false` kills the alerts without redeploying code) and market hours (only Mon-Fri 09:30-16:00 ET).
 2. Loads the operator's persisted holdings paste from `knowledge_base/holdings.json` (skill 41 §3.4).
@@ -83,7 +83,7 @@ def notify_portfolio_review(self, *, body: str, dedup_key: str) -> bool:
 
 Wraps the body in `<pre>{html_escape(body)}</pre>` so Telegram renders it monospaced. Truncates at 4000 chars (Telegram's hard cap is 4096) with a `… (truncated)` marker so the operator can tell when their holdings list grew past the digest size.
 
-**Routing — dedicated `long_term` channel.** Reads `TELEGRAM_LONG_TERM_BOT_TOKEN` / `TELEGRAM_LONG_TERM_CHAT_ID` when both are set; falls back to the info channel credentials otherwise. Operators set the LT env vars when they want the hourly digest in its own Telegram channel separate from the credit-spread agent's trade alerts. Single-bot deployments stay unchanged — the LT channel reuses the info bot's creds. `TelegramNotifier.long_term_channel_distinct` reports `True` when both env vars are set and the LT bot is actually in effect.
+**Routing — dedicated `long_term` channel.** Reads `TELEGRAM_LONG_TERM_BOT_TOKEN` / `TELEGRAM_LONG_TERM_CHAT_ID` when both are set; falls back to the info channel credentials otherwise. Operators set the LT env vars when they want the hourly digest in its own Telegram channel separate from the spread agent's trade alerts. Single-bot deployments stay unchanged — the LT channel reuses the info bot's creds. `TelegramNotifier.long_term_channel_distinct` reports `True` when both env vars are set and the LT bot is actually in effect.
 
 ## 4. Edge Cases / Guardrails
 

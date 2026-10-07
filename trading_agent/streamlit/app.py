@@ -169,7 +169,7 @@ from trading_agent.market_hours import is_within_market_hours  # noqa: E402
 _hdr_left, _hdr_right = st.columns([5, 1])
 with _hdr_left:
     st.title("📈 Trading Agent Dashboard")
-    st.caption("Credit-spread options agent · Paper trading · Alpaca Markets")
+    st.caption("Defined-risk options agent · Paper trading · Alpaca Markets")
 with _hdr_right:
     # Inline-styled badge — full background fill so it reads at a glance
     # even on a dense dashboard. Right-aligned via a flex wrapper so the

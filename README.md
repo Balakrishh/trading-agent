@@ -1,6 +1,6 @@
-# Autonomous Options Credit Spread Trading Agent
+# Autonomous Defined-Risk Options Agent
 
-An autonomous trading agent that generates daily income through high-probability, risk-defined options credit spreads. Primary goal: **capital preservation** — every trade has a known, capped maximum loss.
+An autonomous trading agent that generates income through defined-risk options playbooks — credit spreads when premium pays, debit spreads and calendars when it doesn't, an oversold-bounce bull put, and operator-approved Wheel legs. Primary goal: **capital preservation** — every trade has a known, capped maximum loss.
 
 ## Contents
 
@@ -159,6 +159,8 @@ Every trade must pass **all eight checks** before execution:
 * **Per sector:** 2 (`sector_map.py`); counts pending orders and every submission earlier in the same cycle.
 * **Total open risk:** Σ max loss of open defined-risk positions ≤ `max_total_risk_pct` (10 %) of equity; each trade is sized into what remains; Wheel legs excluded (their collateral has its own 40 %-of-equity rule).
 * **Market state:** size multiplier and allowed families (above).
+
+**Kill switch & drawdown governor (skill 62).** `python -m trading_agent.trading_halt pause --reason "…"` pauses new entries; exits, stops and profit-taking keep running. The governor pauses automatically when equity is 2 % below the day's first reading or 5 % below the week's; only `… resume` lifts it.
 
 **Daily Drawdown Circuit Breaker.** Equity drop > `DAILY_DRAWDOWN_LIMIT` (default 5 %) from the day's open → log + `os._exit(1)`.
 

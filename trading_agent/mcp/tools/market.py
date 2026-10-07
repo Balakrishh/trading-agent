@@ -113,6 +113,16 @@ def get_market_state() -> Dict[str, Any]:
     return out
 
 
+def get_trading_halt() -> Dict[str, Any]:
+    """Whether new entries are paused (kill switch / drawdown governor,
+    skill 62): paused, reason, set_by, set_at, and the day / week equity
+    baselines. Read-only — pausing and resuming is the operator's CLI:
+    ``python -m trading_agent.trading_halt pause --reason … | resume``."""
+    from dataclasses import asdict
+    from trading_agent import trading_halt as th
+    return {**asdict(th.load()), "source": "trading_halt.json"}
+
+
 def get_fundamentals(ticker: str) -> Dict[str, Any]:
     """Return the fundamentals block for one equity ticker.
 

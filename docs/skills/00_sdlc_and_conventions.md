@@ -259,6 +259,7 @@ Read this list as "if you're about to touch X, you must understand Y first."
 | Debit spreads, calendars, the bounce bull put, any negative-`net_credit` plan | [59 Debit spreads & calendars](59_debit_spreads_calendars.md) |
 | Entry-fill recording, the shadow POP log, the per-playbook scorecard | [60 Trade measurement](60_trade_measurement.md) |
 | Waiting before entries (confirmation cycles, entry window, hourly limit) | [61 Entry confirmation](61_entry_confirmation.md) |
+| Pausing new entries (kill switch, drawdown governor) | [62 Kill switch & drawdown governor](62_kill_switch_drawdown_governor.md) |
 | Trailing profit-taking | [30 Profit-target management](30_profit_target_management.md) §3.1b |
 
 ## 8. Edge Cases / Guardrails
@@ -304,4 +305,4 @@ External documents:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-07.*

@@ -10,13 +10,13 @@
 
 ## 1. Theory & Objective
 
-The credit-spread agent earns *theta* on short-DTE volatility-selling. That book is one income lane. This skill adds a **long-term** lane: when the operator already owns stock or has tickers on a watchlist they want long exposure to, an outright share purchase often isn't the right vehicle. Three options-structured alternatives almost always dominate on capital efficiency, downside, or both:
+The spread agent's credit playbooks earn *theta* on short-DTE volatility-selling. That book is one income lane. This skill adds a **long-term** lane: when the operator already owns stock or has tickers on a watchlist they want long exposure to, an outright share purchase often isn't the right vehicle. Three options-structured alternatives almost always dominate on capital efficiency, downside, or both:
 
 1. **Sell premium against held stock** — covered calls (and collars at higher quantity) convert dormant stock into a yield-producing position with no incremental capital outlay.
 2. **Get paid to wait for a better entry** — cash-secured puts on watchlist tickers monetise the wait until the underlying trades at the strike. Worst case: assigned at a price you already wanted.
 3. **Replace shares with deep-ITM long-dated calls** — a LEAPS call with Δ ≈ 0.85 behaves like 85 shares but costs a third of the capital. Frees the remaining 67% for income overlays or diversification.
 
-The evaluator's job is to score each candidate under the same risk-tolerance preset the credit-spread agent uses (`balanced`, `conservative`, `aggressive`), rank within and across strategy families, and surface the top-N alongside their **exit anchors** so the operator has a complete entry-to-exit plan before placing the order. Exit anchors feed directly into the Schwab `TRIGGER + OCO` bracket the order layer (next session) submits as one atomic ticket — entry fill triggers a child OCO holding the take-profit limit and the stop, and whichever child fills cancels its sibling. The operator never holds an entry without a paired exit.
+The evaluator's job is to score each candidate under the same risk-tolerance preset the spread agent uses (`balanced`, `conservative`, `aggressive`), rank within and across strategy families, and surface the top-N alongside their **exit anchors** so the operator has a complete entry-to-exit plan before placing the order. Exit anchors feed directly into the Schwab `TRIGGER + OCO` bracket the order layer (next session) submits as one atomic ticket — entry fill triggers a child OCO holding the take-profit limit and the stop, and whichever child fills cancels its sibling. The operator never holds an entry without a paired exit.
 
 The evaluator is **read-only by design**. It produces recommendations + bracket sketches. The operator clicks `Place` (next session). The system rules forbid this agent from executing trades on the operator's behalf.
 
@@ -360,7 +360,7 @@ def render_long_term_evaluator() -> None:
 - `13_preset_system_hot_reload.md` — defines the `cc_*`, `csp_*`, `leaps_*`, `debit_spread_*` knobs.
 - `01_pop_from_delta.md` — `pop ≈ 1 − |Δ|` reused for short-leg POP across CC / CSP scoring.
 - `03_credit_to_width_floor.md` — debit-spread scoring inverts the C/W invariant; the formula `|Δshort| × (1 + edge_buffer)` is unchanged on the credit side.
-- `30_profit_target_management.md` — the credit-spread agent's 50%-of-credit take-profit anchor is the same number we reuse for CC and CSP exits.
+- `30_profit_target_management.md` — the spread agent's 50%-of-credit take-profit anchor is the same number we reuse for CC and CSP exits.
 - `32_telegram_operator_alerts.md` — when a managed long-term position hits its TP/SL anchor, the evaluator fires the same operator-alert dedup path (next session).
 
 ---
