@@ -203,6 +203,14 @@ class SpreadPosition:
     net_natural_pl: Optional[float] = None
 
 
+def _contracts_of(legs) -> int:
+    """Contracts of a grouped position = the smallest |qty| across its legs
+    (a partial fill leaves one leg short; exposure is bounded by the
+    smaller side) — the same rule the plan-matched path uses (skill 44)."""
+    qtys = [abs(int(l.qty)) for l in legs if getattr(l, "qty", 0)]
+    return max(1, min(qtys)) if qtys else 1
+
+
 def _sum_natural(legs) -> Optional[float]:
     vals = [getattr(leg, "natural_unrealized_pl", None) for leg in legs]
     return None if not vals or any(v is None for v in vals) else round(sum(vals), 2)
@@ -628,7 +636,7 @@ class PositionMonitor:
                     net_unrealized_pl=sum(p.unrealized_pl for p in pair),
                     net_natural_pl=_sum_natural(pair),
                     expiration=s_occ["expiration"], short_strikes=[s_occ["strike"]],
-                    origin="inferred"))
+                    origin="inferred", contracts_open=_contracts_of(pair)))
                 used.update({s_leg.symbol, l_leg.symbol})
                 break
         return out, [leg for leg in legs if leg.symbol not in used]
@@ -737,6 +745,9 @@ class PositionMonitor:
                 expiration=expiration,
                 short_strikes=short_strikes,
                 origin="inferred",
+                # 2026-10-07: was left at the default 1 — a 2-contract GLD
+                # put debit got stop / target thresholds for one contract.
+                contracts_open=_contracts_of([d["leg"] for d in decoded]),
             ))
 
         return out
