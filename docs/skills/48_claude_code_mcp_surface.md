@@ -36,6 +36,7 @@ get_quote(symbol)                               — skill-47 passthrough
 get_market_status()                             — skill-47 passthrough
 get_market_state()                              — market risk state + gate + hedge idea (skill 58)
 get_playbook_scorecard(days=365, min_trades=20) — per-playbook track record, advisory size (skill 60)
+get_trading_halt()                              — kill switch / drawdown governor state (skill 62)
 get_fundamentals(ticker)                        — P/E, EPS, mcap, dividend, beta, 52w, ROE/ROA (skill-47 passthrough)
 get_recent_alerts(hours=24)                     — ExceptionMonitor tail
 ```
@@ -70,6 +71,7 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_quote",
     "get_market_status",
     "get_market_state",
+    "get_trading_halt",
     "get_playbook_scorecard",
     "get_fundamentals",
     "get_recent_alerts",
@@ -143,4 +145,4 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-07.*

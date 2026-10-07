@@ -184,6 +184,7 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 - **Unrecoverable opens — `position_reconciled` (2026-10-05).** A `submitted` row whose broker close was never journaled stays in `open_trades()` forever (`expired_unrecorded`). `python -m trading_agent.journal_reconcile --ticker … --strategy … --expiration … --reason … [--realized-pl X] [--apply]` (dry run by default) appends either a normal `closed` row (`exit_signal="reconciled"`, `pl_source="operator reconciliation"`) when the P&L is known, or a `position_reconciled` row (`pl_known=false`, `net_unrealized_pl=null`) when it is not. `open_trades()` and the playbook scorecard pair the latter with the open; it is never a close, never in realized P&L or win rate. Used for the 2026-07-08 XLE iron condor (old paper account, order history unreachable). Append-only — no row is ever edited.
 - **`skipped_entry_rate` / `profit_trail_shadow` (2026-10-05).** `skipped_entry_rate`: a ticker skipped because `max_new_entries_per_hour` submissions already went out (skill 61). `profit_trail_shadow`: in shadow mode, the trailing-profit outcome of a closed winner — `actual_exit_pl`, `trail_exit_pl`, `trail_minus_actual`, `peak_pl`, `reason` (skill 30 §3.1b); never a close, never in realized P&L.
 - **`entry_timing_shadow` (2026-10-06).** Shadow entry-timing outcome for one filled entry: `decision` (enter / skip), `cycle`, `actual_net`, `timing_net`, `improvement_usd` (> 0 = the rule would have filled better), `reason` (skill 61). Never a trade.
+- **`trading_halt_set` / `trading_halt_cleared` (2026-10-07).** Ticker `__halt__`; raw_signal is the halt state (`paused`, `reason`, `set_by` operator / governor, day / week equity baselines). Written by the CLI and by the agent when the drawdown governor trips (skill 62).
 - **Rows without `action`** are the agent's `event` rows (`cycle_error`, `shutdown` — one per after-hours restart); readers skip them.
 
 ## 5. Cross-References
@@ -197,4 +198,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-07.*

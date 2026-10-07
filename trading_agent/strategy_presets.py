@@ -342,6 +342,11 @@ class PresetConfig:
     # before no_entry_before_et; at most max_new_entries_per_hour
     # submissions in a rolling hour (0 = no limit).
     # ------------------------------------------------------------------
+    # Drawdown governor (trading_halt.py, 2026-10-07): pause NEW entries
+    # (exits keep running) when equity is this far below the day's / the
+    # week's first reading; only a human resumes. 0 = off.
+    halt_daily_loss_pct:               float = 0.02
+    halt_weekly_loss_pct:              float = 0.05
     entry_confirm_cycles:              int   = 3
     no_entry_before_et:                str   = "09:45"
     max_new_entries_per_hour:          int   = 1
@@ -441,6 +446,7 @@ class PresetConfig:
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
                 f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
+                f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
                 f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
                 f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
@@ -459,6 +465,7 @@ class PresetConfig:
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
             f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
+            f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
             f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
             f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
             f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
@@ -542,8 +549,8 @@ CONSERVATIVE = PresetConfig(
     # $/trade. 60% target means longer hold but bigger banked profit.
     profit_target_pct=0.60,
     description=(
-        "Low-risk: ~85% POP, far-OTM shorts, longer DTE. Trades fire less "
-        "often; credits are smaller; win rate is high."
+        "Low-risk: far-OTM credit spreads (~85% POP), longer DTE, 1% risk "
+        "per trade. Fewer trades; smaller premiums; high win rate."
     ),
 )
 
@@ -575,8 +582,9 @@ BALANCED = PresetConfig(
     # is the canonical "real positions, real defense" preset.
     defensive_roll_enabled=True,
     description=(
-        "Recommended baseline: ~75% POP, 21-DTE verticals, 1.5% width. "
-        "Trades fire most days; healthy credits; reasonable win rate."
+        "Recommended baseline: credit spreads at ~75% POP when premium pays, "
+        "debit spreads / calendars when it doesn't; 21-DTE verticals, 2% risk "
+        "per trade."
     ),
 )
 
@@ -610,8 +618,8 @@ AGGRESSIVE = PresetConfig(
     defensive_roll_enabled=True,
     roll_trigger_max_pct=0.012,
     description=(
-        "High-credit / high-variance: ~65% POP, near-ATM shorts, short DTE. "
-        "Fires almost every cycle; large credits; gamma-sensitive."
+        "High-variance: near-ATM credit spreads (~65% POP), short DTE, 3% "
+        "risk per trade. Most trades; largest premiums; gamma-sensitive."
     ),
 )
 

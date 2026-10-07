@@ -2745,6 +2745,16 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 help="A second position on a ticker only while the open one is at or above breakeven.")
 
         # ── Entry confirmation + trailing profit (skills 61, 30) ─────────
+        st.markdown("**Drawdown governor** *(skill 62)* — pauses new entries; exits keep running; only you resume")
+        hg1, hg2 = st.columns(2)
+        with hg1:
+            halt_daily = st.slider("Pause entries at daily loss", 0.0, 0.10,
+                                   float(getattr(seed, "halt_daily_loss_pct", 0.02)), 0.005,
+                                   key="cust_halt_daily", help="0 = off.")
+        with hg2:
+            halt_weekly = st.slider("Pause entries at weekly loss", 0.0, 0.20,
+                                    float(getattr(seed, "halt_weekly_loss_pct", 0.05)), 0.01,
+                                    key="cust_halt_weekly", help="0 = off.")
         st.markdown("**Entry confirmation and trailing profit** *(skills 61, 30)*")
         ec1, ec2, ec3 = st.columns(3)
         with ec1:
@@ -2944,6 +2954,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "ladder_min_gap_days":          int(ladder_gap),
         "ladder_requires_profit":       bool(ladder_winners),
         "calendar_max_strike_drift_pct": cal_drift,
+        "halt_daily_loss_pct":          halt_daily,
+        "halt_weekly_loss_pct":         halt_weekly,
         "entry_confirm_cycles":         int(entry_confirm_cycles),
         "no_entry_before_et":           no_entry_before.strip(),
         "max_new_entries_per_hour":     int(max_entries_hour),

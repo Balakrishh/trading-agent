@@ -203,3 +203,5 @@ def _isolate_entry_and_trail_state(tmp_path, monkeypatch):
     from trading_agent import entry_confirmation, profit_trail
     monkeypatch.setattr(entry_confirmation, "STATE_PATH", tmp_path / "entry_candidates.json")
     monkeypatch.setattr(profit_trail, "STATE_PATH", tmp_path / "profit_trail.json")
+    from trading_agent import trading_halt
+    monkeypatch.setattr(trading_halt, "STATE_PATH", tmp_path / "trading_halt.json")

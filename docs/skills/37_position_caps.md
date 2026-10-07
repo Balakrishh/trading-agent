@@ -92,4 +92,4 @@ from trading_agent.position_caps import compute_position_cap_dedup_set
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-07.*

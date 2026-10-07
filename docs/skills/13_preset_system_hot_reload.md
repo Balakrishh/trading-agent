@@ -294,6 +294,7 @@ self.risk_manager = RiskManager(
 - **Laddering (2026-10-05, skill 37).** `max_positions_per_ticker` 2, `ladder_min_gap_days` 7; summary `Ladder 2/ticker ≥7d`; Strategy-Profile inputs; read by the agent's cap and ladder gate.
 - **Entry confirmation + trailing profit (2026-10-05, skills 61 / 30).** `entry_confirm_cycles` 3, `no_entry_before_et` "09:45", `max_new_entries_per_hour` 1, `entry_rate_scope` "sector" (`sector` / `global`; per-sector allowance since 2026-10-06); `entry_timing_mode` "shadow" (`off` / `shadow` / `live`), `entry_max_wait_cycles` 8, `entry_best_tolerance_pct` 0.01, `entry_chase_limit_pct` 0.03; `profit_trail_mode` "shadow" (`off` / `shadow` / `live`; invalid → default), `trail_giveback_pct` 0.25, `trail_credit_floor_pct` 0.40, `trail_credit_ceiling_pct` 0.75, `trail_debit_ceiling_pct` 0.90, `trail_calendar_ceiling_pct` 0.40, `trail_max_hold_dte` 7. Summary `Confirm 3× from 09:45 ≤1/h • Trail shadow −25%`; Strategy-Profile block "Entry confirmation and trailing profit".
 - **2026-10-06.** `ladder_requires_profit` True (add to winners only, skill 37); `calendar_max_strike_drift_pct` 0.03 (calendar closes when the underlying is ≥ 3 % from its strike, skill 59). Summary: `Ladder 2/ticker ≥7d winners`, `Cal@21+28d TP25% drift≤3%`.
+- **Drawdown governor (2026-10-07, skill 62).** `halt_daily_loss_pct` 0.02, `halt_weekly_loss_pct` 0.05 (0 = off); summary `Halt −2%/d −5%/wk`; Strategy-Profile "Drawdown governor" sliders.
 
 ## 5. Cross-References
 
@@ -304,4 +305,4 @@ self.risk_manager = RiskManager(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-07.*

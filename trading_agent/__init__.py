@@ -1,5 +1,5 @@
 """
-Autonomous Options Credit Spread Trading Agent
+Autonomous Defined-Risk Options Agent
 ================================================
 A risk-defined options trading agent that generates daily income
 through high-probability credit spreads using theta decay.

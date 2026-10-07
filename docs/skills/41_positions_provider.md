@@ -13,7 +13,7 @@
 The evaluator (skill 40) needs to know what the operator already holds before it can recommend anything sensible. "Already holds" can come from three places:
 
 1. **Manual paste** — operator drops a JSON blob into a Streamlit textarea. No API auth required. Useful when prototyping, when offline, or when the operator wants to evaluate a hypothetical portfolio.
-2. **Alpaca paper** — the same Alpaca account the credit-spread agent uses. Reuses existing `alpaca-py` plumbing. Useful for paper-testing the evaluator end-to-end with the holdings the operator replicates into the paper book.
+2. **Alpaca paper** — the same Alpaca account the spread agent uses. Reuses existing `alpaca-py` plumbing. Useful for paper-testing the evaluator end-to-end with the holdings the operator replicates into the paper book.
 3. **Schwab brokerage** — live real-money positions via Schwab Trader API's `/trader/v1/accounts/{accountId}/positions`. Requires the trading scope of the Schwab OAuth flow (the market-data scope the repo uses today is insufficient). This is the eventual production source.
 
 Rather than scatter brokerage-specific calls through the evaluator, this skill defines a single `PositionsProvider` abstract base with one method (`snapshot() -> List[Position]`) and a tightly normalised `Position` dataclass. The evaluator sees only `Position`. The three implementations live behind the same interface; the Streamlit panel picks one via a sidebar radio.

@@ -16,7 +16,7 @@ Iron Butterfly (skill 45) is a directionally-neutral trade — both wings are eq
 - **Asymmetric risk profile.** The wider-wing side has a bigger max loss but a lower probability of ever being hit (the underlying has further to travel). The narrower-wing side has a smaller but more probable max loss. The trade is a bet that the underlying stays near ATM OR drifts *toward the narrower wing*.
 - **Direction becomes structural, not dispatch-time.** In the current agent, "should I trade bull put or bear call?" is a strategy-selection decision made upstream by the regime classifier. With BWB the same architectural machinery expresses direction as an asymmetry knob — put wing wider = bullish bias, call wing wider = bearish bias. A single BWB scorer covers both directions with different inputs.
 
-The regime BWB is best suited for is "moderately directional + range-bound + IV elevated." The credit-spread agent's Bull Put / Bear Call already covers "strongly directional" (via short-strike delta far OTM) and Iron Condor / Iron Butterfly cover "range-bound + neutral." BWB fills the "directional + range-bound" gap — expect the underlying to stay near current price with a small drift, want higher credit than an IC, willing to accept an asymmetric worst-case.
+The regime BWB is best suited for is "moderately directional + range-bound + IV elevated." The agent's Bull Put / Bear Call already covers "strongly directional" (via short-strike delta far OTM) and Iron Condor / Iron Butterfly cover "range-bound + neutral." BWB fills the "directional + range-bound" gap — expect the underlying to stay near current price with a small drift, want higher credit than an IC, willing to accept an asymmetric worst-case.
 
 The scorer ships as a pure function alongside the IB scorer. Live-cycle integration (the analogue of Phase 1.5 for BWB) is next-session work — call it Phase 2.5 — gated on backtest sign-off.
 
@@ -159,4 +159,4 @@ broken_wing_butterfly_wing_width_pct: Tuple[float, ...] = (0.020, 0.030, 0.040, 
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-07.*

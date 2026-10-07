@@ -115,6 +115,28 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 - [ ] **Prerequisite — position families.** A butterfly conversion adds legs that share a strike with the open spread (GLD: two more short 369P). `group_into_spreads` must group an original plan and its repair under one family id, with combined economics for exits, before any repair is staged.
 - [ ] **Shadow measurement first:** journal `repair_shadow` with the recommended repair and what hold vs repair would have returned at expiry or exit; review after 4+ weeks per structure before any auto-repair is considered.
 
+## 9. Autonomy with a human in the loop (added 2026-10-07)
+
+**Why:** the agent now trades every market condition, but week 2 showed the operating model lagging: the host is a laptop (it slept through an open), nothing pages the operator (Telegram not configured), the daily AI review has been empty for days (Ollama down), most bugs were found by watching live paper trading, and four features sit in shadow with no path to promotion. Goal: the agent runs unattended, and every decision outside its rails reaches a human who can approve or stop it from a phone.
+
+**Autonomy levels — every action class gets one; changing a level is a recorded human decision:**
+
+| Level | Meaning | Action classes |
+|---|---|---|
+| L3 auto | acts within rails, reports after | entries, exits, stops, kill-switch-rule closes |
+| L2 auto with veto | notifies, waits N minutes, acts unless vetoed | repairs (§8), scorecard-suggested sizing |
+| L1 propose | stages; a human approves | Wheel orders, preset proposals, shadow → live promotions, new playbooks |
+| L0 observe | logs only | anything new (shadow) |
+
+- [ ] **Rename** away from "credit-spread agent" in everything people read (README, manifest / context, handoff prompt, preset descriptions, dashboard, Telegram, MCP descriptions); keep stored identifiers (journal actions, `net_credit`, class / file / skill names). *(Started 2026-10-07.)*
+- [ ] **Kill switch + drawdown governor.** One command pauses new entries (exits keep running); automatic pause at a daily / weekly loss limit; only a human resumes. *(Started 2026-10-07.)*
+- [ ] **Always-on host + liveness alerts.** Move the agent and data server off the laptop (Mac mini or small cloud VM); dead-man alert when no cycle by 09:50 ET or none for 10 min in session.
+- [ ] **Phone approvals.** Telegram with approve / reject / pause buttons — prerequisite for L1 / L2 away from the terminal.
+- [ ] **Promotion by evidence.** Weekly report from the playbook scorecard and the shadow logs (trailing profit, entry timing, realized-vol POP) with an explicit recommendation per feature, approved through L1.
+- [ ] **Reliable reviewer.** Run the daily / weekly AI review on Claude instead of a local Ollama.
+- [ ] **Day-replay harness.** Replay a recorded session (chains, quotes, journal) through the full agent cycle in tests — this week's sector-cap, plan-retention and regime-flicker bugs would have failed there first.
+- [ ] **Stage 2 as a gate pipeline.** Split the entry path into small, separately tested gates (caps → filters → plan → risk → market state → ladder → confirmation → timing); `_run_cycle_impl` is at the 400-line cap.
+
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 
 **Why:** two days of paper trading opened 0 new spreads (≈3,100 "no positive-EV" rejects). Causes: (1) the agent only *sells* premium, which is correctly idle when IV Rank is low (3–36 on 2026-09-30/10-01); (2) delta-as-probability assumes zero edge, so EV rarely clears after bid/ask; (3) oversold + high-IV setups — historically the best time to sell puts — are skipped rather than traded the other way. Goal: a deterministic regime → strategy map that always has an appropriate, small, defined-risk trade, measured per playbook.

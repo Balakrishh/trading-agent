@@ -200,7 +200,8 @@ def _root_from_occ(symbol: str) -> str:
 
 class TradingAgent:
     """
-    Autonomous credit-spread trading agent.
+    Autonomous defined-risk options agent (credit / debit spreads, calendars,
+    bounce bull put; Wheel legs staged by the operator).
 
     Lifecycle::
         agent = TradingAgent.from_env()
@@ -830,7 +831,7 @@ class TradingAgent:
         self._vix_monitor.check_and_alert()
 
         # Skill 42 — Hourly portfolio review (long-term evaluator
-        # digest). Folded into the credit-spread agent's 5-minute
+        # digest). Folded into the spread agent's
         # cycle so the pi's existing loop owns BOTH workloads — no
         # separate cron / Cowork scheduled task needed.
         #
@@ -953,23 +954,12 @@ class TradingAgent:
         # ── Market risk state (skill 58) ────────────────────────────────
         # Whole-market overlay computed once per cycle. CAPITULATION
         # (size multiplier 0) blocks every new entry; exits ran in Stage 1.
-        self._update_market_state(tickers, account_balance)
-        ms_state = self._market_state
-        if ms_state is not None and ms_state.gate.size_multiplier <= 0:
-            logger.warning(
-                "STAGE 2 SKIPPED — market state %s (%s). No new entries.",
-                ms_state.state, "; ".join(ms_state.reasons))
-            return {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "account_balance": account_balance,
-                "monitor": monitor_results,
-                "new_trades": [],
-                "order_summary": {
-                    "open_orders": {"total": 0},
-                    "recent_fills": {"total": 0},
-                    "skipped_reason": f"market_state_{ms_state.state}",
-                },
-            }
+        # Kill switch / drawdown governor (skill 62), then the market risk
+        # state (skill 58): either may skip Stage 2; exits already ran.
+        stage2_skip = (self._trading_halt_result(account_balance, monitor_results)
+                       or self._market_state_skip(tickers, account_balance, monitor_results))
+        if stage2_skip is not None:
+            return stage2_skip
 
         risk_used, risk_budget = self._total_risk_state(monitor_results, account_balance)
         # Entry confirmation + hourly entry limit (2026-10-05).
@@ -2243,6 +2233,57 @@ class TradingAgent:
     # ==================================================================
     # Stage 2: New trade entry
     # ==================================================================
+
+    @staticmethod
+    def _stage2_skip(account_balance: float, monitor_results: Dict, reason: str) -> Dict:
+        """Result dict for a cycle whose Stage 2 (new entries) is skipped."""
+        return {"timestamp": datetime.now(timezone.utc).isoformat(),
+                "account_balance": account_balance, "monitor": monitor_results,
+                "new_trades": [],
+                "order_summary": {"open_orders": {"total": 0}, "recent_fills": {"total": 0},
+                                  "skipped_reason": reason}}
+
+    def _market_state_skip(self, tickers, account_balance: float,
+                           monitor_results: Dict) -> Optional[Dict]:
+        """Classify the market (skill 58); CAPITULATION (size × 0) skips
+        Stage 2. Returns the skip result, else None."""
+        self._update_market_state(tickers, account_balance)
+        ms_state = self._market_state
+        if ms_state is None or ms_state.gate.size_multiplier > 0:
+            return None
+        logger.warning("STAGE 2 SKIPPED — market state %s (%s). No new entries.",
+                       ms_state.state, "; ".join(ms_state.reasons))
+        return self._stage2_skip(account_balance, monitor_results,
+                                 f"market_state_{ms_state.state}")
+
+    def _trading_halt_result(self, account_balance: float, monitor_results: Dict) -> Optional[Dict]:
+        """Kill switch + drawdown governor (backlog §9, trading_halt.py).
+        Returns the Stage 2 skip result while new entries are paused, else
+        None. Exits already ran in Stage 1 and are never paused here."""
+        from trading_agent import trading_halt as th
+        try:
+            state = th.load()
+            state, tripped = th.govern(
+                state, account_balance, datetime.now(timezone.utc),
+                float(getattr(self.preset, "halt_daily_loss_pct", 0.0) or 0.0),
+                float(getattr(self.preset, "halt_weekly_loss_pct", 0.0) or 0.0))
+            th.save(state)
+        except Exception as exc:  # noqa: skill-34-exempt — a broken halt file must not stop exits; entries continue
+            logger.warning("Trading-halt check failed: %s", exc)
+            return None
+        if tripped:
+            logger.critical("DRAWDOWN GOVERNOR — new entries paused: %s", tripped)
+            self.journal_kb.log_signal(ticker="__halt__", action="trading_halt_set",
+                                       price=0.0, raw_signal=dataclasses.asdict(state))
+            try:
+                self.telegram.notify_trading_halt(f"Drawdown governor: {tripped}")
+            except Exception as exc:  # noqa: skill-34-exempt — alert is best-effort; the pause is already saved
+                logger.warning("Halt alert not sent: %s", exc)
+        if not state.paused:
+            return None
+        logger.warning("STAGE 2 SKIPPED — new entries paused (%s, by %s). Exits continue.",
+                       state.reason, state.set_by)
+        return self._stage2_skip(account_balance, monitor_results, "trading_halt")
 
     def _update_market_state(self, tickers, account_balance: float = 0.0) -> None:
         """Skill 58: classify the market once per cycle, scale max_risk_pct

@@ -20,7 +20,7 @@ Chain-fetch
 -----------
 The evaluator needs an option chain to score against. The walking
 skeleton wires this through a thin ``_make_chain_fetcher`` that uses
-the same ``MarketDataProvider`` the credit-spread agent uses. Failures
+the same ``MarketDataProvider`` the spread agent uses. Failures
 degrade gracefully — the panel shows a warning rather than crashing.
 
 Architectural safety
@@ -575,7 +575,7 @@ def _make_chain_fetcher():
 
     Uses ``market_data_factory.build_market_data_provider`` (the
     canonical factory) and threads the operator's Alpaca creds in from
-    the active ``AppConfig`` — same plumbing the credit-spread agent
+    the active ``AppConfig`` — same plumbing the spread agent
     and the existing Watchlist tab use.
     """
     try:
