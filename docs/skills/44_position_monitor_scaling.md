@@ -153,4 +153,4 @@ Called by `agent.py` right after `fetch_open_positions()` and before `group_into
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-06.*
