@@ -47,7 +47,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 44 | position monitor scaling | position_monitor.py | test_backtest/test_sim_position.py, test_debit_strategies.py, test_executor.py, test_fill_model.py, test_plan_retention.py, test_position_monitor.py, test_position_snapshot.py, test_production_readiness.py, test_profit_trail.py, test_wheel_integration.py | conformance/test_skill_44_position_monitor_scaling.py | — |
 | 45 | iron butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_debit_strategies.py, test_entry_confirmation.py, test_fill_model.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_profit_trail.py, test_streamlit/test_backtest_ui.py, test_trading_halt.py, test_wheel_filters.py | conformance/test_skill_45_iron_butterfly.py | — |
 | 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_debit_strategies.py, test_entry_confirmation.py, test_fill_model.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_profit_trail.py, test_streamlit/test_backtest_ui.py, test_trading_halt.py, test_wheel_filters.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
-| 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | — | conformance/test_skill_47_schwab_data_api.py | — |
+| 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | — | conformance/test_skill_47_schwab_data_api.py | 08_raspberry_pi_deployment.md |
 | 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_position_snapshot.py, test_trading_halt.py | conformance/test_skill_48_mcp_readonly.py, conformance/test_subagent_and_command_shape.py | — |
 | 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_position_snapshot.py, test_trading_halt.py | ❌ MISSING | — |
 | 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | test_position_snapshot.py | ❌ MISSING | — |
@@ -73,7 +73,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/calendar_utils.py` (last modified 2026-05-01)
 - `trading_agent/config.py` (last modified 2026-04-24)
 - `trading_agent/daily_state.py` (last modified 2026-04-19)
-- `trading_agent/data_server/__main__.py` (last modified 2026-09-29)
+- `trading_agent/data_server/__main__.py` (last modified 2026-10-08)
 - `trading_agent/earnings_calendar.py` (last modified 2026-04-24)
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
