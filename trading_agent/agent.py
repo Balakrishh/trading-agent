@@ -371,6 +371,7 @@ class TradingAgent:
             # Skill 59: debit spread / calendar exit thresholds.
             debit_profit_target_pct=self.preset.debit_profit_target_pct,
             debit_stop_loss_pct=self.preset.debit_stop_loss_pct,
+            debit_profit_target_basis=self.preset.debit_profit_target_basis,
             calendar_profit_target_pct=self.preset.calendar_profit_target_pct,
             calendar_max_strike_drift_pct=self.preset.calendar_max_strike_drift_pct,
         )

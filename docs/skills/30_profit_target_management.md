@@ -100,7 +100,7 @@ def evaluate(state: TrailState, profit: float, *, basis: float, target: float,
 | `shadow` (default) | close at the target; armed winners keep being priced after the close until the trail would have closed → journal `profit_trail_shadow` with `actual_exit_pl`, `trail_exit_pl`, `trail_minus_actual` |
 | `live` | the trail decides: target → HOLD (armed); ceiling / giveback / time stop → PROFIT_TARGET (still through the 3-cycle debounce) |
 
-Defaults: giveback 25 % of the peak; credit floor 40 % and ceiling 75 % of the credit; debit ceiling 90 % of max profit; calendar ceiling 40 % of the debit; time stop at ≤ 7 DTE. Wheel legs are excluded.
+Defaults: giveback 25 % of the peak; credit floor 40 % and ceiling 75 % of the credit; debit ceiling 90 % of max profit (the debit *target*, where the trail arms, is 50 % of the debit paid by default — skill 59 `debit_profit_target_basis`); calendar ceiling 40 % of the debit; time stop at ≤ 7 DTE. Wheel legs are excluded.
 
 
 ### 3.2 PresetConfig field

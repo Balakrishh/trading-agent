@@ -40,7 +40,8 @@ Sign convention: net_credit = −debit, max_loss = debit × 100, qty = ⌊max_ri
 
 Exits (position-scale; debit_pos = debit × 100 × contracts)
   stop     loss ≥ debit_stop_loss_pct × debit_pos
-  target   verticals: profit ≥ debit_profit_target_pct × (width − debit) × 100 × contracts
+  target   verticals: profit ≥ debit_profit_target_pct × debit_pos                       (basis "debit", default)
+                      profit ≥ debit_profit_target_pct × (width − debit) × 100 × contracts (basis "max_profit")
            calendars: profit ≥ calendar_profit_target_pct × debit_pos
   then DTE safety on the (near) expiry; calendars also close when the underlying is
   ≥ calendar_max_strike_drift_pct (3 %) from the strike (STRIKE_DRIFT, debounced); then
@@ -190,12 +191,13 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 ```
 
 ```python
-# trading_agent/position_monitor.py:788-839
+# trading_agent/position_monitor.py:831-885
     def _check_debit_exit(self, spread: SpreadPosition,
                           current_regimes: Dict[str, Regime],
                           underlying_price: float = 0.0):
         """Stop at ``debit_stop_loss_pct`` of the debit; profit target at
-        ``debit_profit_target_pct`` of max profit (verticals) or
+        ``debit_profit_target_pct`` of the debit or of max profit (verticals,
+        per ``debit_profit_target_basis``) or
         ``calendar_profit_target_pct`` of the debit (calendars); DTE
         safety on the (near) expiry; regime shift against the thesis."""
         contracts = max(1, spread.contracts_open)
@@ -209,7 +211,9 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
                     f"Debit: loss ${loss:.2f} ≥ {self.debit_stop_loss_pct:.0%} of "
                     f"debit ${debit_position:.2f}")
         kind, basis, target = self.profit_basis(spread)
-        if kind == "debit_vertical":
+        if kind == "debit_vertical" and self.debit_profit_target_basis == "debit":
+            label = f"{self.debit_profit_target_pct:.0%} of debit ${debit_position:.2f}"
+        elif kind == "debit_vertical":
             label = f"{self.debit_profit_target_pct:.0%} of max profit ${basis:.2f}"
         else:
             label = f"{self.calendar_profit_target_pct:.0%} of debit ${basis:.2f}"
@@ -270,6 +274,7 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 
 ## 4. Edge Cases / Guardrails
 
+- **Debit target measured on cost (2026-10-08).** `debit_profit_target_basis` = `"debit"` (default) makes `debit_profit_target_pct` a share of what was paid: 0.50 → close at +50 % on cost. `"max_profit"` keeps the old rule (a share of width − debit). On 2026-10-08 IWM 283/278 × 4 (debit $768, max profit $1,232) peaked at +$444 — past the new $384 target, short of the old $616 — and was closed by hand at +$288. `profit_basis` still returns max profit as the basis, so the trailing rule's debit ceiling (90 % of max profit) is unchanged; only the target (where the trail arms) moves. Invalid values in the preset file fall back to `"debit"`.
 - **Credit plan valid** — it wins; the debit/calendar fallback is not even planned. Both invalid → the credit plan is returned (stable journal strategy names) with `; fallback <name>: no acceptable candidate (<reasons>)` appended to its reason.
 - **Overpay** — natural fills sit above mid, so `debit_max_overpay = 0` rejects nearly everything; default 0.05 (live 2026-10-05: SPY/QQQ/IWM natural 0.8–2.5 % over mid passed; DIA calendar 7.8 % and XLE put debit 8.4 % did not). The best near miss (debit, mid, cap, reward/risk) lands in the scan diagnostics.
 - **Live check 2026-10-05 (read-only planner run, no orders)** — accepted: SPY / QQQ / IWM call and put debits (max loss $285–$915 per contract), SPY / QQQ / IWM / GLD calendars ($264–$748). Rejected: XLE / EEM legs too wide (skill 29 gate), DIA calendar over the cap. A max loss above `max_risk_pct × equity` is caught by RiskManager / sizing (qty 0), which is why candidates rank smallest-debit first.
@@ -297,4 +302,4 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-08.*
