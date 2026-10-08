@@ -60,6 +60,11 @@ DST_KEY="$(printf '%s' "$PI_REPO" | tr '/' '-')"
 echo "== Claude Code context: projects/${SRC_KEY} → projects/${DST_KEY}"
 ssh "$PI_HOST" "mkdir -p ~/.claude/projects/${DST_KEY}"
 "${RSYNC[@]}" "$HOME/.claude/projects/${SRC_KEY}/" "${PI_HOST}:.claude/projects/${DST_KEY}/" | tail -5
+# Each saved message records the Mac's working directory; /resume on the Pi
+# only lists conversations whose directory matches, so point them at PI_REPO.
+if [ $GO -eq 1 ]; then
+    ssh "$PI_HOST" "sed -i 's#\"cwd\":\"${REPO}\"#\"cwd\":\"${PI_REPO}\"#g' ~/.claude/projects/${DST_KEY}/*.jsonl"
+fi
 
 [ $GO -eq 1 ] && echo "Done. Next: runbook §7 (start services on the Pi)." \
               || echo "Dry run only. Re-run with --go to copy."

@@ -145,7 +145,7 @@ claude                                                        # first run: /logi
 ```
 
 - **Memory** (`MEMORY.md` and its files) loads automatically: it was copied into the Pi's project folder.
-- **This conversation:** `claude --resume` and pick it from the list (or `claude --continue` for the most recent). Older messages mention Mac paths (`/Users/…`); the repo is now at `~/Documents/trading-agent`.
+- **This conversation:** start `claude` **from the repo folder** (`~/Documents/trading-agent`) — `/resume` only lists conversations for the folder you start in — then `/resume` and pick it (or `claude --continue` for the most recent). The migration script rewrites each saved message's working directory from the Mac path to the Pi path, without which the list can come up empty. Older messages mention Mac paths (`/Users/…`); the repo is now at `~/Documents/trading-agent`.
 - **MCP:** run `/mcp` and check that `trading-agent` is connected; `/portfolio` and `/review` work as before.
 - Not available on the Pi: Claude in Chrome (no browser). Everything else in the repo workflow is the same.
 
