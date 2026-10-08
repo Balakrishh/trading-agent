@@ -1,6 +1,6 @@
 # Pending-Orders Promotion — Write Gate
 
-> **One-line summary:** The CLI (`python -m trading_agent.executor_promote <uuid>`) that consumes proposals written by skill 51 and either waits for the operator's `--yes` or auto-promotes when every one of seven gate conditions holds. This module + `executor.py` are the ONLY two files allowed to import order-submission primitives (CI-verified in Phase 5).
+> **One-line summary:** The CLI (`python -m trading_agent.executor_promote <uuid>`) that consumes proposals written by skill 51 and either waits for the operator's `--yes` or auto-promotes when every one of seven gate conditions holds. This module, `executor.py`, `agent.py` and `manual_close.py` (skill 63, operator close — closes only, never opens) are the ONLY files allowed to import order-submission primitives (CI-verified in Phase 5).
 > **Source of truth:** [`trading_agent/executor_promote.py`](../../trading_agent/executor_promote.py), [`trading_agent/pending_orders_writer.py`](../../trading_agent/pending_orders_writer.py), [`trading_agent/strategy_presets.py`](../../trading_agent/strategy_presets.py).
 > **Phase:** 3  •  **Group:** ops
 > **Depends on:** `51_pre_trade_approval.md` (the proposal producer), `18_order_submission_idempotency.md` (the executor primitive this CLI is the sole caller of), `13_preset_system_hot_reload.md` (`AutoPromoteConfig` fields on `PresetConfig`).
@@ -104,4 +104,4 @@ The CLI always prints the proposal diff first, then runs the gate. If the operat
 
 ---
 
-*Last verified against repo HEAD on 2026-10-07.*
+*Last verified against repo HEAD on 2026-10-08.*

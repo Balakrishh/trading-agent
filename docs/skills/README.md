@@ -82,6 +82,7 @@ Skills 40–60: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 60 | [Trade Measurement — Entry Fills, Shadow POP, Playbook Scorecard](60_trade_measurement.md) | architecture / risk | `trading_agent/fill_reconciler.py`, `trading_agent/shadow_pop.py`, `trading_agent/playbook_scorecard.py` |
 | 61 | [Entry Confirmation — Wait Before Opening](61_entry_confirmation.md) | risk | `trading_agent/entry_confirmation.py` |
 | 62 | [Kill Switch & Drawdown Governor](62_kill_switch_drawdown_governor.md) | risk / ops | `trading_agent/trading_halt.py` |
+| 63 | [Manual Close](63_manual_close.md) | ops / risk | `trading_agent/manual_close.py`, `trading_agent/executor.py` |
 
 ## Phase 2 (planned, not yet written)
 

@@ -267,6 +267,8 @@ attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
 
 - **Realized P&L from the close fill (2026-10-01)** — on a filled atomic close, `_close_spread_mleg` reads `filled_avg_price` and `realized_pl_from_close(legs, fill_debit)` computes (Σ short `avg_entry_price` − Σ long) − debit, × 100 × contracts, from the broker's entry prices. The agent journals that as `net_unrealized_pl` (the field `JournalReader` reports as realized), keeps the exit-signal mark as `signal_mark_pl`, and tags `pl_source` = `fill` | `signal_mark` (per-leg fallback or missing entry prices). SPY IC: mark −$64 vs real −$176 (entry 0.48, close 0.59 at the natural price, 16 contracts).
 
+- **Shared close pricing; atomic-only entry point (2026-10-08).** The mid/natural math moved out of `_close_spread_mleg` into module-level `close_order_prices(legs, quotes)` so the operator close preview (skill 63) prices exactly what the order sends. `close_spread_atomic(spread)` runs the mleg path only and returns `None` instead of falling back to per-leg DELETEs; the agent's own `close_spread` is unchanged.
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — journal action enumeration; dedup-bypass rules.
@@ -281,4 +283,4 @@ Alongside `MAX_POSITIONS_PER_TICKER = 1`, the agent now also enforces `MAX_POSIT
 
 ---
 
-*Last verified against repo HEAD on 2026-10-07.*
+*Last verified against repo HEAD on 2026-10-08.*

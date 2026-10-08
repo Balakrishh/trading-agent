@@ -166,6 +166,7 @@ _ALLOWED_WRITERS = {
     "executor.py",         # defines the primitives
     "executor_promote.py", # Claude Code write path (skill 55)
     "agent.py",            # live headless cycle
+    "manual_close.py",     # operator close CLI, atomic close only (skill 63)
 }
 
 _FORBIDDEN_NAMES = ("submit_order", "place_order", "OrderExecutor",
@@ -209,7 +210,8 @@ def test_skill_55_executor_imports_restricted_to_two_files():
     assert not disallowed, (
         "Order-submission primitives may only be imported by "
         "executor.py (defines them), executor_promote.py (Claude Code "
-        "write path — skill 55), and agent.py (live headless cycle). "
+        "write path — skill 55), agent.py (live headless cycle) and "
+        "manual_close.py (operator close — skill 63). "
         f"Offenders: {disallowed}"
     )
 

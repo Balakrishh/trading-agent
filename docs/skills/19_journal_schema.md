@@ -181,6 +181,7 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 - **Risk-vetoed rejects carry a reason (2026-10-05).** When the plan is valid but RiskManager rejects it, `raw_signal.rejection_reason` is now `"risk: <first checks_failed entry>"` (previously `None`, which grouped as "(no reason recorded)"). `JournalReader.reject_reasons_today` falls back to `checks_failed[0]` for older rows.
 
+- **Operator closes — `exit_signal="manual"` (2026-10-08).** `python -m trading_agent.manual_close` (skill 63) writes an ordinary `closed` (or `close_failed`) row through the agent's close writer; only the `exit_signal` value `manual` is new, so every reader that sums `closed` rows counts it. Preferred over `journal_reconcile` whenever the position is still open at the broker.
 - **Unrecoverable opens — `position_reconciled` (2026-10-05).** A `submitted` row whose broker close was never journaled stays in `open_trades()` forever (`expired_unrecorded`). `python -m trading_agent.journal_reconcile --ticker … --strategy … --expiration … --reason … [--realized-pl X] [--apply]` (dry run by default) appends either a normal `closed` row (`exit_signal="reconciled"`, `pl_source="operator reconciliation"`) when the P&L is known, or a `position_reconciled` row (`pl_known=false`, `net_unrealized_pl=null`) when it is not. `open_trades()` and the playbook scorecard pair the latter with the open; it is never a close, never in realized P&L or win rate. Used for the 2026-07-08 XLE iron condor (old paper account, order history unreachable). Append-only — no row is ever edited.
 - **`skipped_entry_rate` / `profit_trail_shadow` (2026-10-05).** `skipped_entry_rate`: a ticker skipped because `max_new_entries_per_hour` submissions already went out (skill 61). `profit_trail_shadow`: in shadow mode, the trailing-profit outcome of a closed winner — `actual_exit_pl`, `trail_exit_pl`, `trail_minus_actual`, `peak_pl`, `reason` (skill 30 §3.1b); never a close, never in realized P&L.
 - **`entry_timing_shadow` (2026-10-06).** Shadow entry-timing outcome for one filled entry: `decision` (enter / skip), `cycle`, `actual_net`, `timing_net`, `improvement_usd` (> 0 = the rule would have filled better), `reason` (skill 61). Never a trade.
@@ -198,4 +199,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-10-07.*
+*Last verified against repo HEAD on 2026-10-08.*

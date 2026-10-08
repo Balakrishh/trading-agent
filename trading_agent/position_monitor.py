@@ -16,11 +16,13 @@ trigger a market-order close without waiting for confirmation.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import requests
@@ -61,6 +63,7 @@ class ExitSignal(Enum):
     EXPIRED = "expired"
     DELTA_STOP = "delta_stop"        # Wheel CSP |Δ| ≥ CSP_STOP_ABS_DELTA (debounced)
     STRIKE_DRIFT = "strike_drift"    # calendar: underlying ≥ X % from the strike (debounced)
+    MANUAL = "manual"                # operator close via manual_close.py (skill 63); never set by evaluate()
 
 
 # Signals that bypass the 3-cycle debounce — close immediately
@@ -240,6 +243,30 @@ def attach_wheel_short_deltas(spreads: List[SpreadPosition],
             if c.get("symbol") == s.legs[0].symbol and c.get("delta") not in (None, 0):
                 s.short_delta = float(c["delta"])
                 break
+
+
+def load_trade_plans(plan_dir: str) -> List[Dict]:
+    """Every trade plan in ``plan_dir``, for ``group_into_spreads``.
+
+    Handles two formats:
+      • New  — trade_plan_{TICKER}.json  (state_history array)
+      • Old  — trade_plan_{TICKER}_{TS}.json  (flat dict, legacy)
+    Shared by the agent cycle and the operator close CLI (skill 63).
+    """
+    if not Path(plan_dir).is_dir():
+        return []
+    plans: List[Dict] = []
+    for path in sorted(Path(plan_dir).glob("trade_plan_*.json")):
+        try:
+            data = json.loads(path.read_text())
+            if "state_history" in data:
+                plans.extend(data["state_history"])
+            else:
+                plans.append(data)
+        except Exception as exc:  # noqa: skill-34-exempt — plan-file load failure on one file does not block the others
+            logger.warning("Could not load plan %s: %s", path, exc)
+    logger.info("Loaded %d trade plan(s) from %s", len(plans), plan_dir)
+    return plans
 
 
 class PositionMonitor:
