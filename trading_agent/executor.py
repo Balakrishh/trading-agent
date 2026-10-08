@@ -119,6 +119,33 @@ def realized_pl_from_close(legs, fill_debit: float) -> Optional[float]:
         return None
 
 
+def close_order_prices(legs, quotes: Dict) -> Optional[Tuple[float, float, List[Dict]]]:
+    """Per-share net debit to close ``legs`` at mid and at natural, plus
+    the mleg legs payload. Positive = pay a debit, negative = receive a
+    credit (Alpaca's limit_price sign). Short legs buy back at the ask,
+    long legs sell at the bid. None when any leg lacks a two-sided quote.
+    Shared by the atomic close and the operator close preview (skill 63).
+    """
+    natural = mid = 0.0
+    payload: List[Dict] = []
+    for leg in legs:
+        q = quotes.get(leg.symbol)
+        if not q or float(q.get("bid", 0)) <= 0 or float(q.get("ask", 0)) <= 0:
+            return None
+        bid, ask = float(q["bid"]), float(q["ask"])
+        if leg.qty < 0:      # short → buy to close, pay the ask
+            natural += ask
+            mid += (bid + ask) / 2
+            payload.append({"symbol": leg.symbol, "ratio_qty": "1",
+                            "side": "buy", "position_intent": "buy_to_close"})
+        else:                # long → sell to close, receive the bid
+            natural -= bid
+            mid -= (bid + ask) / 2
+            payload.append({"symbol": leg.symbol, "ratio_qty": "1",
+                            "side": "sell", "position_intent": "sell_to_close"})
+    return mid, natural, payload
+
+
 def _keeps_live_position(entry: Dict) -> bool:
     """A submitted, still-valid run whose expiration has not long passed —
     the position monitor matches open legs to it (``group_into_spreads``)."""
@@ -1049,6 +1076,13 @@ class OrderExecutor:
 
         return summary
 
+    def close_spread_atomic(self, spread) -> Optional[Dict]:
+        """Close with the atomic mleg order only — never the per-leg
+        fallback. The operator close CLI (skill 63) uses this so a
+        manual close can never leg out; ``None`` means nothing filled
+        and the position is unchanged."""
+        return self._close_spread_mleg(spread)
+
     def _close_spread_mleg(self, spread) -> Optional[Dict]:
         """Close all legs with one mleg limit order. Returns the
         ``close_spread`` summary on a full fill, or None to fall back to
@@ -1075,27 +1109,12 @@ class OrderExecutor:
                            spread.underlying, exc)
             return None
 
-        natural = mid = 0.0
-        legs_payload = []
-        for leg in legs:
-            q = quotes.get(leg.symbol)
-            if not q or float(q.get("bid", 0)) <= 0 or float(q.get("ask", 0)) <= 0:
-                logger.warning("[%s] No usable quote for %s — per-leg close",
-                               spread.underlying, leg.symbol)
-                return None
-            bid, ask = float(q["bid"]), float(q["ask"])
-            if leg.qty < 0:      # short → buy to close, pay the ask
-                natural += ask
-                mid += (bid + ask) / 2
-                legs_payload.append({"symbol": leg.symbol, "ratio_qty": "1",
-                                     "side": "buy",
-                                     "position_intent": "buy_to_close"})
-            else:                # long → sell to close, receive the bid
-                natural -= bid
-                mid -= (bid + ask) / 2
-                legs_payload.append({"symbol": leg.symbol, "ratio_qty": "1",
-                                     "side": "sell",
-                                     "position_intent": "sell_to_close"})
+        priced = close_order_prices(legs, quotes)
+        if priced is None:
+            logger.warning("[%s] No usable quote for every leg — per-leg close",
+                           spread.underlying)
+            return None
+        mid, natural, legs_payload = priced
 
         # Alpaca sign convention: positive limit_price = net debit.
         attempts = [("mleg_improved", round((mid + natural) / 2, 2)),

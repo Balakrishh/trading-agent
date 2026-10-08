@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import glob
 import json
 import logging
 import os
@@ -88,7 +87,7 @@ from trading_agent.telegram_notifier import TelegramNotifier
 from trading_agent.journal_reader import JournalReader
 from trading_agent.position_monitor import (
     PositionMonitor, ExitSignal, SpreadPosition, IMMEDIATE_EXIT_SIGNALS,
-    remark_positions_at_mid, attach_wheel_short_deltas,
+    remark_positions_at_mid, attach_wheel_short_deltas, load_trade_plans,
 )
 from trading_agent.order_tracker import OrderTracker
 from trading_agent.llm_client import LLMClient, LLMConfig
@@ -2198,37 +2197,8 @@ class TradingAgent:
         self._cooldown.log_close_success(ticker)
 
     def _load_trade_plans(self) -> List[Dict]:
-        """
-        Load trade plans from the plan directory.
-
-        Handles two formats:
-          • New  — trade_plan_{TICKER}.json  (state_history array)
-          • Old  — trade_plan_{TICKER}_{TS}.json  (flat dict, legacy)
-        """
-        plan_dir = self.config.logging.trade_plan_dir
-        if not os.path.isdir(plan_dir):
-            return []
-
-        plans = []
-        for path in sorted(glob.glob(
-                os.path.join(plan_dir, "trade_plan_*.json"))):
-            try:
-                with open(path) as fh:
-                    data = json.load(fh)
-
-                if "state_history" in data:
-                    # New format: flatten all approved history entries
-                    for entry in data["state_history"]:
-                        plans.append(entry)
-                else:
-                    # Old timestamped format
-                    plans.append(data)
-
-            except Exception as exc:  # noqa: skill-34-exempt — plan-file load failure on one file does not block the others
-                logger.warning("Could not load plan %s: %s", path, exc)
-
-        logger.info("Loaded %d trade plan(s) from %s", len(plans), plan_dir)
-        return plans
+        """Load trade plans from the plan directory (``load_trade_plans``)."""
+        return load_trade_plans(self.config.logging.trade_plan_dir)
 
     # ==================================================================
     # Stage 2: New trade entry
