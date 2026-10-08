@@ -130,7 +130,7 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 
 - [ ] **Rename** away from "credit-spread agent" in everything people read (README, manifest / context, handoff prompt, preset descriptions, dashboard, Telegram, MCP descriptions); keep stored identifiers (journal actions, `net_credit`, class / file / skill names). *(Started 2026-10-07.)*
 - [ ] **Kill switch + drawdown governor.** One command pauses new entries (exits keep running); automatic pause at a daily / weekly loss limit; only a human resumes. *(Started 2026-10-07.)*
-- [ ] **Always-on host + liveness alerts.** Move the agent and data server off the laptop (Mac mini or small cloud VM); dead-man alert when no cycle by 09:50 ET or none for 10 min in session.
+- [ ] **Always-on host + liveness alerts.** Move the agent and data server off the laptop — chosen host: the operator's Raspberry Pi (runbook 08, `deploy/systemd/`, `scripts/migrate_to_pi.sh`, 2026-10-07); dead-man alert when no cycle by 09:50 ET or none for 10 min in session.
 - [ ] **Phone approvals.** Telegram with approve / reject / pause buttons — prerequisite for L1 / L2 away from the terminal.
 - [ ] **Promotion by evidence.** Weekly report from the playbook scorecard and the shadow logs (trailing profit, entry timing, realized-vol POP) with an explicit recommendation per feature, approved through L1.
 - [ ] **Reliable reviewer.** Run the daily / weekly AI review on Claude instead of a local Ollama.
