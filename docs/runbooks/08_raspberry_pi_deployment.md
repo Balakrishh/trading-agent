@@ -70,6 +70,7 @@ systemd *user* services replace the Mac's launchd jobs:
 | `com.trading-agent.headless` | `trading-agent.service` |
 | `com.trading-agent.daily-reviewer` (16:15 weekdays) | `trading-agent-reviewer.timer` → `trading-agent-reviewer.service` |
 | `scripts/restart_streamlit.sh` | `trading-agent-dashboard.service` (optional) |
+| `python -m trading_agent.data_server` (started by hand) | `trading-agent-data-server.service` — Schwab quotes for the MCP tools on `127.0.0.1:8765` |
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -124,6 +125,8 @@ myenv/bin/python -c "from dotenv import load_dotenv; load_dotenv('.env'); from t
 #   → "ok 6.68"; if "expired" / "unauthorized": schwab_oauth login (§9)
 myenv/bin/python -m trading_agent.trading_halt status       # kill switch state carried over
 systemctl --user enable --now trading-agent.service trading-agent-reviewer.timer
+systemctl --user enable --now trading-agent-data-server.service # Schwab quotes for the MCP tools
+curl -s http://127.0.0.1:8765/health                         # → {"status":"ok"…}
 systemctl --user enable --now trading-agent-dashboard.service   # optional: http://myrasberrypi.local:8501
 systemctl --user status trading-agent.service
 tail -f /tmp/trading-agent.headless.err.log                 # outside hours: "Sleeping N seconds until next NYSE open"
@@ -174,7 +177,7 @@ claude                                                        # first run: /logi
 - **Clock:** the Pi has no battery-backed clock; it syncs over the network at boot. The supervisor uses the NYSE calendar and wall-clock time, so a wrong clock before sync only delays the first cycle.
 - **Schwab token expired** (after 7 days without a re-login): quote calls fail and cycles error. Re-login (§9); nothing else needs restarting.
 - **Python 3.11 on Bookworm vs 3.14 on the Mac:** CI tests 3.11, 3.12 and 3.14; the first migration (2026-10-07, Pi 5, Trixie, Python 3.13) passed the full suite.
-- **Schwab data server (skill 47, optional):** `python -m trading_agent.data_server --bind localhost --port 8765` holds its own refresh of the Schwab token. The agent does not use it; only the MCP quote tools do, and they fall back to calling Schwab directly. If you ran it on the Mac, stop it there before the cutover (`pkill -f trading_agent.data_server`) — it refreshes the token and would lock out the Pi.
+- **Schwab data server (skill 47):** runs on the Pi as `trading-agent-data-server.service`, bound to localhost; the MCP quote tools reach it through `SCHWAB_API_BASE_URL=http://127.0.0.1:8765` (bearer key `SCHWAB_API_SERVER_KEY`, both in `.env`). The agent does not use it. It shares the Schwab token file with the agent on the same machine — fine — but must never also run on the Mac: stop it there before the cutover (`pkill -f trading_agent.data_server`). Logs: `/tmp/trading-agent.data-server.err.log`.
 - **macOS rsync** (openrsync) rejects some GNU flags such as `--chmod`; the migration script uses only `-az`, which keeps the token's 600 mode.
 
 ---

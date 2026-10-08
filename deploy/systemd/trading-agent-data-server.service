@@ -1,0 +1,21 @@
+# Schwab data server (skill 47) — read-only quote API on 127.0.0.1:8765.
+# The MCP quote tools call it (SCHWAB_API_BASE_URL in .env); the agent does
+# not need it. It loads .env itself and shares ~/.schwab_tokens.json with
+# the agent on this machine — never run it on a second machine at the same
+# time (the Schwab refresh token rotates on every use).
+[Unit]
+Description=Trading agent Schwab data server (read-only, localhost:8765)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.data_server --bind 127.0.0.1 --port 8765
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=30
+StandardOutput=append:/tmp/trading-agent.data-server.out.log
+StandardError=append:/tmp/trading-agent.data-server.err.log
+
+[Install]
+WantedBy=default.target
