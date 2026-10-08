@@ -149,10 +149,28 @@ claude                                                        # first run: /logi
 - **MCP:** run `/mcp` and check that `trading-agent` is connected; `/portfolio` and `/review` work as before.
 - Not available on the Pi: Claude in Chrome (no browser). Everything else in the repo workflow is the same.
 
+## 8b. Public access to the data server (Tailscale Funnel, optional)
+
+For an LLM or tool outside the tailnet (a cloud-hosted assistant), publish the data server over HTTPS with Tailscale Funnel. Inside the tailnet only, use `tailscale serve` instead (same arguments).
+
+```bash
+sudo tailscale funnel --bg 8765                 # https://<pi>.<tailnet>.ts.net → 127.0.0.1:8765
+tailscale funnel status                         # "Funnel on" + "/ proxy http://127.0.0.1:8765"
+curl https://myrasberrypi.tail58f002.ts.net/health                         # {"status":"ok"}, no key needed
+curl -H "Authorization: Bearer $KEY" https://myrasberrypi.tail58f002.ts.net/price/SPY
+sudo tailscale funnel --https=443 off           # turn it off
+```
+
+- **Survives reboots:** `--bg` saves the setting in tailscaled's state, and `tailscaled` is a system service enabled at boot; no extra unit is needed.
+- **Prerequisite:** the tailnet policy must grant the node the `funnel` attribute (granted for this Pi on 2026-10-08).
+- **The bearer key is the only protection on the public URL.** Keep `SCHWAB_API_SERVER_KEY` set (an empty key means no auth), share it only through your own terminal, and rotate it (edit `.env`, `systemctl --user restart trading-agent-data-server`, update the client) if it leaks. There is no rate limit; a leaked key can use up the Schwab quota the agent relies on, but cannot place orders.
+- Schwab market data is licensed for personal use: keep the URL to your own tools.
+
 ## 9. Day-to-day on the Pi
 
 | Task | Command |
 |---|---|
+| After a reboot: everything back? | `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer`; `curl -s http://127.0.0.1:8765/health`; `tailscale funnel status` |
 | Status / restart / stop the agent | `systemctl --user status|restart|stop trading-agent` (restart only outside market hours) |
 | Pause / resume new entries | `myenv/bin/python -m trading_agent.trading_halt pause --reason "…"` / `resume` |
 | Deploy new code | `git pull && systemctl --user restart trading-agent` (after the close) |
