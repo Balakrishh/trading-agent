@@ -1,0 +1,22 @@
+# Trading agent supervisor — systemd *user* service (Raspberry Pi / Linux).
+# Linux counterpart of ~/Library/LaunchAgents/com.trading-agent.headless.plist.
+# Install: docs/runbooks/08_raspberry_pi_deployment.md §5.
+[Unit]
+Description=Trading agent supervisor (runs a cycle ~every 75 s in NYSE hours)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.agent_supervisor
+Environment=PYTHONUNBUFFERED=1
+# The supervisor forwards SIGTERM to the running cycle, like under launchd.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=always
+RestartSec=60
+StandardOutput=append:/tmp/trading-agent.headless.out.log
+StandardError=append:/tmp/trading-agent.headless.err.log
+
+[Install]
+WantedBy=default.target

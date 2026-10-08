@@ -1,0 +1,13 @@
+# Daily journal reviewer — one shot, started by trading-agent-reviewer.timer.
+# Linux counterpart of ~/Library/LaunchAgents/com.trading-agent.daily-reviewer.plist.
+[Unit]
+Description=Trading agent daily journal reviewer
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.daily_reviewer_main --no-telegram
+Environment=TRADING_AGENT_DAILY_REVIEWER_ENABLED=true
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/tmp/trading-agent.daily-reviewer.out.log
+StandardError=append:/tmp/trading-agent.daily-reviewer.err.log

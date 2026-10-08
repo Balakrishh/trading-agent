@@ -1,0 +1,15 @@
+# Optional: Streamlit dashboard on http://<pi>.local:8501 (LAN only).
+[Unit]
+Description=Trading agent Streamlit dashboard
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/streamlit run trading_agent/streamlit/app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/tmp/trading-agent.dashboard.out.log
+StandardError=append:/tmp/trading-agent.dashboard.err.log
+
+[Install]
+WantedBy=default.target
