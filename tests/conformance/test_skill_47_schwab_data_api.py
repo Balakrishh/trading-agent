@@ -623,3 +623,52 @@ def test_skill_47_describe_key_source(shell, dotenv, source, warns):
     if warning:
         assert "k1" not in warning and "k2" not in warning   # fingerprints only
         assert "env -u SCHWAB_API_SERVER_KEY" in warning
+
+
+# ── 2026-10-08: refuse to start without a strong key (Funnel exposure) ──
+
+@pytest.mark.parametrize("key,allow,refused", [
+    (None, False, True),
+    ("", False, True),
+    ("   ", False, True),
+    (None, True, False),                      # explicit tailnet-only opt-in
+    ("short-key", False, True),
+    ("short-key", True, True),                # opt-in never waives length
+    ("x" * 23, False, True),
+    ("x" * 24, False, False),
+])
+def test_skill_47_key_policy(key, allow, refused):
+    from trading_agent.data_server.__main__ import key_policy_error
+    err = key_policy_error(key, allow)
+    assert (err is not None) is refused
+    if err and (key or "").strip():
+        assert key.strip() not in err          # never echo the key
+
+
+def _run_main_with(monkeypatch, env):
+    import trading_agent.data_server.__main__ as entry
+    for k in ("SCHWAB_API_SERVER_KEY", "SCHWAB_API_ALLOW_NO_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(entry, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(entry, "dotenv_values", lambda *a, **k: {})
+    monkeypatch.setattr(entry, "find_dotenv", lambda *a, **k: "")
+    built = []
+    monkeypatch.setattr(entry, "_build_default_provider",
+                        lambda: built.append(1) or (_ for _ in ()).throw(SystemExit(99)))
+    try:
+        return entry.main([]), built
+    except SystemExit as e:
+        return e.code, built
+
+
+def test_skill_47_main_refuses_without_key(monkeypatch):
+    code, built = _run_main_with(monkeypatch, {})
+    assert code == 4 and built == []           # stops before touching Schwab
+
+
+def test_skill_47_main_proceeds_with_strong_key_or_opt_in(monkeypatch):
+    assert _run_main_with(monkeypatch, {"SCHWAB_API_SERVER_KEY": "k" * 43}) == (99, [1])
+    assert _run_main_with(monkeypatch, {"SCHWAB_API_ALLOW_NO_KEY": "true"}) == (99, [1])
+

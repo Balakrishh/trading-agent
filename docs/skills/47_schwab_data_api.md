@@ -119,7 +119,8 @@ python -m trading_agent.data_server --port 8765 --bind 100.115.216.79
 
 Environment variables the CLI reads:
 
-- `SCHWAB_API_SERVER_KEY` — shared bearer token. Missing → Tailscale-only auth.
+- `SCHWAB_API_SERVER_KEY` — shared bearer token, **required** and at least 24 characters (2026-10-08): the server exits with code 4 at startup when it is missing or short.
+- `SCHWAB_API_ALLOW_NO_KEY` — `true` opts back in to keyless, tailnet-only mode (network gating only). Never combine with Tailscale Funnel. It does not waive the length check for a key that is set.
 - `SCHWAB_API_PORT` — port to bind (default 8765).
 - `SCHWAB_API_BIND` — address to bind (default 127.0.0.1 — you must override for tailnet exposure).
 - `SCHWAB_API_CACHE_ENABLED` — **master cache switch** (default `false`). When false, every price/snapshot/chain request goes live to Schwab; the per-endpoint TTL vars below are ignored. Flip to `true`/`1`/`yes`/`on` when rate limits become a concern.
@@ -159,6 +160,8 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 - **Key source + fingerprint at startup (2026-09-29).** `main()` loads `.env` *before* `ServerConfig.from_env()` (previously the key came only from the launching shell) and logs `API key source=<shell env | shell env (overrides .env) | .env | unset> fingerprint=<sha256[:8]>`. The key itself is never logged. If a shell export shadows a *different* `.env` key it logs a WARNING with both fingerprints and the `env -u SCHWAB_API_SERVER_KEY …` restart command — the stale-export case that made every MCP call 401. Operators compare with `printf %s "$SCHWAB_API_SERVER_KEY" | shasum -a 256 | cut -c1-8` on the client side; `e3b0c442` = empty.
 
+- **Refuses to start without a strong key (2026-10-08).** The server can be published to the internet with Tailscale Funnel (runbook 08 §8b), where the bearer key is the only protection. `key_policy_error()` in `__main__.py` stops startup (exit 4, before the Schwab provider is built) when `SCHWAB_API_SERVER_KEY` is missing, blank or shorter than 24 characters, unless `SCHWAB_API_ALLOW_NO_KEY=true` is set for a tailnet-only server. The error message never echoes the key. Under systemd (`Restart=always`) a refused start retries every 30 s and logs the reason to `/tmp/trading-agent.data-server.err.log` until the key is fixed.
+
 ## 5. Cross-References
 
 - `16_market_data_provider_routing.md` — the underlying provider this server wraps. When the surface routing picks Schwab, we're calling the same code path this server exposes.
@@ -168,4 +171,4 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 ---
 
-*Last verified against repo HEAD on 2026-10-01.*
+*Last verified against repo HEAD on 2026-10-08.*

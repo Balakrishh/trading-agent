@@ -10,7 +10,10 @@ Command line:
     python -m trading_agent.data_server --port 9000
 
 Environment overrides (all optional):
-    SCHWAB_API_SERVER_KEY    — shared bearer token; None → Tailscale-only
+    SCHWAB_API_SERVER_KEY    — shared bearer token (required, ≥ 24 chars;
+                               the server refuses to start without one)
+    SCHWAB_API_ALLOW_NO_KEY  — true → start with no key (network gating
+                               only; never behind Tailscale Funnel)
     SCHWAB_API_PORT          — port to bind (default 8765)
     SCHWAB_API_BIND          — address to bind (default 127.0.0.1)
     SCHWAB_API_PRICE_TTL_SEC — price cache TTL (default 60)
@@ -53,6 +56,32 @@ def _build_default_provider():
 
 
 _KEY_VAR = "SCHWAB_API_SERVER_KEY"
+_ALLOW_NO_KEY_VAR = "SCHWAB_API_ALLOW_NO_KEY"
+MIN_KEY_LENGTH = 24
+EXIT_KEY_POLICY = 4
+
+
+def key_policy_error(api_key: Optional[str], allow_no_key: bool) -> Optional[str]:
+    """Startup refusal reason, or None when the key is acceptable.
+
+    The server may be published to the internet (Tailscale Funnel), where
+    the bearer key is the only protection, so a missing or short key is a
+    hard stop (2026-10-08). ``allow_no_key`` (SCHWAB_API_ALLOW_NO_KEY)
+    opts back in to keyless, network-gated mode; it never waives the
+    length check for a key that *is* set."""
+    key = (api_key or "").strip()
+    if not key:
+        if allow_no_key:
+            return None
+        return (f"{_KEY_VAR} is not set — refusing to start: without it the "
+                f"server answers anyone who can reach it (including through "
+                f"Tailscale Funnel). Set it in .env (e.g. python -c \"import "
+                f"secrets; print(secrets.token_urlsafe(32))\"), or set "
+                f"{_ALLOW_NO_KEY_VAR}=true for a tailnet-only server.")
+    if len(key) < MIN_KEY_LENGTH:
+        return (f"{_KEY_VAR} is only {len(key)} characters — refusing to start; "
+                f"use at least {MIN_KEY_LENGTH} (e.g. secrets.token_urlsafe(32)).")
+    return None
 
 
 def describe_key_source(shell_key: str, dotenv_key: str,
@@ -137,10 +166,16 @@ def main(argv: Optional[List[str]] = None) -> int:
              key_source, key_fingerprint(cfg.api_key))
     if key_warning:
         log.warning(key_warning)
+    from trading_agent.data_server.config import _env_bool
+    refusal = key_policy_error(cfg.api_key, _env_bool(_ALLOW_NO_KEY_VAR, default=False))
+    if refusal:
+        log.error(refusal)
+        return EXIT_KEY_POLICY
     if not cfg.auth_enabled:
         log.warning(
-            "SCHWAB_API_SERVER_KEY is not set — server relies on network "
-            "gating only. Set the env var to require Authorization: Bearer <key>."
+            "SCHWAB_API_SERVER_KEY is not set and %s=true — server relies on "
+            "network gating only. Never publish it with Tailscale Funnel.",
+            _ALLOW_NO_KEY_VAR,
         )
 
     try:
