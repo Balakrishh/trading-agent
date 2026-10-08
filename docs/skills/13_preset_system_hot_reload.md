@@ -305,4 +305,4 @@ self.risk_manager = RiskManager(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-07.*
+*Last verified against repo HEAD on 2026-10-08.*
