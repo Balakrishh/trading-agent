@@ -88,6 +88,7 @@ Logs go to the same places as on the Mac: `logs/trading_agent.log` in the repo, 
 launchctl bootout gui/$(id -u)/com.trading-agent.headless
 launchctl bootout gui/$(id -u)/com.trading-agent.daily-reviewer
 pkill -f 'streamlit run' || true
+pkill -f trading_agent.data_server || true   # Schwab quote server, if you started it
 # Keep them from coming back at the next login:
 mkdir -p ~/trading-agent-launchd-backup
 mv ~/Library/LaunchAgents/com.trading-agent.*.plist ~/trading-agent-launchd-backup/
@@ -118,7 +119,9 @@ It copies, over SSH:
 
 ```bash
 cd ~/Documents/trading-agent
-myenv/bin/python -m trading_agent.schwab_oauth status       # token valid? if not: … schwab_oauth login (§9)
+# Schwab token valid? (the schwab_oauth CLI reads only the shell environment, so load .env first)
+myenv/bin/python -c "from dotenv import load_dotenv; load_dotenv('.env'); from trading_agent.schwab_oauth import SchwabOAuth; s = SchwabOAuth.from_env().authorization_status(); print(s['state'], s.get('refresh_expires_in_days'))"
+#   → "ok 6.68"; if "expired" / "unauthorized": schwab_oauth login (§9)
 myenv/bin/python -m trading_agent.trading_halt status       # kill switch state carried over
 systemctl --user enable --now trading-agent.service trading-agent-reviewer.timer
 systemctl --user enable --now trading-agent-dashboard.service   # optional: http://myrasberrypi.local:8501
@@ -151,7 +154,7 @@ claude                                                        # first run: /logi
 | Pause / resume new entries | `myenv/bin/python -m trading_agent.trading_halt pause --reason "…"` / `resume` |
 | Deploy new code | `git pull && systemctl --user restart trading-agent` (after the close) |
 | Logs | `tail -f logs/trading_agent.log`; `journalctl --user -u trading-agent` |
-| **Schwab re-login — every 7 days** | `myenv/bin/python -m trading_agent.schwab_oauth login`: open the printed URL in the Mac's browser, approve, paste the redirected `https://127.0.0.1:8182/…` URL back into the SSH session |
+| **Schwab re-login — every 7 days** | `set -a; . ./.env; set +a; myenv/bin/python -m trading_agent.schwab_oauth login`: open the printed URL in the Mac's browser, approve, paste the redirected `https://127.0.0.1:8182/…` URL back into the SSH session |
 | Temperature / throttling | `vcgencmd measure_temp` (want < 70 °C); `vcgencmd get_throttled` (want `0x0`) |
 | Disk | `df -h /`; the journal grows ~20 MB a week |
 
@@ -170,7 +173,9 @@ claude                                                        # first run: /logi
 - **Power cut or reboot:** linger + `WantedBy=default.target` start the agent at boot; the supervisor sleeps until the next open. A missed open still goes unnoticed until the liveness alert (backlog §9) exists.
 - **Clock:** the Pi has no battery-backed clock; it syncs over the network at boot. The supervisor uses the NYSE calendar and wall-clock time, so a wrong clock before sync only delays the first cycle.
 - **Schwab token expired** (after 7 days without a re-login): quote calls fail and cycles error. Re-login (§9); nothing else needs restarting.
-- **Python 3.11 on Bookworm vs 3.14 on the Mac:** CI tests 3.11, 3.12 and 3.14.
+- **Python 3.11 on Bookworm vs 3.14 on the Mac:** CI tests 3.11, 3.12 and 3.14; the first migration (2026-10-07, Pi 5, Trixie, Python 3.13) passed the full suite.
+- **Schwab data server (skill 47, optional):** `python -m trading_agent.data_server --bind localhost --port 8765` holds its own refresh of the Schwab token. The agent does not use it; only the MCP quote tools do, and they fall back to calling Schwab directly. If you ran it on the Mac, stop it there before the cutover (`pkill -f trading_agent.data_server`) — it refreshes the token and would lock out the Pi.
+- **macOS rsync** (openrsync) rejects some GNU flags such as `--chmod`; the migration script uses only `-az`, which keeps the token's 600 mode.
 
 ---
 

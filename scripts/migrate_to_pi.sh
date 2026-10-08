@@ -19,12 +19,12 @@ PI_REPO="${PI_REPO:-/home/balakrishh/Documents/trading-agent}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GO=0; [ "${1:-}" = "--go" ] && GO=1
 
-if pgrep -f "trading_agent.agent_supervisor|trading_agent.agent( |$)|streamlit run" >/dev/null; then
+if pgrep -f "trading_agent.agent_supervisor|trading_agent.agent( |$)|trading_agent.data_server|streamlit run" >/dev/null; then
     echo "The agent, its supervisor or Streamlit is still running on this Mac."
     echo "Stop them first (runbook §6.1):"
     echo "  launchctl bootout gui/\$(id -u)/com.trading-agent.headless"
     echo "  launchctl bootout gui/\$(id -u)/com.trading-agent.daily-reviewer"
-    echo "  pkill -f 'streamlit run'"
+    echo "  pkill -f 'streamlit run'; pkill -f trading_agent.data_server"
     exit 1
 fi
 
@@ -49,7 +49,7 @@ done
 
 echo "== Schwab OAuth token → ${PI_HOST}:~/.schwab_tokens.json"
 if [ -f "$HOME/.schwab_tokens.json" ]; then
-    "${RSYNC[@]}" --chmod=F600 "$HOME/.schwab_tokens.json" "${PI_HOST}:.schwab_tokens.json"
+    "${RSYNC[@]}" "$HOME/.schwab_tokens.json" "${PI_HOST}:.schwab_tokens.json"
 else
     echo "  (none on this Mac — run 'python -m trading_agent.schwab_oauth login' on the Pi)"
 fi
