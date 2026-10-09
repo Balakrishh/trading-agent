@@ -277,20 +277,43 @@ def _pos(name, credit, width, pl, natural=None, contracts=1, exp=None):
     return s
 
 
-def mon():
-    return PositionMonitor("k", "s", post_fill_grace_seconds=0)
+def mon(**kw):
+    return PositionMonitor("k", "s", post_fill_grace_seconds=0, **kw)
 
 
 @pytest.mark.parametrize("name,credit,width,pl,expected", [
     (CALL_DEBIT_STRATEGY, -2.0, 5.0, -100.0, ExitSignal.STOP_LOSS),     # 50 % of $200
-    (CALL_DEBIT_STRATEGY, -2.0, 5.0, 150.0, ExitSignal.PROFIT_TARGET),  # 50 % of $300
-    (CALL_DEBIT_STRATEGY, -2.0, 5.0, 140.0, ExitSignal.HOLD),
+    (CALL_DEBIT_STRATEGY, -2.0, 5.0, 100.0, ExitSignal.PROFIT_TARGET),  # 50 % of the $200 debit
+    (CALL_DEBIT_STRATEGY, -2.0, 5.0, 95.0, ExitSignal.HOLD),
     (CALENDAR_STRATEGY, -1.0, 0.0, 25.0, ExitSignal.PROFIT_TARGET),     # 25 % of $100
     (CALENDAR_STRATEGY, -1.0, 0.0, -45.0, ExitSignal.HOLD),
 ])
 def test_debit_exit_rules(name, credit, width, pl, expected):
     sig, _ = mon()._check_exit(_pos(name, credit, width, pl), {}, underlying_price=103.0)
     assert sig == expected
+
+
+@pytest.mark.parametrize("pl,expected", [
+    (150.0, ExitSignal.PROFIT_TARGET),                                  # 50 % of $300 max profit
+    (140.0, ExitSignal.HOLD),
+])
+def test_debit_target_on_max_profit_basis(pl, expected):
+    m = mon(debit_profit_target_basis="max_profit")
+    sig, why = m._check_exit(_pos(CALL_DEBIT_STRATEGY, -2.0, 5.0, pl), {}, underlying_price=103.0)
+    assert sig == expected
+    if sig == ExitSignal.PROFIT_TARGET:
+        assert "of max profit $300.00" in why
+
+
+def test_debit_target_on_cost_scales_with_contracts_and_labels_the_debit():
+    # IWM 2026-10-08: 4 × 1.92 debit = $768 → target $384 (old rule: $616).
+    pos = _pos(PUT_DEBIT_STRATEGY, -1.92, 5.0, 444.0, contracts=4)
+    kind, basis, target = mon().profit_basis(pos)
+    assert kind == "debit_vertical"
+    assert basis == pytest.approx(1232.0)       # max profit stays the trail's yardstick
+    assert target == pytest.approx(384.0)
+    sig, why = mon()._check_exit(pos, {}, underlying_price=273.0)
+    assert sig == ExitSignal.PROFIT_TARGET and "of debit $768.00" in why
 
 
 def test_debit_exit_never_strike_proximity_and_regime_shift():
@@ -452,3 +475,14 @@ def test_calendar_drift_disabled_and_stops_still_win():
         == ExitSignal.HOLD
     sig, _ = mon()._check_exit(_pos(CALENDAR_STRATEGY, -2.0, 0.0, -120.0), {}, underlying_price=120.0)
     assert sig == ExitSignal.STOP_LOSS                         # 50 % of the debit first
+
+
+def test_debit_target_basis_preset_default_summary_and_bad_value():
+    from trading_agent.strategy_presets import _make_custom
+    assert PRESETS["balanced"].debit_profit_target_basis == "debit"
+    assert "TP50% of cost" in PRESETS["balanced"].to_summary_line()
+    legacy = replace(PRESETS["balanced"], debit_profit_target_basis="max_profit")
+    assert "TP50% of max" in legacy.to_summary_line()
+    assert _make_custom({"debit_profit_target_basis": "max_profit"}).debit_profit_target_basis == "max_profit"
+    assert _make_custom({"debit_profit_target_basis": "bogus"}).debit_profit_target_basis == "debit"
+    assert _make_custom({}).debit_profit_target_basis == "debit"   # older preset files

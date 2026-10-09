@@ -2885,9 +2885,17 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         db_e1, db_e2, db_e3, db_e4 = st.columns(4)
         with db_e1:
             debit_tp = st.slider(
-                "Debit TP (% of max profit)", 0.2, 0.9,
+                "Debit TP (%)", 0.2, 0.9,
                 float(getattr(seed, "debit_profit_target_pct", 0.50)), 0.05,
                 key="cust_debit_tp")
+            _tp_bases = ["debit", "max_profit"]
+            debit_tp_basis = st.radio(
+                "Debit TP measured on", _tp_bases,
+                index=_tp_bases.index(getattr(seed, "debit_profit_target_basis", "debit")
+                                      if getattr(seed, "debit_profit_target_basis", "debit")
+                                      in _tp_bases else "debit"),
+                format_func={"debit": "cost (debit paid)", "max_profit": "max profit"}.get,
+                horizontal=True, key="cust_debit_tp_basis")
         with db_e2:
             debit_sl = st.slider(
                 "Debit stop (% of debit)", 0.2, 0.9,
@@ -2934,6 +2942,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "debit_max_overpay":            debit_overpay,
         "debit_min_reward_risk":        debit_min_rr,
         "debit_profit_target_pct":      debit_tp,
+        "debit_profit_target_basis":    debit_tp_basis,
         "debit_stop_loss_pct":          debit_sl,
         "dte_calendar_near":            int(dte_cal_near),
         "calendar_gap_days":            int(cal_gap),

@@ -286,7 +286,7 @@ class PresetConfig:
     debit_long_delta:                  float = 0.50     # |Δ| of the bought leg; sold leg one width_grid_pct step out
     debit_max_overpay:                 float = 0.05     # debit ≤ market mid × 1.05 (liquidity cost)
     debit_min_reward_risk:             float = 1.0      # max profit ÷ debit
-    debit_profit_target_pct:           float = 0.50     # of max profit (verticals)
+    debit_profit_target_pct:           float = 0.50     # verticals; measured against debit_profit_target_basis
     debit_stop_loss_pct:               float = 0.50     # of the debit (verticals + calendars)
     dte_calendar_near:                 int   = 21       # sold leg
     calendar_gap_days:                 int   = 28       # bought leg ≈ near + gap
@@ -294,6 +294,11 @@ class PresetConfig:
     calendar_profit_target_pct:        float = 0.25     # of the debit
     calendar_max_strike_drift_pct:     float = 0.03     # close when the underlying is ≥ 3 % from the strike
     bounce_lookback_days:              int   = 5        # stabilisation = reclaim the N-day high close
+    # What debit_profit_target_pct is a percentage of (2026-10-08):
+    # "debit" — of what was paid (0.50 → close at +50 % on cost);
+    # "max_profit" — of width − debit (the pre-2026-10-08 rule; ≈ +80 % on
+    # cost for a 1.6:1 spread, and IWM's +$444 peak never reached it).
+    debit_profit_target_basis:         str   = "debit"
 
     # ------------------------------------------------------------------
     # Total open-risk cap (added 2026-10-05). Σ max loss of all open
@@ -400,7 +405,9 @@ class PresetConfig:
         if self.debit_spreads_enabled:
             parts.append(f"Debit@{self.dte_debit}d Δ{self.debit_long_delta:.2f} "
                          f"RR≥{self.debit_min_reward_risk:g} "
-                         f"TP{self.debit_profit_target_pct:.0%}/SL{self.debit_stop_loss_pct:.0%}")
+                         f"TP{self.debit_profit_target_pct:.0%} of "
+                         f"{'cost' if self.debit_profit_target_basis == 'debit' else 'max'}"
+                         f"/SL{self.debit_stop_loss_pct:.0%}")
         if self.calendar_enabled:
             parts.append(f"Cal@{self.dte_calendar_near}+{self.calendar_gap_days}d "
                          f"TP{self.calendar_profit_target_pct:.0%} drift≤{self.calendar_max_strike_drift_pct:.0%}")
@@ -650,6 +657,9 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("entry_timing_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid entry_timing_mode %r — using the default",
                        out.pop("entry_timing_mode"))
+    if out.get("debit_profit_target_basis") not in (None, "debit", "max_profit"):
+        logger.warning("Invalid debit_profit_target_basis %r — using the default",
+                       out.pop("debit_profit_target_basis"))
     if out.get("profit_trail_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid profit_trail_mode %r — using the default",
                        out.pop("profit_trail_mode"))

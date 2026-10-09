@@ -296,6 +296,7 @@ class PositionMonitor:
                  profit_target_basis: str = "natural",
                  debit_profit_target_pct: float = 0.50,
                  debit_stop_loss_pct: float = 0.50,
+                 debit_profit_target_basis: str = "debit",
                  calendar_profit_target_pct: float = 0.25,
                  calendar_max_strike_drift_pct: float = 0.03):
         """
@@ -324,6 +325,7 @@ class PositionMonitor:
         # Skill 59 debit structures (PresetConfig.debit_* / calendar_*).
         self.debit_profit_target_pct = debit_profit_target_pct
         self.debit_stop_loss_pct = debit_stop_loss_pct
+        self.debit_profit_target_basis = debit_profit_target_basis
         self.calendar_profit_target_pct = calendar_profit_target_pct
         self.calendar_max_strike_drift_pct = calendar_max_strike_drift_pct
 
@@ -806,7 +808,8 @@ class PositionMonitor:
 
         Returns ``(kind, basis_dollars, target_dollars)`` at position scale:
         * ``credit``          — basis = credit collected, target = profit_target_pct × basis
-        * ``debit_vertical``  — basis = max profit (width − debit), target = debit_profit_target_pct × basis
+        * ``debit_vertical``  — basis = max profit (width − debit); target = debit_profit_target_pct ×
+          the debit paid (``debit_profit_target_basis="debit"``) or × max profit ("max_profit")
         * ``calendar``        — basis = debit paid, target = calendar_profit_target_pct × basis
         * ``wheel``           — basis = credit, target = TAKE_PROFIT_PCT_OF_CREDIT × basis
         """
@@ -816,7 +819,9 @@ class PositionMonitor:
             return "wheel", basis, basis * TAKE_PROFIT_PCT_OF_CREDIT
         if spread.strategy_name in DEBIT_VERTICALS:
             basis = (spread.spread_width + spread.original_credit) * 100 * contracts
-            return "debit_vertical", basis, basis * self.debit_profit_target_pct
+            measure = (-spread.original_credit * 100 * contracts
+                       if self.debit_profit_target_basis == "debit" else basis)
+            return "debit_vertical", basis, measure * self.debit_profit_target_pct
         if spread.strategy_name in DEBIT_STRATEGIES:
             basis = -spread.original_credit * 100 * contracts
             return "calendar", basis, basis * self.calendar_profit_target_pct
@@ -827,7 +832,8 @@ class PositionMonitor:
                           current_regimes: Dict[str, Regime],
                           underlying_price: float = 0.0):
         """Stop at ``debit_stop_loss_pct`` of the debit; profit target at
-        ``debit_profit_target_pct`` of max profit (verticals) or
+        ``debit_profit_target_pct`` of the debit or of max profit (verticals,
+        per ``debit_profit_target_basis``) or
         ``calendar_profit_target_pct`` of the debit (calendars); DTE
         safety on the (near) expiry; regime shift against the thesis."""
         contracts = max(1, spread.contracts_open)
@@ -841,7 +847,9 @@ class PositionMonitor:
                     f"Debit: loss ${loss:.2f} ≥ {self.debit_stop_loss_pct:.0%} of "
                     f"debit ${debit_position:.2f}")
         kind, basis, target = self.profit_basis(spread)
-        if kind == "debit_vertical":
+        if kind == "debit_vertical" and self.debit_profit_target_basis == "debit":
+            label = f"{self.debit_profit_target_pct:.0%} of debit ${debit_position:.2f}"
+        elif kind == "debit_vertical":
             label = f"{self.debit_profit_target_pct:.0%} of max profit ${basis:.2f}"
         else:
             label = f"{self.calendar_profit_target_pct:.0%} of debit ${basis:.2f}"
