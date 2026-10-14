@@ -108,6 +108,7 @@ def _verdict(s: PlaybookStats, min_trades: int) -> Tuple[str, Optional[float]]:
 
 ## 4. Edge Cases / Guardrails
 
+- **Slippage vs mid, not vs the estimate (2026-10-13, backlog C2).** The estimate is the natural price, so `avg_entry_slippage` (fill − estimate) reads ≈ 0 even though every entry paid the bid/ask. `mid_net_credit(legs)` rebuilds the mid from the plan's leg bid / ask at plan time; `RoundTrip.entry_slippage_vs_mid` / `PlaybookStats.avg_entry_slippage_vs_mid` = fill − mid (negative = paid away from mid). `scorecard_dict` adds `entry_cost_vs_mid` over every filled entry, open or closed, in $ — `vs_mid_dollars` is null (and counted in `contracts_unknown`) for rows journalled before the contract count existed, never assumed to be 1. Live check 2026-10-13: SPY −$0.07, QQQ −$0.105, IWM −$0.07, AMZN −$0.20 per share.
 - **Order still working** — left for the next cycle; only runs from the last 3 days with no `estimated_net_credit` are looked up, so a recorded fill is never re-fetched.
 - **Cancelled / expired / rejected with nothing filled** — the run is marked `valid=False` so it cannot claim the legs of a later live position (the 2026-09-30 VZ shadowing bug, now for spreads too).
 - **Broker lookup fails** — counted `unknown`, retried next cycle; reconciliation never raises into the cycle.

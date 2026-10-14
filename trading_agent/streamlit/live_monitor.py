@@ -2767,6 +2767,11 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
             no_entry_before = st.text_input(
                 "No new entries before (ET)", str(getattr(seed, "no_entry_before_et", "09:45")),
                 key="cust_no_entry_before", help="HH:MM, e.g. 09:45. Empty = no window.")
+            no_exit_before = st.text_input(
+                "No debounced exits before (ET)", str(getattr(seed, "no_exit_before_et", "09:45")),
+                key="cust_no_exit_before",
+                help="HH:MM. Profit target, regime shift, delta / debit stops wait until then; "
+                     "hard stop, strike proximity and DTE safety never wait. Empty = no window.")
         with ec3:
             max_entries_hour = st.number_input(
                 "Max new entries per hour", 0, 10,
@@ -2967,6 +2972,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "halt_weekly_loss_pct":         halt_weekly,
         "entry_confirm_cycles":         int(entry_confirm_cycles),
         "no_entry_before_et":           no_entry_before.strip(),
+        "no_exit_before_et":            no_exit_before.strip(),
         "max_new_entries_per_hour":     int(max_entries_hour),
         "entry_rate_scope":             entry_rate_scope,
         "entry_timing_mode":            entry_timing_mode,

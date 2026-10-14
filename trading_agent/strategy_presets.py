@@ -354,6 +354,12 @@ class PresetConfig:
     halt_weekly_loss_pct:              float = 0.05
     entry_confirm_cycles:              int   = 3
     no_entry_before_et:                str   = "09:45"
+    # Exits that are debounced (profit target, regime shift, delta stop,
+    # debit stop, strike drift) wait until this ET time; the open's wide
+    # quotes made the 2026-10-09 VZ delta stop fill at $1.18 vs a $1.045
+    # mark at 09:36. Immediate exits (hard stop, strike proximity, DTE
+    # safety) are never delayed. Empty = no window (skill 30 §4).
+    no_exit_before_et:                 str   = "09:45"
     max_new_entries_per_hour:          int   = 1
     # "sector" (default, 2026-10-06): the hourly limit counts per sector —
     # an AMZN entry holds back other Consumer Discretionary tickers for the
@@ -455,6 +461,7 @@ class PresetConfig:
                 f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
                 f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
                 f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
+                f"Exits from {self.no_exit_before_et or 'open'} • "
                 f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
                 f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
@@ -474,6 +481,7 @@ class PresetConfig:
             f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
             f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
             f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
+                f"Exits from {self.no_exit_before_et or 'open'} • "
             f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
             f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "

@@ -30,11 +30,11 @@ All open items below, grouped by theme and ordered. Older sections keep the hist
 
 ### C. Pay less to get in and out
 - [ ] **C1 Mid-first entry ladder** (10.3) — 10/13 debit near misses were 8–10¢ over the ceiling.
-- [ ] **C2 Slippage vs mid, not vs estimate** (§7).
+- [x] **C2 Slippage vs mid, not vs estimate** (§7). *Done 2026-10-13 — scorecard `entry_cost_vs_mid` (skill 60 §4).*
 
 ### D. Exits and open positions
-- [ ] **D1 No non-emergency exits before 09:45** (10.1).
-- [ ] **D2 Peak / trough P&L for every position from entry** (10.2).
+- [x] **D1 No non-emergency exits before 09:45** (10.1). *Done 2026-10-13 — `no_exit_before_et` (skill 30 §4).*
+- [x] **D2 Peak / trough P&L for every position from entry** (10.2). *Done 2026-10-13 — `position_excursion` rows (skills 30, 19).*
 - [ ] **D3 Wheel puts: stop, roll or accept assignment** (10.4).
 - [ ] **D4 Trailing profit live or not** (§7) — after 2–4 weeks of shadow data.
 - [ ] **D5 Trade repair advisor** (§8).
@@ -44,7 +44,7 @@ All open items below, grouped by theme and ordered. Older sections keep the hist
 - [ ] **E2 Direction-aware sector cap** (10.6).
 - [ ] **E3 Same-ticker add on strong two-model EV**, not only when the open position is profitable.
 - [ ] **E4 Book direction balance** (§7).
-- [ ] **E5 Market-state SPY input** (10.5).
+- [x] **E5 Market-state SPY input** (10.5). *Answered 2026-10-13 — SPY trend and breadth use the prior close by design, VIX is intraday (skill 58 §4).*
 
 ### F. Engineering hygiene
 - [ ] **F1 `scripts/ci_local.sh`** (§7). **F2 Day-replay harness** (§9). **F3 Stage 2 as a gate pipeline** (§9). **F4 Promotion-by-evidence report** (§9). **F5 Delete merged branches** (§4, plus `feat/manual-close`, `feat/data-server-key-guard`, `feat/debit-target-on-cost`).

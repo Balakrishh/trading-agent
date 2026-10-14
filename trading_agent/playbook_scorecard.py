@@ -45,6 +45,10 @@ class RoundTrip:
     risk: Optional[float]        # max loss × contracts at entry ($); None = contracts unknown
     exit_signal: str
     entry_slippage: Optional[float] = None   # filled − estimated net, per share
+    # filled − mid net at plan time, per share (backlog C2): negative =
+    # paid away from mid. The estimate is the natural price, so the
+    # field above reads ~0 even when the bid/ask cost real money.
+    entry_slippage_vs_mid: Optional[float] = None
 
 
 @dataclass
@@ -60,16 +64,32 @@ class PlaybookStats:
     return_on_risk: Optional[float] = None
     risk_known_trades: int = 0
     avg_entry_slippage: Optional[float] = None
+    avg_entry_slippage_vs_mid: Optional[float] = None
     strategies: List[str] = field(default_factory=list)
     exit_signals: Dict[str, int] = field(default_factory=dict)
     verdict: str = ""
     suggested_risk_pct: Optional[float] = None
 
 
-def _fills_by_run(plan_dir: Optional[str]) -> Dict[str, float]:
-    """run_id → filled − estimated net credit, from trade plans whose fill
-    was recorded (``estimated_net_credit`` present)."""
-    out: Dict[str, float] = {}
+def mid_net_credit(legs: Iterable[Dict[str, Any]]) -> Optional[float]:
+    """Net credit at mid (per share, + = credit) from the plan's legs'
+    bid / ask at plan time; None when any leg lacks a two-sided quote.
+    One contract per leg (verticals, condors, butterflies, calendars)."""
+    net, n = 0.0, 0
+    for leg in legs or []:
+        bid, ask = leg.get("bid"), leg.get("ask")
+        if bid is None or ask is None or float(ask) <= 0:
+            return None
+        mid = (float(bid) + float(ask)) / 2
+        net += mid if leg.get("action") == "sell" else -mid
+        n += 1
+    return round(net, 4) if n else None
+
+
+def _fills_by_run(plan_dir: Optional[str]) -> Dict[str, Tuple[float, Optional[float]]]:
+    """run_id → (filled − estimated net, filled − mid net), from trade
+    plans whose fill was recorded (``estimated_net_credit`` present)."""
+    out: Dict[str, Tuple[float, Optional[float]]] = {}
     if not plan_dir:
         return out
     for fp in Path(plan_dir).glob("trade_plan_*.json"):
@@ -81,7 +101,11 @@ def _fills_by_run(plan_dir: Optional[str]) -> Dict[str, float]:
             tp = e.get("trade_plan") or {}
             est = tp.get("estimated_net_credit")
             if est is not None and tp.get("net_credit") is not None:
-                out[str(e.get("run_id", ""))] = round(float(tp["net_credit"]) - float(est), 4)
+                fill = float(tp["net_credit"])
+                mid = mid_net_credit(tp.get("legs") or [])
+                out[str(e.get("run_id", ""))] = (
+                    round(fill - float(est), 4),
+                    None if mid is None else round(fill - mid, 4))
     return out
 
 
@@ -123,7 +147,8 @@ def round_trips(rows: Iterable[Dict[str, Any]], *,
                 risk=(float(ors.get("max_loss") or 0.0) * int(contracts)
                       if contracts else None),
                 exit_signal=str(rs.get("exit_signal") or "?"),
-                entry_slippage=slippage.get(str(ors.get("run_id") or "")),
+                entry_slippage=slippage.get(str(ors.get("run_id") or ""), (None, None))[0],
+                entry_slippage_vs_mid=slippage.get(str(ors.get("run_id") or ""), (None, None))[1],
             ))
     return out
 
@@ -157,6 +182,7 @@ def scorecard(trips: List[RoundTrip], *, min_trades: int = MIN_TRADES) -> List[P
         known = [t for t in ts if t.risk]
         risk = sum(t.risk for t in known)
         slips = [t.entry_slippage for t in ts if t.entry_slippage is not None]
+        mid_slips = [t.entry_slippage_vs_mid for t in ts if t.entry_slippage_vs_mid is not None]
         s = PlaybookStats(
             playbook=pb, trades=len(ts), wins=len(wins),
             win_rate=round(len(wins) / len(ts), 4),
@@ -168,6 +194,8 @@ def scorecard(trips: List[RoundTrip], *, min_trades: int = MIN_TRADES) -> List[P
                             if risk > 0 else None),
             risk_known_trades=len(known),
             avg_entry_slippage=round(sum(slips) / len(slips), 4) if slips else None,
+            avg_entry_slippage_vs_mid=(round(sum(mid_slips) / len(mid_slips), 4)
+                                       if mid_slips else None),
             strategies=sorted({t.strategy for t in ts}),
         )
         for t in ts:
@@ -178,9 +206,37 @@ def scorecard(trips: List[RoundTrip], *, min_trades: int = MIN_TRADES) -> List[P
     return out
 
 
+def entry_cost_vs_mid(rows: Iterable[Dict[str, Any]],
+                      plan_dir: Optional[str]) -> Dict[str, Any]:
+    """Every filled entry (open or closed): fill − mid at plan time, in
+    $ (× 100 × contracts). Negative = paid away from mid (backlog C2)."""
+    fills = _fills_by_run(plan_dir)
+    entries = []
+    for rec in rows:
+        if rec.get("action") != "submitted":
+            continue
+        rs = rec.get("raw_signal") or {}
+        slip = fills.get(str(rs.get("run_id") or ""), (None, None))[1]
+        if slip is None:
+            continue
+        # Rows journalled before 2026-10-05 carry no contract count: the
+        # per-share cost is known, the dollar cost is not (never assume 1).
+        contracts = rs.get("contracts")
+        entries.append({"ticker": rec.get("ticker"), "strategy": rs.get("strategy"),
+                        "opened_utc": rec.get("timestamp"), "contracts": contracts,
+                        "vs_mid_per_share": slip,
+                        "vs_mid_dollars": (round(slip * 100 * int(contracts), 2)
+                                           if contracts else None)})
+    known = [e["vs_mid_dollars"] for e in entries if e["vs_mid_dollars"] is not None]
+    return {"entries": len(entries), "total_vs_mid_dollars": round(sum(known), 2),
+            "contracts_unknown": len(entries) - len(known), "detail": entries}
+
+
 def scorecard_dict(rows: Iterable[Dict[str, Any]], *, plan_dir: Optional[str] = None,
                    min_trades: int = MIN_TRADES) -> Dict[str, Any]:
+    rows = list(rows)
     trips = round_trips(rows, plan_dir=plan_dir)
     return {"round_trips": len(trips), "min_trades": min_trades,
             "playbooks": [asdict(s) for s in scorecard(trips, min_trades=min_trades)],
+            "entry_cost_vs_mid": entry_cost_vs_mid(rows, plan_dir),
             "note": "advisory — suggested_risk_pct is never applied automatically"}

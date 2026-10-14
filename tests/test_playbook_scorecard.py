@@ -89,3 +89,50 @@ def test_unknown_contracts_never_drive_sizing():
     s = scorecard(round_trips(rows))[0]
     assert s.return_on_risk is None and s.risk_known_trades == 0
     assert s.suggested_risk_pct is None and "no sizing suggestion" in s.verdict
+
+
+# ── Slippage vs mid (backlog C2) ─────────────────────────────────────
+
+AMZN_LEGS = [{"symbol": "AMZN261106C00255000", "action": "buy", "bid": 12.35, "ask": 12.6},
+             {"symbol": "AMZN261106C00265000", "action": "sell", "bid": 8.0, "ask": 8.15}]
+
+
+def test_mid_net_credit_from_plan_legs():
+    from trading_agent.playbook_scorecard import mid_net_credit
+    assert mid_net_credit(AMZN_LEGS) == pytest.approx(-4.40)
+    assert mid_net_credit([{"action": "sell", "bid": 1.0, "ask": 0.0}]) is None
+    assert mid_net_credit([]) is None
+
+
+def test_debit_entry_cost_vs_mid_is_reported_even_while_open(tmp_path):
+    """2026-10-06 AMZN call debit: filled 4.60 vs mid 4.40 → −$20, while
+    the estimate-based slippage reads 0 (fill = natural estimate)."""
+    (tmp_path / "trade_plan_AMZN.json").write_text(json.dumps({"state_history": [
+        {"run_id": "r9", "trade_plan": {"net_credit": -4.6, "estimated_net_credit": -4.6,
+                                        "legs": AMZN_LEGS}}]}))
+    rows = [opened("AMZN", "Call Debit Spread", "2026-11-06", run_id="r9")]
+    out = scorecard_dict(rows, plan_dir=str(tmp_path))
+    cost = out["entry_cost_vs_mid"]
+    assert cost["entries"] == 1 and cost["total_vs_mid_dollars"] == pytest.approx(-20.0)
+    assert cost["detail"][0]["vs_mid_per_share"] == pytest.approx(-0.20)
+
+
+def test_round_trip_carries_slippage_vs_mid(tmp_path):
+    (tmp_path / "trade_plan_AMZN.json").write_text(json.dumps({"state_history": [
+        {"run_id": "r9", "trade_plan": {"net_credit": -4.6, "estimated_net_credit": -4.6,
+                                        "legs": AMZN_LEGS}}]}))
+    rows = [opened("AMZN", "Call Debit Spread", "2026-11-06", run_id="r9"),
+            closed("AMZN", "Call Debit Spread", "2026-11-06", 120.0)]
+    pb = scorecard_dict(rows, plan_dir=str(tmp_path))["playbooks"][0]
+    assert pb["avg_entry_slippage"] == pytest.approx(0.0)
+    assert pb["avg_entry_slippage_vs_mid"] == pytest.approx(-0.20)
+
+
+def test_entry_cost_without_contract_count_has_no_dollar_figure(tmp_path):
+    (tmp_path / "trade_plan_AMZN.json").write_text(json.dumps({"state_history": [
+        {"run_id": "r9", "trade_plan": {"net_credit": -4.6, "estimated_net_credit": -4.6,
+                                        "legs": AMZN_LEGS}}]}))
+    rows = [opened("AMZN", "Call Debit Spread", "2026-11-06", run_id="r9", contracts=None)]
+    cost = scorecard_dict(rows, plan_dir=str(tmp_path))["entry_cost_vs_mid"]
+    assert cost["contracts_unknown"] == 1 and cost["total_vs_mid_dollars"] == 0
+    assert cost["detail"][0]["vs_mid_dollars"] is None
