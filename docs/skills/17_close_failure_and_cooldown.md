@@ -238,6 +238,21 @@ attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
 - Each attempt polls `GET /orders/{id}` for up to `CLOSE_FILL_WAIT_S` (15 s), then cancels and re-reads status (a fill can race the cancel).
 - Result carries `close_method` ∈ {`mleg_improved`, `mleg_natural`, `mleg_unresolved`, `per_leg`}.
 
+### `trading_agent/executor.py` — per-leg fallback: fill wait + realized P&L ledger (added 2026-10-14)
+
+```python
+res = self._close_single_leg(leg.symbol)
+...
+closed_now.append({"symbol": leg.symbol, "qty": leg.qty,
+                   "avg_entry_price": leg.avg_entry_price, "order_id": order_id,
+                   "fill_price": self._await_leg_fill(order_id) if order_id else None})
+...
+summary.update(self._settle_per_leg_close(spread, closed_now, all_ok))
+```
+
+- After each successful position DELETE, `_await_leg_fill` polls the market order (up to `CLOSE_FILL_WAIT_S`, never cancels) before the next leg's DELETE, and records its fill price.
+- `_settle_per_leg_close`: on a partial close, the legs that did close go to `trade_plans/partial_close_legs.json` keyed `"{underlying}|{expiration}"` (atomic temp+rename). On the close that finishes the spread, earlier legs (not among the current legs, younger than `PARTIAL_LEDGER_MAX_AGE_DAYS` = 3) are added, missing fills are looked up with `_order_fill_price`, the entry is removed, and `realized_pl = legs_realized_pl(earlier + now)` = Σ (fill − avg entry) × signed qty × 100.
+
 ## 4. Edge Cases / Guardrails
 
 - **Streak is journal-derived, not in-memory.** Pre-2026-05-13 the streak lived in an instance dict (`self._partial_close_count`) — but each cycle subprocess creates a fresh `TradingAgent`, so the dict reset every 5 minutes. The cooldown *never engaged* in production: every partial fill logged "streak 1/3" forever. The 2026-05-12 GLD incident hit 15+ retries; the 2026-05-13 XLF hit 4 before the user noticed and stopped manually. Today's streak is read from the journal on demand — count `close_failed` rows in the last 60 min, reset if a `closed` row appears in between. This works correctly across process restarts because the journal is on disk.
@@ -266,6 +281,8 @@ attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
 - **Partial qty fill then cancel** — mleg fills keep legs at equal remaining qty, so the per-leg fallback closes a still-hedged remainder.
 
 - **Realized P&L from the close fill (2026-10-01)** — on a filled atomic close, `_close_spread_mleg` reads `filled_avg_price` and `realized_pl_from_close(legs, fill_debit)` computes (Σ short `avg_entry_price` − Σ long) − debit, × 100 × contracts, from the broker's entry prices. The agent journals that as `net_unrealized_pl` (the field `JournalReader` reports as realized), keeps the exit-signal mark as `signal_mark_pl`, and tags `pl_source` = `fill` | `signal_mark` (per-leg fallback or missing entry prices). SPY IC: mark −$64 vs real −$176 (entry 0.48, close 0.59 at the natural price, 16 contracts).
+
+- **Per-leg close over two cycles (2026-10-14 QQQ).** Both mleg attempts on the 756/772 call debit were cancelled; the per-leg path bought back the 772 call (+$781), and the 756 DELETE was refused 403 "account not eligible" because the buy-back market order had not filled yet. The next cycle sold the 756 (−$1,201) and journalled −$1,195.50 — the mark of the one remaining leg — instead of −$420. Now each leg's DELETE waits for the previous leg's fill, and the finishing cycle books realized P&L over every leg via the ledger. If any leg's entry or fill price is unknown, `realized_pl` is omitted and the agent keeps the signal mark (`pl_source="signal_mark"`). A ledger entry older than 3 days is ignored (the rest was closed by hand or reconciled). The 10/14 row was corrected by hand to −$420.00 with `pl_source="fill_corrected"` and a `pl_correction` note.
 
 - **Shared close pricing; atomic-only entry point (2026-10-08).** The mid/natural math moved out of `_close_spread_mleg` into module-level `close_order_prices(legs, quotes)` so the operator close preview (skill 63) prices exactly what the order sends. `close_spread_atomic(spread)` runs the mleg path only and returns `None` instead of falling back to per-leg DELETEs; the agent's own `close_spread` is unchanged.
 

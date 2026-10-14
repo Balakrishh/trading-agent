@@ -39,7 +39,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import requests
@@ -70,6 +70,10 @@ ORDER_RETRY_BACKOFF_S = 1.0
 # 15s, inside the cycle's 270s guard. Per-leg DELETE is the last resort.
 CLOSE_FILL_WAIT_S = 15.0
 CLOSE_POLL_INTERVAL_S = 1.0
+# Legs closed by an unfinished per-leg close count toward the realized P&L
+# of the cycle that finishes it only within this window; older entries
+# (the rest was closed by hand) are ignored.
+PARTIAL_LEDGER_MAX_AGE_DAYS = 3
 _ORDER_TERMINAL_FAIL = {"canceled", "cancelled", "rejected", "expired",
                         "done_for_day", "stopped", "suspended"}
 
@@ -117,6 +121,30 @@ def realized_pl_from_close(legs, fill_debit: float) -> Optional[float]:
         return round((credit - float(fill_debit)) * 100 * qtys.pop(), 2)
     except (TypeError, ValueError, AttributeError):
         return None
+
+
+def legs_realized_pl(closed_legs: List[Dict]) -> Optional[float]:
+    """Realized P&L summed leg by leg: Σ (close fill − avg entry) × qty × 100.
+
+    ``closed_legs`` are ``{"qty", "avg_entry_price", "fill_price"}`` dicts
+    (qty signed: short < 0). Used when a spread closes leg by leg,
+    possibly over several cycles. Returns None when any leg lacks an
+    entry or a fill price. 2026-10-14: QQQ 756/772 call debit closed its
+    short leg (+$775) one cycle and its long leg (−$1,195.50) the next;
+    the journal booked only the second leg, −$1,195.50, instead of −$420.
+    """
+    if not closed_legs:
+        return None
+    total = 0.0
+    try:
+        for leg in closed_legs:
+            entry, fill = leg.get("avg_entry_price"), leg.get("fill_price")
+            if entry is None or fill is None:
+                return None
+            total += (float(fill) - float(entry)) * int(leg["qty"]) * 100
+    except (TypeError, ValueError, KeyError):
+        return None
+    return round(total, 2)
 
 
 def close_order_prices(legs, quotes: Dict) -> Optional[Tuple[float, float, List[Dict]]]:
@@ -1052,8 +1080,25 @@ class OrderExecutor:
             key=lambda leg: getattr(leg, "qty", 0),
         )
         results = []
+        closed_now = []
         for leg in ordered_legs:
-            results.append(self._close_single_leg(leg.symbol))
+            res = self._close_single_leg(leg.symbol)
+            results.append(res)
+            if res.get("status") != "closed":
+                continue
+            # Wait for this leg's market order to fill before the next
+            # DELETE: on 2026-10-14 the QQQ long call was refused ("not
+            # eligible to trade uncovered option contracts") because the
+            # short buy-back was still working when its DELETE arrived.
+            body = res.get("response")
+            order_id = body.get("id") if isinstance(body, dict) else None
+            closed_now.append({
+                "symbol": leg.symbol,
+                "qty": int(getattr(leg, "qty", 0) or 0),
+                "avg_entry_price": getattr(leg, "avg_entry_price", None),
+                "order_id": order_id,
+                "fill_price": self._await_leg_fill(order_id) if order_id else None,
+            })
 
         all_ok = all(r.get("status") == "closed" for r in results)
         summary = {
@@ -1066,6 +1111,7 @@ class OrderExecutor:
             "all_closed": all_ok,
             "close_method": "per_leg",
         }
+        summary.update(self._settle_per_leg_close(spread, closed_now, all_ok))
 
         if all_ok:
             logger.info("[%s] Spread CLOSED successfully (%s)",
@@ -1075,6 +1121,94 @@ class OrderExecutor:
                            spread.underlying)
 
         return summary
+
+    # ── Leg-by-leg close ledger (skill 17 §4) ─────────────────────────
+    # Legs closed in a cycle that did not close the whole spread are kept
+    # in ``partial_close_legs.json`` so the cycle that closes the rest can
+    # book the realized P&L of every leg, not only the last ones.
+
+    def _partial_ledger_path(self):
+        from pathlib import Path
+        return Path(self.trade_plan_dir) / "partial_close_legs.json"
+
+    def _load_partial_ledger(self) -> Dict:
+        try:
+            data = json.loads(self._partial_ledger_path().read_text())
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_partial_ledger(self, data: Dict) -> None:
+        fp = self._partial_ledger_path()
+        try:
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            tmp = fp.with_suffix(fp.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(fp)
+        except OSError as exc:
+            logger.warning("Could not write %s: %s", fp, exc)
+
+    @staticmethod
+    def _partial_key(spread) -> str:
+        return f"{spread.underlying}|{getattr(spread, 'expiration', '') or ''}"
+
+    def _settle_per_leg_close(self, spread, closed_now: List[Dict],
+                              all_ok: bool) -> Dict:
+        """Ledger bookkeeping for a per-leg close. On a partial close,
+        remember the legs that did close. On the close that finishes the
+        spread, add the legs closed in earlier cycles and return
+        ``realized_pl`` over all of them (absent when any fill or entry
+        price is unknown — the caller then keeps the signal mark)."""
+        key = self._partial_key(spread)
+        ledger = self._load_partial_ledger()
+        current = {getattr(leg, "symbol", None) for leg in spread.legs}
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=PARTIAL_LEDGER_MAX_AGE_DAYS)).isoformat()
+        earlier = [leg for leg in ledger.get(key, [])
+                   if leg.get("symbol") not in current
+                   and str(leg.get("closed_at", "")) >= cutoff]
+        now = datetime.now(timezone.utc).isoformat()
+        for leg in closed_now:
+            leg["closed_at"] = now
+        if not all_ok:
+            if closed_now:
+                ledger[key] = earlier + closed_now
+                self._save_partial_ledger(ledger)
+            return {}
+        for leg in earlier:
+            if leg.get("fill_price") is None and leg.get("order_id"):
+                leg["fill_price"] = self._order_fill_price(leg["order_id"])
+        if key in ledger:
+            ledger.pop(key)
+            self._save_partial_ledger(ledger)
+        realized = legs_realized_pl(earlier + closed_now)
+        out: Dict = {"closed_legs": earlier + closed_now}
+        if realized is not None:
+            out["realized_pl"] = realized
+        return out
+
+    def _await_leg_fill(self, order_id: str) -> Optional[float]:
+        """Poll a per-leg market close until it fills; return its fill
+        price, or None after ``CLOSE_FILL_WAIT_S`` (never cancels — the
+        position DELETE is a market order that should fill)."""
+        url = f"{self.base_url}/orders/{order_id}"
+        deadline = time.monotonic() + CLOSE_FILL_WAIT_S
+        while True:
+            try:
+                resp = requests.get(url, headers=self._headers(),
+                                    timeout=ALPACA_TIMEOUT_LONG)
+                resp.raise_for_status()
+                body = resp.json()
+                if body.get("status") == "filled":
+                    raw = body.get("filled_avg_price")
+                    return float(raw) if raw not in (None, "") else None
+                if body.get("status") in _ORDER_TERMINAL_FAIL:
+                    return None
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                logger.debug("Leg close order %s poll failed: %s", order_id, exc)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(CLOSE_POLL_INTERVAL_S)
 
     def close_spread_atomic(self, spread) -> Optional[Dict]:
         """Close with the atomic mleg order only — never the per-leg
