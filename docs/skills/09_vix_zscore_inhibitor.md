@@ -76,6 +76,8 @@ if inter_market_inhibit and analysis.regime in (
 
 ## 4. Edge Cases / Guardrails
 
+- **Demotion now depends on `bear_call_enabled` (2026-10-14, skill 59 §4).** With the default `False`, an inhibited bullish / sideways ticker gets no trade (invalid plan "no new bullish premium, and bear calls are off") instead of a bear call spread; `True` restores the demotion described above.
+
 - **VIX feed `None`** — fail-open. `get_vix_zscore()` returning `None` leaves `inter_market_inhibit_bullish = False`. Bull Put proceeds normally. The cost of a false negative (rare) is lower than the cost of false positives across all tickers (frequent).
 - **Asymmetric threshold** — only `z > +2.0` inhibits, not `z < -2.0`. A *falling* VIX is a green light for bullish premium, not a red one. We deliberately don't symmetrize.
 - **Demotion, not refusal** — the strategy still trades. Bear Call benefits from the same realized-vol expansion that hurts Bull Put. This preserves trade count under stress.
