@@ -73,7 +73,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 Code paths under `trading_agent/` that NO skill currently cites. Each is a candidate for either (a) drafting a skill if the concept is non-trivial, or (b) confirming the file is implementation-detail and doesn't warrant a spec.
 
 - `trading_agent/calendar_utils.py` (last modified 2026-05-01)
-- `trading_agent/claude_reviewer.py`
+- `trading_agent/claude_reviewer.py` (last modified 2026-10-13)
 - `trading_agent/config.py` (last modified 2026-04-24)
 - `trading_agent/daily_state.py` (last modified 2026-04-19)
 - `trading_agent/data_server/__main__.py` (last modified 2026-10-08)

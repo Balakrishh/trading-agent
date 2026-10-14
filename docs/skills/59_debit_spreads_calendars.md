@@ -303,4 +303,4 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-08.*
+*Last verified against repo HEAD on 2026-10-14.*
