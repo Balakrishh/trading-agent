@@ -23,8 +23,9 @@ All open items below, grouped by theme and ordered. Older sections keep the hist
 
 ### B. Find real edge
 - [ ] **B1 Shadow book of near misses** — every cycle journal the best rejected candidate per ticker (also when capped: §7 "Evidence while capped") and track its P&L to expiry at natural prices. No orders.
-- [ ] **B2 Calibration study** — over 2019–2026 daily prices, does the realized-vol POP match realized win rates? Price data only.
-- [ ] **B3 Two-model expected value** — trade when EV under realized-vol POP clears a margin and EV under delta POP is not badly negative. Only if B1 + B2 support it.
+- [x] **B2 Calibration study** — over 2019–2026 daily prices, does the realized-vol POP match realized win rates? *Done 2026-10-13 — `scripts/research/calibrate_pop_rv.py`, results in `research_pop_calibration.md`: `pop_rv` calibrated within ~3 pts (overconfident > 0.9); short puts survived 9–11 pts more than implied odds, short calls 2–6 pts less, in both trends.*
+- [ ] **B3 Two-model expected value** — trade when EV under realized-vol POP clears a margin and EV under delta POP is not badly negative. Only if B1 + B2 support it. *B2: supported for the put side only (cap `pop_rv` at 0.90); calls showed no edge — see the research note.*
+- [ ] **B6 Bear call spreads vs put debit spreads in bearish regimes** — B2 found short calls survived 2–6 pts less than implied even in down-trends. Operator decision: prefer put debits, or demand a larger edge buffer on calls; skew condors put-heavy.
 - [ ] **B4 Rank candidates across the watchlist** — best 1–2 a day by EV per $ risk, instead of yes/no per ticker.
 - [ ] **B5 Re-check large-cap option quotes** (§7).
 
