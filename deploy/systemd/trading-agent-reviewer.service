@@ -8,6 +8,10 @@ Type=oneshot
 WorkingDirectory=%h/Documents/trading-agent
 ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.daily_reviewer_main --no-telegram
 Environment=TRADING_AGENT_DAILY_REVIEWER_ENABLED=true
+# Review through the logged-in Claude Code CLI, one session across days
+# (skill 56 §3). %h/.local/bin holds the claude binary.
+Environment=TRADING_AGENT_REVIEWER_LLM=claude_cli
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
 StandardOutput=append:/tmp/trading-agent.daily-reviewer.out.log
 StandardError=append:/tmp/trading-agent.daily-reviewer.err.log

@@ -317,6 +317,12 @@ class StrategyPlanner:
         if inter_market_inhibit and analysis.regime in (
                 Regime.BULLISH, Regime.SIDEWAYS):
             expiration = self._pick_expiration(self.KIND_VERTICAL)
+            if not self._bear_calls_enabled():
+                return self._empty_plan(
+                    ticker, "Bear Call Spread", analysis, expiration,
+                    f"VIX inter-market inhibit (z={getattr(analysis, 'vix_zscore', 0.0):.2f} σ): "
+                    f"no new bullish premium, and bear calls are off "
+                    f"(bear_call_enabled=False, skill 59 §4)")
             logger.info(
                 "[%s] VIX inter-market inhibit (z=%.2f σ) → demoting "
                 "%s to Bear Call Spread, expiration %s",
@@ -348,6 +354,8 @@ class StrategyPlanner:
         #     When both fail the credit plan is returned (stable journal
         #     strategy names) with the fallback's reason appended.
         playbook = self._playbook_name(analysis)
+        if playbook == "bear_call" and not self._bear_calls_enabled():
+            playbook = "put_debit"      # B6: buy the put spread, never sell calls
         if playbook in ("bounce_bull_put", "wait_for_stabilization"):
             replacement = self._plan_playbook(ticker, analysis, playbook)
             if replacement is not None:
@@ -374,6 +382,10 @@ class StrategyPlanner:
             return self._plan_bull_put(ticker, analysis, expiration)
         elif analysis.regime == Regime.BEARISH:
             expiration = self._pick_expiration(self.KIND_VERTICAL)
+            if not self._bear_calls_enabled():
+                return self._empty_plan(
+                    ticker, "Bear Call Spread", analysis, expiration,
+                    "bear calls off (bear_call_enabled=False) — put debit spread instead")
             logger.info("[%s] Planning Bear Call Spread, expiration %s",
                         ticker, expiration)
             return self._plan_bear_call(ticker, analysis, expiration)
@@ -409,6 +421,12 @@ class StrategyPlanner:
     # ------------------------------------------------------------------
     # Playbook routing — skill 59 (backlog §6.3–6.5)
     # ------------------------------------------------------------------
+
+    def _bear_calls_enabled(self) -> bool:
+        """PresetConfig.bear_call_enabled (B6). Planners built without a
+        preset keep the legacy routing."""
+        pre = getattr(self, "preset", None)
+        return True if pre is None else bool(getattr(pre, "bear_call_enabled", True))
 
     @staticmethod
     def _playbook_name(analysis: RegimeAnalysis) -> str:

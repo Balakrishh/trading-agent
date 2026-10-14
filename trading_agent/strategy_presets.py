@@ -282,6 +282,13 @@ class PresetConfig:
     debit_spreads_enabled:             bool  = True
     calendar_enabled:                  bool  = True
     bounce_bull_put_enabled:           bool  = True
+    # Bear call spreads (backlog B6, 2026-10-14). The 2019–2026 calibration
+    # study (docs/plans/research_pop_calibration.md) found short calls
+    # survived 2–6 points LESS often than implied odds, even in down-trends,
+    # while short puts beat them by 9–11. Off: bearish tickers trade put
+    # debit spreads (any volatility), and the VIX inhibit no longer turns
+    # bullish setups into bear calls. True restores the old routing.
+    bear_call_enabled:                 bool  = False
     dte_debit:                         int   = 30
     debit_long_delta:                  float = 0.50     # |Δ| of the bought leg; sold leg one width_grid_pct step out
     debit_max_overpay:                 float = 0.05     # debit ≤ market mid × 1.05 (liquidity cost)
@@ -419,6 +426,7 @@ class PresetConfig:
                          f"TP{self.calendar_profit_target_pct:.0%} drift≤{self.calendar_max_strike_drift_pct:.0%}")
         if self.bounce_bull_put_enabled:
             parts.append(f"Bounce@{self.bounce_lookback_days}d")
+        parts.append("BearCall on" if self.bear_call_enabled else "BearCall off→put debit")
         return " • ".join(parts) if parts else "Debit off"
 
     @property

@@ -2854,6 +2854,12 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Bounce bull put (oversold + stabilised)",
                 value=bool(getattr(seed, "bounce_bull_put_enabled", True)),
                 key="cust_bounce_enabled")
+            bear_call_enabled = st.checkbox(
+                "Sell bear call spreads",
+                value=bool(getattr(seed, "bear_call_enabled", False)),
+                key="cust_bear_call_enabled",
+                help="Off (default): bearish tickers buy put debit spreads instead. "
+                     "2019–2026: short calls survived 2–6 pts less often than implied odds.")
         db_d1, db_d2, db_d3, db_d4 = st.columns(4)
         with db_d1:
             dte_debit = st.number_input(
@@ -2942,6 +2948,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "debit_spreads_enabled":        debit_enabled,
         "calendar_enabled":             calendar_enabled,
         "bounce_bull_put_enabled":      bounce_enabled,
+        "bear_call_enabled":            bool(bear_call_enabled),
         "dte_debit":                    int(dte_debit),
         "debit_long_delta":             debit_long_delta,
         "debit_max_overpay":            debit_overpay,
