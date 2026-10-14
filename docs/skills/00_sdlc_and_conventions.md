@@ -307,4 +307,4 @@ External documents:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-13.*
+*Last verified against repo HEAD on 2026-10-14.*

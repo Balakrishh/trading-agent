@@ -89,4 +89,4 @@ Install (runbook 08 §7): `systemctl --user enable --now trading-agent-liveness.
 
 ---
 
-*Last verified against repo HEAD on 2026-10-13.*
+*Last verified against repo HEAD on 2026-10-14.*

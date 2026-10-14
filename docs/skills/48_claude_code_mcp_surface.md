@@ -148,4 +148,4 @@ The `sh -c` wrapper prefers the repo's `myenv` virtualenv. With a bare `python`,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-13.*
+*Last verified against repo HEAD on 2026-10-14.*

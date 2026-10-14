@@ -199,4 +199,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-10-08.*
+*Last verified against repo HEAD on 2026-10-14.*

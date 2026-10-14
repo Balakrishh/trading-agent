@@ -128,4 +128,4 @@ self._ticker_filters = TickerFilters(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-08.*
+*Last verified against repo HEAD on 2026-10-14.*
