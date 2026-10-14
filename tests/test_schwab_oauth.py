@@ -240,3 +240,50 @@ def test_authorization_status_when_ok(tmp_path):
     assert s["state"] == "ok"
     assert s["access_expires_in_sec"] > 1700
     assert s["refresh_expires_in_days"] > 6.9
+
+
+# ── 7-day clock runs from the browser login (2026-10-13) ─────────────
+
+_TOKEN_BODY = {"access_token": "A2", "refresh_token": "R2",
+               "token_type": "Bearer", "expires_in": 1800}
+
+
+def test_refresh_keeps_the_login_expiry(tmp_path):
+    """A refresh must not restart the 7-day clock — Schwab's limit runs
+    from the browser login, so `status` read ~7 days while the real
+    token was dead."""
+    o = SchwabOAuth("id", "secret", "https://127.0.0.1:8182",
+                    token_path=tmp_path / "tokens.json")
+    login_expiry = time.time() + 3 * 86400
+    o._save(TokenSet(access_token="A", refresh_token="R",
+                     expires_at=time.time() + 30, refresh_expires_at=login_expiry))
+    o._tokens = None
+    with patch("trading_agent.schwab_oauth.requests.post") as post:
+        post.return_value = MagicMock(status_code=200, json=lambda: dict(_TOKEN_BODY))
+        o.get_access_token()
+    saved = json.loads((tmp_path / "tokens.json").read_text())
+    assert saved["refresh_token"] == "R2"
+    assert saved["refresh_expires_at"] == pytest.approx(login_expiry)
+    assert o.refresh_days_left() == pytest.approx(3.0, abs=0.01)
+
+
+def test_login_starts_a_new_seven_day_clock(tmp_path):
+    o = SchwabOAuth("id", "secret", "https://127.0.0.1:8182",
+                    token_path=tmp_path / "tokens.json")
+    with patch("trading_agent.schwab_oauth.requests.post") as post:
+        post.return_value = MagicMock(status_code=200, json=lambda: dict(_TOKEN_BODY))
+        ts = o.exchange_authorization_code("https://127.0.0.1:8182/?code=C0.x%40&session=s")
+    assert ts.refresh_expires_at == pytest.approx(time.time() + 7 * 86400, abs=5)
+
+
+def test_refresh_with_missing_expiry_falls_back_to_seven_days(tmp_path):
+    o = SchwabOAuth("id", "secret", "https://127.0.0.1:8182",
+                    token_path=tmp_path / "tokens.json")
+    ts = o._ingest_token_response(dict(_TOKEN_BODY), refresh_expires_at=0.0)
+    assert ts.refresh_expires_at == pytest.approx(time.time() + 7 * 86400, abs=5)
+
+
+def test_refresh_days_left_none_without_tokens(tmp_path):
+    o = SchwabOAuth("id", "secret", "https://127.0.0.1:8182",
+                    token_path=tmp_path / "missing.json")
+    assert o.refresh_days_left() is None

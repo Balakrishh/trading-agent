@@ -101,6 +101,7 @@ _DEFAULT_HEARTBEAT_EVERY = 12
 _DEDUP_BYPASS_ACTIONS = frozenset({
     "submitted", "dry_run", "closed", "close_failed", "dry_run_close",
     "error",  # errors are rare AND material — dedupe is wrong here
+    "position_excursion",  # one per closed position (backlog D2) — never spam
     "warning",  # connectivity / retry-exhausted / OAuth failures —
                 # operators must see each occurrence as it happens.
     # Skill 34 — every silenced exception is recorded so the EOD

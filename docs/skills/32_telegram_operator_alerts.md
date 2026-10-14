@@ -102,7 +102,7 @@ resp = requests.post(
 )
 ```
 
-A 5-second timeout caps the worst case so a slow Telegram API can't tank a cycle.
+A 5-second timeout caps the worst case so a slow Telegram API can't tank a cycle. A 400 "can't parse entities" triggers one plain-text resend (§4).
 
 ### 3.4 Dedup helper (journal-derived, date-keyed)
 
@@ -202,7 +202,9 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 - **Dedup fail-open.** If the journal can't be read (file corruption, permission, etc.), `_telegram_alert_already_sent_today` returns False — preferring one extra alert over zero. Operator-side noise is recoverable; a missed stuck-position alert is not.
 - **Journal write failure after successful send.** If the alert reaches Telegram but the dedup-journal write fails, the operator may receive a duplicate alert next cycle. Logged at WARNING; intentional fallback because re-attempting an already-delivered alert is harmless.
 - **The `roll_open_failed` alert is always-on (no dedup).** Unlike the other two, a "close filled but open crashed → position flat" event is a rare emergency. The operator MUST see it every time it happens, even if hypothetically the same position rolled-and-failed twice in one day.
-- **HTML formatting via `parse_mode=HTML`.** Telegram's MarkdownV2 has too many escape rules to be safe across arbitrary error strings. HTML uses `<b>`, `<code>`, `<pre>` — easier to construct, escape-free for the strings we send.
+- **HTML formatting via `parse_mode=HTML`.** Telegram's MarkdownV2 has too many escape rules to be safe across arbitrary error strings. HTML uses `<b>`, `<code>`, `<pre>`; every free-text field (reasons, exception messages, sources, reject reasons) goes through `_html_escape`, because a raw `<` makes Telegram reject the whole message (2026-10-13: the EOD summary failed twice on "ratio 0.2333 < minimum 0.25").
+- **Schwab login reminder (2026-10-13).** `notify_schwab_reauth_due(days_left)` (error channel) fires from the after-close path when the Schwab refresh token has ≤ 2 days left or has expired; deduped per UTC day under ticker `__schwab__`, alert type `schwab_reauth_due`. See skill 16 §4.
+- **Plain-text resend.** If Telegram still answers HTTP 400 "can't parse entities", `_send` resends once without `parse_mode`, with tags stripped and entities unescaped (`_html_to_plain`). Any other non-200 is not retried.
 - **Dashboard banner is journal-derived, not agent-process-derived.** A dashboard restart, a stopped agent, or a fresh Streamlit reload still sees the banner if the journal carries today's markers. Single source of truth.
 - **Banner suppressed on clean state.** When no `pdt_blocked_today` markers exist and no `close_cooldown_until` is in the future, `_render_stuck_position_banner` returns before emitting any HTML. No empty placeholder, no scrollbar churn.
 
@@ -216,4 +218,4 @@ Renders one red-bordered HTML block listing every stuck ticker with time, strate
 
 ---
 
-*Last verified against repo HEAD on 2026-10-08.*
+*Last verified against repo HEAD on 2026-10-14.*

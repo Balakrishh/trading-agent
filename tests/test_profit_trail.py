@@ -1,6 +1,7 @@
 """2026-10-05 — trailing profit-taking (arm at target, ceiling, giveback, time)."""
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -121,7 +122,9 @@ def test_shadow_mode_keeps_legacy_close_and_journals_trail_outcome():
     assert _cycle(a, _spread(450)).exit_signal == ExitSignal.PROFIT_TARGET   # legacy close stays
     # Position closed for real → ghost priced: long 13.5 bid − 7.91 = 559, short ask 0 → None
     a._apply_profit_trail([])
-    assert rows == []                                                      # no usable short quote
+    exc = [r for r in rows if r["action"] == "position_excursion"]         # backlog D2
+    assert len(exc) == 1 and exc[0]["raw_signal"]["max_pl"] == 450
+    assert [r for r in rows if r["action"] == "profit_trail_shadow"] == []  # no usable short quote
     a.data_provider = SimpleNamespace(fetch_option_quotes=lambda syms: {
         "QQQ261106C00756000": {"bid": 15.0, "ask": 15.1},
         "QQQ261106C00772000": {"bid": 0.01, "ask": 0.05}})
@@ -149,3 +152,35 @@ def test_credit_floor_binds_when_peak_is_low():
     # peak 101 → 25 % giveback lock 75.75, but the 40 % floor (80) is higher
     _, out = run([101, 85, 80], kind="credit", basis=200, target=100)
     assert out == [pt.HOLD_ARMED, pt.HOLD_ARMED, pt.CLOSE_GIVEBACK]
+
+
+# ── Excursion from entry (backlog D2) ────────────────────────────────
+
+def test_track_excursion_records_best_and_worst():
+    st = pt.TrailState(key="k", ticker="GLD", strategy="Put Debit Spread",
+                       kind="debit_vertical", expiration="2026-11-06")
+    for i, pl in enumerate([-50, 40, -296, 12]):
+        pt.track_excursion(st, pl, now_iso=f"t{i}")
+    assert (st.max_pl, st.max_pl_at, st.min_pl, st.min_pl_at) == (40, "t1", -296, "t2")
+    assert st.first_seen_at == "t0"
+    row = pt.excursion_row(st, -201.0)
+    assert row["exit_pl"] == -201.0 and row["max_pl"] == 40 and row["target_at_arming"] is None
+
+
+def test_excursion_tracked_with_trail_off_and_journalled_on_close():
+    a, rows = _agent("off")
+    _cycle(a, _spread(120))
+    _cycle(a, _spread(-80))
+    a._apply_profit_trail([])
+    exc = [r for r in rows if r["action"] == "position_excursion"]
+    assert len(exc) == 1
+    assert exc[0]["raw_signal"]["max_pl"] == 120 and exc[0]["raw_signal"]["min_pl"] == -80
+    assert pt.load_states() == {}
+
+
+def test_old_state_files_load_without_excursion_fields(tmp_path):
+    p = tmp_path / "trail.json"
+    p.write_text(json.dumps({"k": {"key": "k", "ticker": "QQQ", "strategy": "s",
+                                   "kind": "credit", "expiration": "2026-11-06"}}))
+    st = pt.load_states(p)["k"]
+    assert st.max_pl is None and st.first_seen_at == ""

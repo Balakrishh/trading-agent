@@ -125,6 +125,7 @@ myenv/bin/python -c "from dotenv import load_dotenv; load_dotenv('.env'); from t
 #   → "ok 6.68"; if "expired" / "unauthorized": schwab_oauth login (§9)
 myenv/bin/python -m trading_agent.trading_halt status       # kill switch state carried over
 systemctl --user enable --now trading-agent.service trading-agent-reviewer.timer
+systemctl --user enable --now trading-agent-liveness.timer       # pages Telegram if cycles stop in session (skill 64)
 systemctl --user enable --now trading-agent-data-server.service # Schwab quotes for the MCP tools
 curl -s http://127.0.0.1:8765/health                         # → {"status":"ok"…}
 systemctl --user enable --now trading-agent-dashboard.service   # optional: http://myrasberrypi.local:8501
@@ -170,12 +171,12 @@ sudo tailscale funnel --https=443 off           # turn it off
 
 | Task | Command |
 |---|---|
-| After a reboot: everything back? | `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer`; `curl -s http://127.0.0.1:8765/health`; `tailscale funnel status` |
+| After a reboot: everything back? | `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer`; `curl -s http://127.0.0.1:8765/health`; `tailscale funnel status` |
 | Status / restart / stop the agent | `systemctl --user status|restart|stop trading-agent` (restart only outside market hours) |
 | Pause / resume new entries | `myenv/bin/python -m trading_agent.trading_halt pause --reason "…"` / `resume` |
 | Deploy new code | `git pull && systemctl --user restart trading-agent` (after the close) |
 | Logs | `tail -f logs/trading_agent.log`; `journalctl --user -u trading-agent` |
-| **Schwab re-login — every 7 days** | `set -a; . ./.env; set +a; myenv/bin/python -m trading_agent.schwab_oauth login`: open the printed URL in the Mac's browser, approve, paste the redirected `https://127.0.0.1:8182/…` URL back into the SSH session |
+| **Schwab re-login — every 7 days** (Telegram warns 2 days ahead) | `myenv/bin/python -c "from dotenv import load_dotenv; load_dotenv('.env'); from trading_agent.schwab_oauth import main; raise SystemExit(main(['login']))"`: open the printed URL in the Mac's browser (the URL wraps in the terminal — `ssh … cat` it into `open` if copying fails), approve, and within ~30 s paste the redirected `https://127.0.0.1:8182/…` URL back into the same SSH prompt. Pasting it anywhere else (chat, another machine) is too slow. Check with `… main(['status'])`. |
 | Temperature / throttling | `vcgencmd measure_temp` (want < 70 °C); `vcgencmd get_throttled` (want `0x0`) |
 | Disk | `df -h /`; the journal grows ~20 MB a week |
 
@@ -184,14 +185,14 @@ sudo tailscale funnel --https=443 off           # turn it off
 
 ## 10. Roll back to the Mac
 
-1. On the Pi: `systemctl --user disable --now trading-agent.service trading-agent-reviewer.timer trading-agent-dashboard.service`
+1. On the Pi: `systemctl --user disable --now trading-agent.service trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-dashboard.service`
 2. On the Mac, copy state back:
    `rsync -az balakrishh@myrasberrypi.local:Documents/trading-agent/{trade_journal,trade_plans,daily_reviews,pending_orders,STRATEGY_PRESET.json} ~/trading-agent/` and `rsync -az balakrishh@myrasberrypi.local:.schwab_tokens.json ~/`
 3. `mv ~/trading-agent-launchd-backup/*.plist ~/Library/LaunchAgents/` and `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trading-agent.headless.plist` (same for the reviewer).
 
 ## 11. Edge cases
 
-- **Power cut or reboot:** linger + `WantedBy=default.target` start the agent at boot; the supervisor sleeps until the next open. A missed open still goes unnoticed until the liveness alert (backlog §9) exists.
+- **Power cut or reboot:** linger + `WantedBy=default.target` start the agent at boot; the supervisor sleeps until the next open. If the agent does not cycle by 09:40 ET, or stops for 10 min in session, `trading-agent-liveness.timer` pages the Telegram error channel (skill 64; log `/tmp/trading-agent.liveness.log`). Claude Code sessions started after a reboot no longer need an activated venv for the MCP tools (`.mcp.json` prefers `myenv`, skill 48).
 - **Clock:** the Pi has no battery-backed clock; it syncs over the network at boot. The supervisor uses the NYSE calendar and wall-clock time, so a wrong clock before sync only delays the first cycle.
 - **Schwab token expired** (after 7 days without a re-login): quote calls fail and cycles error. Re-login (§9); nothing else needs restarting.
 - **Python 3.11 on Bookworm vs 3.14 on the Mac:** CI tests 3.11, 3.12 and 3.14; the first migration (2026-10-07, Pi 5, Trixie, Python 3.13) passed the full suite.
@@ -200,4 +201,4 @@ sudo tailscale funnel --https=443 off           # turn it off
 
 ---
 
-*Last verified against repo HEAD on 2026-10-07.*
+*Last verified against repo HEAD on 2026-10-14.*

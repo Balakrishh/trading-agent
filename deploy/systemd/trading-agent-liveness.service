@@ -1,0 +1,13 @@
+# Liveness watchdog — one shot, started by trading-agent-liveness.timer (skill 64).
+# Pages Telegram (error channel) when the agent stops cycling or the data
+# server stops answering during the NYSE session.
+[Unit]
+Description=Trading agent liveness watchdog
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.liveness
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/tmp/trading-agent.liveness.log
+StandardError=append:/tmp/trading-agent.liveness.log

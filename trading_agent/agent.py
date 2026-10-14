@@ -742,6 +742,7 @@ class TradingAgent:
                 self._maybe_send_eod_summary()
             except Exception as exc:                            # noqa: BLE001, skill-34-exempt — EOD recap is best-effort at shutdown; agent already exiting
                 logger.warning("EOD summary attempt failed: %s", exc)
+            self._maybe_warn_schwab_reauth()
             # graceful_exit: we decided to stop; logs + journal are healthy.
             _shutdown.graceful_exit(0, reason="after_hours_shutdown", context={
                 "local_time_et": now_et.isoformat(),
@@ -1174,6 +1175,7 @@ class TradingAgent:
 
         if not positions:
             logger.info("No open option positions found.")
+            self._apply_profit_trail([])   # broker confirms none: settle tracked positions
             return {"total_spreads": 0, "positions": [], "closed": [],
                     "fetch_failed": False}
 
@@ -2076,6 +2078,30 @@ class TradingAgent:
                 exc=exc,
             )
 
+    # Warn this many days before the Schwab refresh token dies. Two days
+    # so at least one after-close check lands inside the window whatever
+    # the login time of day (skill 16 §4).
+    SCHWAB_REAUTH_WARN_DAYS = 2.0
+
+    def _maybe_warn_schwab_reauth(self) -> None:
+        """Page once a day when the weekly Schwab browser login is due.
+
+        Reads the token cache only (never calls Schwab). No Schwab
+        config or no token file → silent: the install doesn't use Schwab.
+        """
+        try:
+            from trading_agent.schwab_oauth import SchwabOAuth
+            days_left = SchwabOAuth.from_env().refresh_days_left()
+        except Exception:                                       # noqa: BLE001, skill-34-exempt — Schwab not configured; nothing to warn about
+            return
+        if days_left is None or days_left > self.SCHWAB_REAUTH_WARN_DAYS:
+            return
+        self._send_telegram_alert(
+            "__schwab__", "schwab_reauth_due",
+            self.telegram.notify_schwab_reauth_due,
+            days_left=round(days_left, 2),
+        )
+
     def _maybe_send_eod_summary(self) -> None:
         """Fire the end-of-day Telegram recap once per trading day.
 
@@ -2443,10 +2469,12 @@ class TradingAgent:
         live: replaces the close-at-target with the trail's decision;
         shadow: leaves exits alone and prices closed winners until the trail
         would have closed, journaling ``profit_trail_shadow``. Stops are
-        never touched. Best-effort: any failure leaves the signals as-is."""
+        never touched. Every position (Wheel and trail-off included) also
+        gets its best / worst P&L tracked, journalled as
+        ``position_excursion`` on close (backlog D2). Best-effort: any
+        failure leaves the signals as-is."""
         mode = str(getattr(self.preset, "profit_trail_mode", "off"))
-        if mode not in ("shadow", "live"):
-            return spreads
+        trail_on = mode in ("shadow", "live")
         from trading_agent import profit_trail as pt
         try:
             params = pt.TrailParams.from_preset(self.preset)
@@ -2456,8 +2484,6 @@ class TradingAgent:
                 if not s.legs:
                     continue
                 kind, basis, target = self.position_monitor.profit_basis(s)
-                if kind == "wheel":
-                    continue
                 key = pt.position_key(l.symbol for l in s.legs)
                 seen.add(key)
                 st = states.get(key) or pt.TrailState(
@@ -2465,6 +2491,11 @@ class TradingAgent:
                     kind=kind, expiration=s.expiration)
                 st.legs = [{"symbol": l.symbol, "qty": int(l.qty),
                             "avg_entry": float(l.avg_entry_price)} for l in s.legs]
+                pt.track_excursion(st, self.position_monitor._profit_pl(s))
+                if kind == "wheel" or not trail_on:   # excursion only (backlog D2)
+                    st.last_pl = round(self.position_monitor._profit_pl(s), 2)
+                    states[key] = st
+                    continue
                 st, decision, reason = pt.evaluate(
                     st, self.position_monitor._profit_pl(s), basis=basis, target=target,
                     params=params, dte=pt.days_to(s.expiration))
@@ -2492,12 +2523,17 @@ class TradingAgent:
         for key, st in list(states.items()):
             if key in seen:
                 continue
-            if mode != "shadow" or not st.armed:
-                del states[key]
-                continue
             if not st.ghost:
                 st.ghost = True
                 st.actual_exit_pl = self._realized_close_pl(st)
+                self.journal_kb.log_signal(
+                    ticker=st.ticker, action="position_excursion", price=0.0,
+                    raw_signal=pt.excursion_row(st, st.actual_exit_pl),
+                    notes=(f"position_excursion: max ${st.max_pl} / min ${st.min_pl}, "
+                           f"exit ${st.actual_exit_pl}"))
+            if mode != "shadow" or not st.armed:
+                del states[key]
+                continue
             if st.shadow_exit_pl is None:
                 dte = pt.days_to(st.expiration)
                 quotes = self.data_provider.fetch_option_quotes([l["symbol"] for l in st.legs]) or {}
@@ -3047,7 +3083,10 @@ class TradingAgent:
 
         Immediate signals (HARD_STOP, STRIKE_PROXIMITY, DTE_SAFETY) bypass
         debounce and return True immediately.  All other signals require
-        the SAME signal on 3 consecutive cycles before this returns True.
+        the SAME signal on 3 consecutive cycles before this returns True,
+        and are held until ``preset.no_exit_before_et`` (09:45 ET) — the
+        votes keep counting, so a confirmed exit goes out on the first
+        cycle after the window opens (skill 30 §4).
         """
         if spread.exit_signal == ExitSignal.HOLD:
             return False
@@ -3067,6 +3106,15 @@ class TradingAgent:
         )
 
         if count >= EXIT_DEBOUNCE_REQUIRED:
+            from trading_agent.entry_confirmation import before_entry_window
+            not_before = str(getattr(self.preset, "no_exit_before_et", "") or "")
+            if not_before and before_entry_window(datetime.now(timezone.utc), not_before):
+                logger.info(
+                    "[%s] Exit signal %s confirmed but held until %s ET "
+                    "(opening quotes too wide)",
+                    spread.underlying, spread.exit_signal.value, not_before,
+                )
+                return False
             logger.warning(
                 "[%s] Exit signal %s confirmed after %d cycles — acting",
                 spread.underlying, spread.exit_signal.value, count,

@@ -272,7 +272,8 @@ def test_skill_48_fundamentals_returns_unavailable_when_server_down(monkeypatch)
 
 
 def test_skill_48_mcp_json_wires_module():
-    """The .mcp.json at repo root wires ``python -m trading_agent.mcp``.
+    """The .mcp.json at repo root wires ``python -m trading_agent.mcp``
+    (venv python when ``myenv`` exists).
     Refactoring the entry point without updating .mcp.json would
     silently break Claude Code auto-discovery.
     """
@@ -280,8 +281,12 @@ def test_skill_48_mcp_json_wires_module():
     root = Path(__file__).resolve().parents[2]
     cfg = json.loads((root / ".mcp.json").read_text())
     entry = cfg["mcpServers"]["trading-agent"]
-    assert entry["command"] == "python"
-    assert entry["args"] == ["-m", "trading_agent.mcp"]
+    assert entry["command"] == "sh"
+    script = entry["args"][-1]
+    # Prefers the repo venv so a shell without an activated venv (e.g.
+    # after a reboot, 2026-10-13) does not start the system Python.
+    assert "exec myenv/bin/python -m trading_agent.mcp" in script
+    assert "exec python -m trading_agent.mcp" in script
 
 
 def test_skill_48_positions_span_days_and_carry_fields(tmp_path, monkeypatch):

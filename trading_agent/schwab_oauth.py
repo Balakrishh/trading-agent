@@ -63,6 +63,9 @@ REFRESH_LEEWAY_SEC = 120
 # VPN issues fail fast; generous read so a slow upstream still completes.
 TOKEN_TIMEOUT = (3, 15)
 
+# Schwab refresh tokens die 7 days after the browser login (absolute).
+REFRESH_LIFETIME_SEC = 7 * 24 * 3600
+
 # Default token cache path.  Override via SCHWAB_TOKEN_PATH env var.
 DEFAULT_TOKEN_PATH = Path.home() / ".schwab_tokens.json"
 
@@ -226,23 +229,30 @@ class SchwabOAuth:
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-    def _ingest_token_response(self, body: dict) -> TokenSet:
+    def _ingest_token_response(self, body: dict,
+                               refresh_expires_at: Optional[float] = None,
+                               ) -> TokenSet:
         """
         Convert a Schwab token-response payload into a :class:`TokenSet`,
         compute absolute expiry epochs, and persist atomically.
+
+        ``refresh_expires_at`` is carried over on a refresh: Schwab's
+        7 days run from the browser login, not from the latest refresh,
+        so only the authorization-code exchange starts a new 7-day clock
+        (2026-10-13: restarting it on every refresh made ``status``
+        always read ~7 days while the real token died silently).
         """
         now = time.time()
         access_lifetime = float(body.get("expires_in", 1800))   # 30 min default
         # Schwab doesn't expose refresh_expires_in; their docs say 7 days.
-        # Compute it from issuance time so the helper can pre-emptively
-        # warn when re-auth is needed.
-        refresh_lifetime_sec = 7 * 24 * 3600   # 7 days
+        if not refresh_expires_at:
+            refresh_expires_at = now + REFRESH_LIFETIME_SEC
 
         ts = TokenSet(
             access_token=str(body.get("access_token", "")),
             refresh_token=str(body.get("refresh_token", "")),
             expires_at=now + access_lifetime,
-            refresh_expires_at=now + refresh_lifetime_sec,
+            refresh_expires_at=refresh_expires_at,
             token_type=str(body.get("token_type", "Bearer")),
             extras={
                 k: v for k, v in body.items()
@@ -255,7 +265,7 @@ class SchwabOAuth:
         logger.info(
             "Schwab tokens refreshed — access expires in %.0f min, "
             "refresh expires in %.1f days. (access=%s, refresh=%s)",
-            access_lifetime / 60, refresh_lifetime_sec / 86400,
+            access_lifetime / 60, (refresh_expires_at - now) / 86400,
             _redact(ts.access_token), _redact(ts.refresh_token),
         )
         return ts
@@ -401,7 +411,8 @@ class SchwabOAuth:
                             "Schwab token refresh succeeded on attempt %d/%d.",
                             attempt, self.REFRESH_MAX_ATTEMPTS,
                         )
-                    return self._ingest_token_response(resp.json())
+                    return self._ingest_token_response(
+                        resp.json(), refresh_expires_at=ts.refresh_expires_at)
 
                 # 4xx (except 429): permanent — refresh token revoked,
                 # client credentials wrong, scope issue.  Stop now.
@@ -487,6 +498,16 @@ class SchwabOAuth:
             )
             self._tokens = self._refresh(self._tokens)
         return self._tokens.access_token
+
+    def refresh_days_left(self) -> Optional[float]:
+        """Days until the refresh token dies (the next browser login is
+        due), or None when no tokens are on disk. Reads the cache only —
+        never calls Schwab."""
+        if self._tokens is None:
+            self._tokens = self._load()
+        if self._tokens is None:
+            return None
+        return (self._tokens.refresh_expires_at - time.time()) / 86400
 
     def authorization_status(self) -> dict:
         """Operator-facing diagnostic — what's our current state?"""

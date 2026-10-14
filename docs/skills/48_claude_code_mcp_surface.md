@@ -109,12 +109,14 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 {
   "mcpServers": {
     "trading-agent": {
-      "command": "python",
-      "args": ["-m", "trading_agent.mcp"]
+      "command": "sh",
+      "args": ["-c", "if [ -x myenv/bin/python ]; then exec myenv/bin/python -m trading_agent.mcp; else exec python -m trading_agent.mcp; fi"]
     }
   }
 }
 ```
+
+The `sh -c` wrapper prefers the repo's `myenv` virtualenv. With a bare `python`, a Claude Code session started from a shell without the venv activated (2026-10-13, after a Pi reboot) launched the system Python, the server died on `ModuleNotFoundError: pandas_market_calendars`, and `/mcp` reported only `CONNECTION_CLOSED`. Without `myenv` it falls back to `python` on `PATH`.
 
 `python -m trading_agent.mcp --list-tools` prints the capability envelope as JSON — the operator (or Claude Code at session start) uses this to confirm the closed set.
 
@@ -123,6 +125,7 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 - **Read-only enforced by AST walker.** `test_skill_48_mcp_readonly.py` parses every `.py` under `trading_agent/mcp/` and rejects any `import`/`from` referencing `trading_agent.executor`, `submit_order`, `place_order`, `alpaca.trading`, or `pending_orders`.
 - **Handler registry is closed and symmetric.** The conformance test asserts `set(_HANDLERS) == set(READONLY_TOOLS)`. A drift is a CI failure.
 - **Data-server fallback is silent-but-explicit.** `_market.get_quote` returns `{"source": "unavailable"}` when `SCHWAB_API_BASE_URL` is unset or unreachable, rather than raising — the LLM sees a structured answer and can decide whether to ask the operator to bring the server up.
+- **Option symbols go to `/quotes`, equities to `/price`** (2026-10-13). `get_quote` matches compact OCC symbols (`GLD261106P00379000`) and POSTs `{"symbols": [sym]}` to the data server's `/quotes` — a read, not an order — returning `bid` / `ask` / `mid` with `price` = mid, or `note: "no quote for this contract"`. Before, option symbols hit `/price`, got HTTP 400 `invalid_ticker`, and read as "data server unreachable".
 - **Backtest parity flag.** `run_scan(backtest=True)` and `score_candidate(...)` route through `decision_engine.decide()` — the same primitive the live agent uses (invariant #3). Never redefine scoring in `trading_agent/mcp/tools/*.py` (invariant #2 — no shadow scorers).
 - **Multi-day journal reads (2026-09-29).** `list_positions()` returns `open_positions` — every submitted spread without a matching close, any open date, with `opened_at`, `width`, `max_loss`, `short_strikes` (from the trade plan by `run_id`; null once aged out of the 200-row history), `order_id`, `status` (`open` | `expired_unrecorded`). `opens_today` is kept for back-compat. `list_recent_trades(days)` honours `days` via `JournalReader.closes_since` and returns `closes` + `realized_pl_window` alongside the legacy `closes_today`. Previously positions were today-only and width/opened_at/pnl were always null (mapped to non-existent attributes).
 - **Errors surface as tool errors, not server errors.** Any exception inside a handler becomes a JSON-RPC error with the exception's type + message. The MCP loop keeps serving; the Claude Code session sees a structured failure.
@@ -145,4 +148,4 @@ The repo ships `.mcp.json` at the root so Claude Code auto-registers the server 
 
 ---
 
-*Last verified against repo HEAD on 2026-10-07.*
+*Last verified against repo HEAD on 2026-10-14.*

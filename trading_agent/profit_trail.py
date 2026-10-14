@@ -72,6 +72,14 @@ class TrailState:
     shadow_exit_pl: Optional[float] = None
     shadow_reason: str = ""
     done: bool = False
+    # Excursion from entry (backlog D2, 2026-10-13): best / worst P&L
+    # seen on any cycle, armed or not, every structure incl. the Wheel.
+    # Journalled as ``position_excursion`` when the position closes.
+    max_pl: Optional[float] = None
+    max_pl_at: str = ""
+    min_pl: Optional[float] = None
+    min_pl_at: str = ""
+    first_seen_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -140,6 +148,31 @@ def evaluate(state: TrailState, profit: float, *, basis: float, target: float,
         return state, CLOSE_TIME, f"trail time stop: {dte} DTE ≤ {params.max_hold_dte}"
     return state, HOLD_ARMED, (f"trail armed: profit ${profit:.2f}, peak "
                                f"${state.peak_pl:.2f}, lock ${lock:.2f}, ceiling ${ceiling:.2f}")
+
+
+def track_excursion(state: TrailState, profit: float,
+                    now_iso: Optional[str] = None) -> TrailState:
+    """Record the best / worst P&L since the position was first seen
+    (every cycle, armed or not). Pure apart from the default clock."""
+    now_iso = now_iso or datetime.now(timezone.utc).isoformat()
+    profit = round(profit, 2)
+    if not state.first_seen_at:
+        state.first_seen_at = now_iso
+    if state.max_pl is None or profit > state.max_pl:
+        state.max_pl, state.max_pl_at = profit, now_iso
+    if state.min_pl is None or profit < state.min_pl:
+        state.min_pl, state.min_pl_at = profit, now_iso
+    return state
+
+
+def excursion_row(state: TrailState, exit_pl: Optional[float]) -> Dict[str, Any]:
+    """``raw_signal`` of the ``position_excursion`` journal row."""
+    return {"strategy": state.strategy, "kind": state.kind,
+            "expiration": state.expiration, "first_seen_at": state.first_seen_at,
+            "max_pl": state.max_pl, "max_pl_at": state.max_pl_at,
+            "min_pl": state.min_pl, "min_pl_at": state.min_pl_at,
+            "last_pl": state.last_pl, "exit_pl": exit_pl,
+            "target_at_arming": state.target or None}
 
 
 def ghost_profit(legs: List[Dict[str, Any]], quotes: Dict[str, Dict[str, float]]) -> Optional[float]:
