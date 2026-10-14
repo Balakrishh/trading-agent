@@ -742,6 +742,7 @@ class TradingAgent:
                 self._maybe_send_eod_summary()
             except Exception as exc:                            # noqa: BLE001, skill-34-exempt — EOD recap is best-effort at shutdown; agent already exiting
                 logger.warning("EOD summary attempt failed: %s", exc)
+            self._maybe_warn_schwab_reauth()
             # graceful_exit: we decided to stop; logs + journal are healthy.
             _shutdown.graceful_exit(0, reason="after_hours_shutdown", context={
                 "local_time_et": now_et.isoformat(),
@@ -2075,6 +2076,30 @@ class TradingAgent:
                 source="agent._maybe_run_portfolio_review",
                 exc=exc,
             )
+
+    # Warn this many days before the Schwab refresh token dies. Two days
+    # so at least one after-close check lands inside the window whatever
+    # the login time of day (skill 16 §4).
+    SCHWAB_REAUTH_WARN_DAYS = 2.0
+
+    def _maybe_warn_schwab_reauth(self) -> None:
+        """Page once a day when the weekly Schwab browser login is due.
+
+        Reads the token cache only (never calls Schwab). No Schwab
+        config or no token file → silent: the install doesn't use Schwab.
+        """
+        try:
+            from trading_agent.schwab_oauth import SchwabOAuth
+            days_left = SchwabOAuth.from_env().refresh_days_left()
+        except Exception:                                       # noqa: BLE001, skill-34-exempt — Schwab not configured; nothing to warn about
+            return
+        if days_left is None or days_left > self.SCHWAB_REAUTH_WARN_DAYS:
+            return
+        self._send_telegram_alert(
+            "__schwab__", "schwab_reauth_due",
+            self.telegram.notify_schwab_reauth_due,
+            days_left=round(days_left, 2),
+        )
 
     def _maybe_send_eod_summary(self) -> None:
         """Fire the end-of-day Telegram recap once per trading day.

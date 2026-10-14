@@ -38,6 +38,7 @@ from __future__ import annotations
 import html as _html
 import logging
 import os
+import re
 from typing import Optional
 
 import requests
@@ -46,6 +47,15 @@ import requests
 def _html_escape(text: str) -> str:
     """Escape <, >, & for safe inclusion inside a Telegram HTML payload."""
     return _html.escape(text or "", quote=False)
+
+
+_TAG_RE = re.compile(r"</?(?:b|i|u|s|code|pre|a)(?:\s[^>]*)?>")
+
+
+def _html_to_plain(text: str) -> str:
+    """Drop our formatting tags and unescape entities — the plain-text
+    resend when Telegram cannot parse a message's HTML (skill 32 §4)."""
+    return _html.unescape(_TAG_RE.sub("", text or ""))
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +213,20 @@ class TelegramNotifier:
             )
             if resp.status_code == 200:
                 return True
+            if resp.status_code == 400 and "can't parse entities" in resp.text:
+                # A stray '<' in a free-text field broke the HTML. Resend
+                # once as plain text so the alert still arrives.
+                logger.warning(
+                    "Telegram rejected HTML (channel=%s): %s — resending "
+                    "as plain text", channel, resp.text[:200],
+                )
+                plain = {"chat_id": chat_id, "text": _html_to_plain(text),
+                         "disable_web_page_preview": True}
+                resp = requests.post(
+                    url, json=plain, timeout=_TELEGRAM_TIMEOUT_SEC,
+                )
+                if resp.status_code == 200:
+                    return True
             logger.warning(
                 "Telegram sendMessage non-200 (%s, channel=%s): %s",
                 resp.status_code, channel, resp.text[:200],
@@ -234,9 +258,46 @@ class TelegramNotifier:
         """Kill switch / drawdown governor paused new entries (backlog §9)."""
         return self._send(
             "🛑 <b>New entries paused</b>\n"
-            f"{reason}\n"
+            f"{_html_escape(reason)}\n"
             "Exits, stops and profit-taking keep running. Resume with "
             "<code>python -m trading_agent.trading_halt resume</code>.",
+            channel="error")
+
+    def notify_agent_down(self, reason: str) -> bool:
+        """Liveness watchdog (skill 64): the agent stopped cycling in session."""
+        return self._send(
+            f"🔴 <b>Agent not running</b>\n{_html_escape(reason)}\n\n"
+            "<b>What to do</b> (on the Pi):\n"
+            "• <code>systemctl --user status trading-agent "
+            "trading-agent-data-server</code>\n"
+            "• <code>tail -50 ~/Documents/trading-agent/logs/"
+            "trading_agent.log</code>\n"
+            "• <code>systemctl --user restart trading-agent</code> once the "
+            "cause is clear. Open positions are not being monitored until "
+            "it runs again.",
+            channel="error")
+
+    def notify_agent_recovered(self, since_iso: str) -> bool:
+        """Liveness watchdog (skill 64): healthy again after a page."""
+        return self._send(
+            "🟢 <b>Agent running again</b>\n"
+            f"Outage first seen at <code>{_html_escape(since_iso[:16])}Z</code>.",
+            channel="error")
+
+    def notify_schwab_reauth_due(self, days_left: float) -> bool:
+        """Schwab refresh token dies soon — a browser login is due."""
+        when = ("has <b>expired</b>" if days_left <= 0
+                else f"expires in <b>{days_left * 24:.0f} h</b>")
+        return self._send(
+            f"🔑 <b>Schwab login due</b>\nThe Schwab refresh token {when}. "
+            "Without a new login the agent loses Schwab quotes and falls "
+            "back to broker marks.\n\n<b>What to do</b> (on the Pi, in "
+            "~/Documents/trading-agent):\n<code>myenv/bin/python -c \"from "
+            "dotenv import load_dotenv; load_dotenv('.env'); from "
+            "trading_agent.schwab_oauth import main; "
+            "raise SystemExit(main(['login']))\"</code>\n"
+            "Open the printed URL, approve, paste the redirect URL back "
+            "within ~30 s. Runbook 08 §9.",
             channel="error")
 
     def notify_pdt_block(self, ticker: str, strategy: str,
@@ -249,7 +310,7 @@ class TelegramNotifier:
             f"(pattern day trading protection).\n\n"
             f"<b>Strategy:</b> {strategy}\n"
             f"<b>Exit signal:</b> {exit_signal}\n"
-            f"<b>Reason:</b> {exit_reason}\n"
+            f"<b>Reason:</b> {_html_escape(exit_reason)}\n"
             f"<b>Equity:</b> ${account_balance:,.2f} (sub-$25K = PDT-restricted)\n\n"
             f"<b>What to do</b>\n"
             f"• Auto-close is suppressed for {ticker} until UTC midnight.\n"
@@ -270,7 +331,7 @@ class TelegramNotifier:
             f"<b>Strategy:</b> {strategy}\n"
             f"<b>Streak:</b> {streak}/{threshold} consecutive partial fills\n"
             f"<b>Auto-close suppressed until:</b> <code>{cooldown_until_iso}</code>\n"
-            f"<b>Failed legs:</b> <code>{failed_legs}</code>\n\n"
+            f"<b>Failed legs:</b> <code>{_html_escape(failed_legs)}</code>\n\n"
             f"<b>What to do</b>\n"
             f"• Open Alpaca UI → Positions → {ticker} → Close manually.\n"
             f"• Or wait for the cooldown to expire and retry will resume.\n"
@@ -289,7 +350,7 @@ class TelegramNotifier:
             f"replacement order failed to submit. The position is "
             f"<b>flat</b> (no exposure), not doubled.\n\n"
             f"<b>Strategy:</b> {strategy}\n"
-            f"<b>Open failure reason:</b> <code>{reason[:300]}</code>\n\n"
+            f"<b>Open failure reason:</b> <code>{_html_escape(reason[:300])}</code>\n\n"
             f"<b>What to do</b>\n"
             f"• Check Alpaca UI: confirm {ticker} has no legs.\n"
             f"• Re-open manually if desired, or let the next cycle "
@@ -312,9 +373,9 @@ class TelegramNotifier:
         ticker_line = f"<b>Ticker:</b> {ticker}\n" if ticker else ""
         text = (
             f"⚠️ <b>Silenced exception: {exc_class}</b>\n"
-            f"<b>Source:</b> <code>{source}</code>\n"
+            f"<b>Source:</b> <code>{_html_escape(source)}</code>\n"
             f"{ticker_line}"
-            f"<b>Message:</b> <code>{message[:200]}</code>\n\n"
+            f"<b>Message:</b> <code>{_html_escape(message[:200])}</code>\n\n"
             f"<b>What to do</b>\n"
             f"• Check <code>logs/trading_agent.log</code> for the "
             f"full traceback around the most recent occurrence.\n"
@@ -481,7 +542,7 @@ class TelegramNotifier:
             )
             for s in stuck_tickers:
                 lines.append(
-                    f"• {s.get('ticker','?')} — {s.get('reason','?')}"
+                    f"• {s.get('ticker','?')} — {_html_escape(str(s.get('reason','?')))}"
                 )
             lines.append(
                 "<i>Close in Alpaca UI tonight or accept day-trade flag.</i>"
@@ -504,8 +565,8 @@ class TelegramNotifier:
                 lines.append(
                     f"• <code>{s.get('exc_class','?')}</code> × "
                     f"{s.get('count',1)}{ticker_tag}\n"
-                    f"  └ {s.get('source','?')}: "
-                    f"<i>{(s.get('last_message','') or '')[:80]}</i>"
+                    f"  └ {_html_escape(str(s.get('source','?')))}: "
+                    f"<i>{_html_escape((s.get('last_message','') or '')[:80])}</i>"
                 )
             if len(silenced_exceptions) > 5:
                 lines.append(
@@ -528,7 +589,7 @@ class TelegramNotifier:
                 # Keep the message readable — long technical reasons are
                 # truncated; the journal has the full text if needed.
                 short = reason if len(reason) <= 80 else reason[:77] + "…"
-                lines.append(f"• <code>{count}×</code> {short}")
+                lines.append(f"• <code>{count}×</code> {_html_escape(short)}")
             if len(reject_reasons) > 5:
                 lines.append(
                     f"<i>… and {len(reject_reasons) - 5} more in "
@@ -639,7 +700,7 @@ class TelegramNotifier:
             f"{emoji} <b>{ticker} {strategy} CLOSED</b>\n"
             f"<b>Result:</b> {outcome}\n"
             f"<b>Exit signal:</b> {exit_signal}\n"
-            f"<b>Reason:</b> <i>{exit_reason[:200]}</i>\n\n"
+            f"<b>Reason:</b> <i>{_html_escape(exit_reason[:200])}</i>\n\n"
             f"<b>Original credit:</b> ${original_credit:.2f}  ·  "
             f"<b>Max loss:</b> ${max_loss:.2f}"
         )

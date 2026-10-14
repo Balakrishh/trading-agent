@@ -6,6 +6,59 @@ Open work for the trading agent, in priority order within each group. Each code 
 
 ---
 
+## Plan of record (2026-10-13) — read this first
+
+All open items below, grouped by theme and ordered. Older sections keep the history and detail; IDs here point to them.
+
+**Why no trades (2026-10-13 analysis):** the scorer's win probability is the option delta, i.e. the market's own odds, so a spread's expected value is ≈ 0 before costs and slightly negative after the bid/ask — near misses of −6¢ to −7.5¢/share every day. Edge has to come from an independent probability (realized volatility vs implied: XLF condor POP 46.5 % by delta vs 71.4 % by 20-day realized vol), from paying less to get in (C), and from gates that stop blocking trades the market supports (E). B1 + B2 produce the evidence before anything loosens.
+
+### A. Keep it running
+- [x] **A1 Schwab 7-day clock from the login, not the last refresh; Telegram reminder ≤ 2 days before** (skill 16 §4). *Done 2026-10-13.*
+- [x] **A2 Telegram HTML escaping + plain-text resend** — the 10/13 EOD summary failed twice on a raw `<` (skill 32 §4). *Done 2026-10-13.*
+- [x] **A3 `.mcp.json` prefers `myenv`** — after a reboot the bare `python` was the system Python and `/mcp` failed with `CONNECTION_CLOSED` (skill 48). *Done 2026-10-13.*
+- [x] **A4 MCP `get_quote` for option symbols** via `/quotes` (skill 48). *Done 2026-10-13.*
+- [x] **A5 Liveness watchdog** — Telegram page when no cycle for 10 min in session (from 09:40 ET) or the data server is down (skill 64). *Done 2026-10-13; enable `trading-agent-liveness.timer` on deploy.*
+- [ ] **A6 Daily review on Claude, not Ollama** (§9 "Reliable reviewer") — empty 6 days running. Needs an operator decision: Anthropic API key in `.env`, or the logged-in `claude -p` CLI on the Pi.
+- [ ] **A7 Telegram buttons** (§9 "Phone approvals") — pause / resume / status first; order approvals only after a separate safety review.
+
+### B. Find real edge
+- [ ] **B1 Shadow book of near misses** — every cycle journal the best rejected candidate per ticker (also when capped: §7 "Evidence while capped") and track its P&L to expiry at natural prices. No orders.
+- [ ] **B2 Calibration study** — over 2019–2026 daily prices, does the realized-vol POP match realized win rates? Price data only.
+- [ ] **B3 Two-model expected value** — trade when EV under realized-vol POP clears a margin and EV under delta POP is not badly negative. Only if B1 + B2 support it.
+- [ ] **B4 Rank candidates across the watchlist** — best 1–2 a day by EV per $ risk, instead of yes/no per ticker.
+- [ ] **B5 Re-check large-cap option quotes** (§7).
+
+### C. Pay less to get in and out
+- [ ] **C1 Mid-first entry ladder** (10.3) — 10/13 debit near misses were 8–10¢ over the ceiling.
+- [ ] **C2 Slippage vs mid, not vs estimate** (§7).
+
+### D. Exits and open positions
+- [ ] **D1 No non-emergency exits before 09:45** (10.1).
+- [ ] **D2 Peak / trough P&L for every position from entry** (10.2).
+- [ ] **D3 Wheel puts: stop, roll or accept assignment** (10.4).
+- [ ] **D4 Trailing profit live or not** (§7) — after 2–4 weeks of shadow data.
+- [ ] **D5 Trade repair advisor** (§8).
+
+### E. Gates that block good trades
+- [ ] **E1 Breadth from the 11 sector SPDRs** (§7) — CAUTION 3 sessions on 4 of 8 tickers with VIX 15.
+- [ ] **E2 Direction-aware sector cap** (10.6).
+- [ ] **E3 Same-ticker add on strong two-model EV**, not only when the open position is profitable.
+- [ ] **E4 Book direction balance** (§7).
+- [ ] **E5 Market-state SPY input** (10.5).
+
+### F. Engineering hygiene
+- [ ] **F1 `scripts/ci_local.sh`** (§7). **F2 Day-replay harness** (§9). **F3 Stage 2 as a gate pipeline** (§9). **F4 Promotion-by-evidence report** (§9). **F5 Delete merged branches** (§4, plus `feat/manual-close`, `feat/data-server-key-guard`, `feat/debit-target-on-cost`).
+
+### G. Operator
+- [ ] Schwab re-login by **Tue 2026-10-20 ~08:58 ET** (Telegram now warns 2 days ahead). Refresh the June holdings paste. Confirm the rotated data-server token is the only valid one.
+
+### H. Later
+- [ ] Quality + momentum stock sleeve (§3).
+
+**Order:** this week A + D1/D2/C2/E5 + B1/B2 (no trading change) → next week C1, E1 → from 10/26 B3/B4 if the evidence supports them, then E2/E3 → later D3/D4, A6/A7, D5, F.
+
+---
+
 ## 0. This week — observe before building (2026-09-30 → 2026-10-02)
 
 The agent runs unchanged all week on the paper account. The goal is to learn from the journal, not to add features.
@@ -19,8 +72,8 @@ The agent runs unchanged all week on the paper account. The goal is to learn fro
 | Fri 2026-10-02 16:47 ET | Claude weekly review via `journal-analyst` | "Week 1 results" in `journal_learnings.md`; §0 ticked; next-build recommendation | Claude Code session job (one-shot) |
 
 - [x] Fix: `daily_reviewer --date` reviewed the current day instead of the requested one (`JournalReader(as_of=...)`, 2026-09-30).
-- [ ] The daily reviewer's LLM step needs Ollama running at `LLM_BASE_URL` (not running on 2026-09-30, so reviews contain stats only). Start Ollama, or accept stats-only reviews since the 16:22 Claude review covers the analysis.
-- [ ] Add Telegram tokens, then drop `--no-telegram` from the installed plist to get the digest on your phone.
+- [x] *(Superseded by A6.)* The daily reviewer's LLM step needs Ollama running at `LLM_BASE_URL` (not running on 2026-09-30, so reviews contain stats only). Start Ollama, or accept stats-only reviews since the 16:22 Claude review covers the analysis.
+- [x] *(Done — Telegram alerts deliver since 10/05.)* Add Telegram tokens, then drop `--no-telegram` from the installed plist to get the digest on your phone.
 
 - [x] **Every morning:** `/portfolio` — open positions, fills, alerts, `cycle_minute_count_today` > 0 after 09:45 ET.
 - [x] **Every evening:** `/review` (skill 56) — reject-reason histogram, exits, errors.
@@ -78,7 +131,7 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 
 ## 5. Operator actions (not code)
 
-- [ ] Add Telegram bot tokens to `.env` so outages and errors page you.
+- [x] *(Done.)* Add Telegram bot tokens to `.env` so outages and errors page you.
 - [x] Reconcile the July XLE iron condor P&L from the old paper account's order history. *(2026-10-05: history unreachable (account replaced; strikes and size not in the journal, trade plan rotated) → `position_reconciled` row with P&L unknown via `trading_agent/journal_reconcile.py`; if you recover the P&L from the old account, append the real close with `--realized-pl`.)*
 - [ ] Refresh the June holdings paste in the dashboard.
 - [ ] Confirm the rotated data-server token is the only valid one.
@@ -94,7 +147,7 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 - [ ] **Run CI's exact pytest command locally.** `pytest -q` hid an INTERNALERROR that `pytest -v --maxfail=10` (CI) hit. Add `scripts/ci_local.sh` mirroring every CI step in a clean `env -i` worktree, and use it before every push.
 - [ ] **Trailing profit: decide live vs not.** `profit_trail_mode` is `shadow` since 2026-10-05; after 2–4 weeks compare `profit_trail_shadow` rows (`trail_minus_actual`) per structure and switch the winners to `live` (likely debit spreads first).
 - [ ] **Re-check large-cap option quotes** (AAPL, MSFT, GOOGL, JPM, V, MA, XOM had 7–41 % median leg spreads mid-day on 10/05) at 10:00 and 15:30 ET; if they tighten, add the ones that pass the quality screen (§6.7).
-- [ ] *(Operator)* **Keep the Mac awake for the session:** `sudo pmset repeat wakeorpoweron MTWRF 09:15:00` and no sleep on power during 09:15–16:10 ET. The supervisor fix only helps once the machine is awake.
+- [x] *(Obsolete — the agent runs on the Pi since 10/07.)* *(Operator)* **Keep the Mac awake for the session:** `sudo pmset repeat wakeorpoweron MTWRF 09:15:00` and no sleep on power during 09:15–16:10 ET. The supervisor fix only helps once the machine is awake.
 
 ## 8. Trade repair advisor — fix losing trades with the same intelligence (added 2026-10-06)
 
@@ -128,14 +181,25 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 | L1 propose | stages; a human approves | Wheel orders, preset proposals, shadow → live promotions, new playbooks |
 | L0 observe | logs only | anything new (shadow) |
 
-- [ ] **Rename** away from "credit-spread agent" in everything people read (README, manifest / context, handoff prompt, preset descriptions, dashboard, Telegram, MCP descriptions); keep stored identifiers (journal actions, `net_credit`, class / file / skill names). *(Started 2026-10-07.)*
-- [ ] **Kill switch + drawdown governor.** One command pauses new entries (exits keep running); automatic pause at a daily / weekly loss limit; only a human resumes. *(Started 2026-10-07.)*
-- [ ] **Always-on host + liveness alerts.** Move the agent and data server off the laptop — chosen host: the operator's Raspberry Pi (runbook 08, `deploy/systemd/`, `scripts/migrate_to_pi.sh`, 2026-10-07); dead-man alert when no cycle by 09:50 ET or none for 10 min in session.
+- [x] *(Done — merged a2c9ee5.)* **Rename** away from "credit-spread agent" in everything people read (README, manifest / context, handoff prompt, preset descriptions, dashboard, Telegram, MCP descriptions); keep stored identifiers (journal actions, `net_credit`, class / file / skill names). *(Started 2026-10-07.)*
+- [x] *(Done — merged a2c9ee5, skill 62.)* **Kill switch + drawdown governor.** One command pauses new entries (exits keep running); automatic pause at a daily / weekly loss limit; only a human resumes. *(Started 2026-10-07.)*
+- [x] *(Done — Pi since 10/07; liveness = A5, skill 64.)* **Always-on host + liveness alerts.** Move the agent and data server off the laptop — chosen host: the operator's Raspberry Pi (runbook 08, `deploy/systemd/`, `scripts/migrate_to_pi.sh`, 2026-10-07); dead-man alert when no cycle by 09:50 ET or none for 10 min in session.
 - [ ] **Phone approvals.** Telegram with approve / reject / pause buttons — prerequisite for L1 / L2 away from the terminal.
 - [ ] **Promotion by evidence.** Weekly report from the playbook scorecard and the shadow logs (trailing profit, entry timing, realized-vol POP) with an explicit recommendation per feature, approved through L1.
 - [ ] **Reliable reviewer.** Run the daily / weekly AI review on Claude instead of a local Ollama.
 - [ ] **Day-replay harness.** Replay a recorded session (chains, quotes, journal) through the full agent cycle in tests — this week's sector-cap, plan-retention and regime-flicker bugs would have failed there first.
 - [ ] **Stage 2 as a gate pipeline.** Split the entry path into small, separately tested gates (caps → filters → plan → risk → market state → ladder → confirmation → timing); `_run_cycle_impl` is at the 400-line cap.
+
+## 10. Week-2 learnings — review week of 2026-10-12 (added 2026-10-10)
+
+**Week 2 (10/05–10/09):** 5 entries Mon–Tue, none Wed–Fri; realized +$191 (IWM +$288 by hand, VZ CSP −$97); account $29,765 → $29,658. Shipped: manual close (skill 63), debit profit target on cost (`debit_profit_target_basis="debit"`, merged `267f727`). Suggested order: 10.1 + 10.2 first (small, safe, add data), then 10.3, then §7 broader breadth.
+
+- [ ] **10.1 Opening-window guard for exits.** VZ $43 CSP gapped from Δ −0.12 (Thu close) through the strike; the delta stop closed it at 09:36 ET, six minutes into the session, at $1.18 vs a $1.045 mark (−$97 on a $21 credit). Entries wait until 09:45 (`no_entry_before_et`); exits have no equivalent. Add a preset field (e.g. `no_exit_before_et`) that defers non-emergency exits (delta stop, profit target, regime shift) — not hard stops at max loss — until the opening quotes settle. Skill 30 / Wheel skill.
+- [ ] **10.2 Track peak P&L for every position from entry (shadow only).** `profit_trail.json` records `peak_pl` only after a position arms, so every open position shows a $0 peak and the IWM target question (+$444 peak at 11:07, closed at +$288) had to be answered from memory. Record peak and peak time (and trough) per position from entry; use it to tune debit targets / stops and the §7 trailing-profit decision. Skill 30 / profit trail.
+- [ ] **10.3 Mid-first price ladder for debit entries.** The 5 debit entries paid $106 over mid (1.2–4.9 % of each debit), and ~1,000–1,300 debit candidates a day were refused as `debit_above_fair` (natural > mid × 1.05). `entry_timing_shadow` resolved only 1 entry all week, so it will not answer this. Try mid → halfway → natural with a short timeout per step (as the Wheel does), journal which step filled, and keep `debit_above_fair` measured against the price actually sent. Paper first; compare two weeks of fills. Skill 59.
+- [ ] **10.4 CSP delta stop vs the Wheel.** A stop that turns a $21 credit into a $97 loss needs an ~82 % win rate to break even, and closing at Δ 0.45 means a Wheel put is never assigned on a name it was screened to own. Decide per name: roll down-and-out for a credit, accept assignment, or keep the stop (with 10.1). Design decision first, then the Wheel skill.
+- [ ] **10.5 Market-state SPY input.** `market_state.json` showed SPY 773.93 all session on 2026-10-09 while SPY traded up to $778 — confirm whether the state is meant to use the prior daily close; if so, say so in skill 58. (Breadth on 8 tickers kept CAUTION all day at 3 of 8 — see §7 "Broader breadth input".)
+- [ ] **10.6 Direction-aware sector cap.** IWM / DIA were `skipped_existing` 1,080 times a day because SPY (neutral calendar) + QQQ (bullish) fill the Broad Market cap of 2, while IWM (bearish) was the week's only big winner. Consider counting bullish and bearish positions per sector separately, or not counting calendars; weigh against concentration risk (ties to §7 "Portfolio direction balance").
 
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 

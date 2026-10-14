@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "trading-agent": {
-      "command": "python",
-      "args": ["-m", "trading_agent.mcp"],
-      "description": "Trading-agent read-only surface (skill 48). Positions, journal, presets, scanner, quotes. Never places orders."
+      "command": "sh",
+      "args": ["-c", "if [ -x myenv/bin/python ]; then exec myenv/bin/python -m trading_agent.mcp; else exec python -m trading_agent.mcp; fi"],
+      "description": "Trading-agent read-only surface (skill 48). Positions, journal, presets, scanner, quotes. Never places orders. Uses the repo's myenv virtualenv when present, so it starts without an activated venv (e.g. after a reboot)."
     }
   }
 }

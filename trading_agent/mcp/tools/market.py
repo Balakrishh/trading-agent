@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import os
+import re
 import urllib.request
 import urllib.error
 import json
@@ -20,12 +21,20 @@ def _data_server_url() -> Optional[str]:
     return base or None
 
 
-def _data_server_get(path: str) -> Optional[Dict[str, Any]]:
+def _data_server_request(path: str, body: Optional[Dict[str, Any]] = None
+                         ) -> Optional[Dict[str, Any]]:
+    """GET ``path`` (or POST ``body`` as JSON — still a read, e.g.
+    ``/quotes``) on the data server. None when unconfigured, unreachable
+    or the server rejects the request."""
     base = _data_server_url()
     if not base:
         return None
     key = os.environ.get("SCHWAB_API_SERVER_KEY", "")
-    req = urllib.request.Request(f"{base.rstrip('/')}/{path.lstrip('/')}")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(f"{base.rstrip('/')}/{path.lstrip('/')}",
+                                 data=data)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     try:
@@ -35,16 +44,42 @@ def _data_server_get(path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _data_server_get(path: str) -> Optional[Dict[str, Any]]:
+    return _data_server_request(path)
+
+
+# Compact OCC option symbol: root, YYMMDD, C/P, strike × 1000 (8 digits).
+_OCC_RE = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
+
+
 def get_quote(symbol: str) -> Dict[str, Any]:
-    """Current mark for an equity or option symbol."""
+    """Current mark for an equity or option symbol.
+
+    Equities use the data server's ``/price/{ticker}``; option symbols
+    (compact OCC, e.g. ``GLD261106P00379000``) use ``/quotes`` and
+    return bid / ask / mid with ``price`` = mid. ``/price`` rejects
+    option symbols, which used to surface as "data server unreachable".
+    """
     if not symbol:
         raise ValueError("symbol is required")
-    remote = _data_server_get(f"price/{symbol.upper()}")
-    if remote is not None:
-        return remote
+    sym = symbol.upper().strip()
+    if _OCC_RE.match(sym):
+        remote = _data_server_request("quotes", {"symbols": [sym]})
+        if remote is not None:
+            q = (remote.get("quotes") or {}).get(sym)
+            if not q:
+                return {"symbol": sym, "price": None, "source": "data_server",
+                        "note": "no quote for this contract"}
+            return {"symbol": sym, "price": q.get("mid"), "bid": q.get("bid"),
+                    "ask": q.get("ask"), "mid": q.get("mid"),
+                    "source": "data_server"}
+    else:
+        remote = _data_server_get(f"price/{sym}")
+        if remote is not None:
+            return remote
     # Fallback: in-process. Best-effort — market_data_factory build
     # requires credentials the MCP process may not have.
-    return {"symbol": symbol.upper(), "price": None,
+    return {"symbol": sym, "price": None,
             "source": "unavailable", "note": "data server unreachable"}
 
 

@@ -1,0 +1,11 @@
+# Every 5 min, 09:00–16:55 ET on weekdays; the script itself skips
+# holidays, pre-open, the first 10 min after the bell, and after hours.
+[Unit]
+Description=Run the trading agent liveness watchdog every 5 minutes in market hours
+
+[Timer]
+OnCalendar=Mon..Fri 09..16:00/5 America/New_York
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
