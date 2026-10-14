@@ -110,4 +110,4 @@ Exit codes: `0` closed / preview shown, `1` no such position, `2` refused (or br
 
 ---
 
-*Last verified against repo HEAD on 2026-10-08.*
+*Last verified against repo HEAD on 2026-10-14.*

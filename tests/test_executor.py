@@ -735,3 +735,84 @@ def test_realized_pl_single_short_leg():
 ])
 def test_realized_pl_unknown_returns_none(legs):
     assert realized_pl_from_close(legs, 0.5) is None
+
+
+# ── Leg-by-leg close over two cycles (2026-10-14 QQQ) ────────────────────
+
+class TestPerLegCloseRealized:
+    """Short leg closes one cycle, long leg the next: realized P&L must
+    count both legs (QQQ 756/772: +$775 and −$1,195.50 → −$420.50)."""
+
+    @pytest.fixture(autouse=True)
+    def _fast(self, monkeypatch):
+        monkeypatch.setattr(executor_mod, "CLOSE_FILL_WAIT_S", 0.0)
+        monkeypatch.setattr(executor_mod.time, "sleep", lambda s: None)
+
+    @staticmethod
+    def _spread(legs):
+        return SimpleNamespace(
+            underlying="QQQ", strategy_name="Call Debit Spread", expiration="2026-11-06",
+            exit_signal=ExitSignal.STOP_LOSS, exit_reason="test",
+            legs=[SimpleNamespace(symbol=s, qty=q, avg_entry_price=a) for s, q, a in legs])
+
+    @staticmethod
+    def _run(ex, spread, deletes, fills):
+        gets = {f"/orders/{oid}": _resp({"status": "filled", "filled_avg_price": px})
+                for oid, px in fills.items()}
+        dels = iter(deletes)
+        with patch.object(executor_mod.requests, "delete", side_effect=lambda *a, **k: next(dels)), \
+             patch.object(executor_mod.requests, "get",
+                          side_effect=lambda url, **k: gets[url[url.index("/orders/"):]]):
+            return ex.close_spread(spread)
+
+    @staticmethod
+    def _refused():
+        r = _resp({"code": 40310000, "message": "account not eligible"})
+        r.raise_for_status.side_effect = executor_mod.requests.HTTPError("403")
+        return r
+
+    def test_partial_then_complete_books_both_legs(self, tmp_path):
+        ex = OrderExecutor("k", "s", trade_plan_dir=str(tmp_path), dry_run=False)
+        both = self._spread([("C772", -1, 9.90), ("C756", 1, 17.81)])
+        res = self._run(ex, both, [_resp({"id": "s1"}), self._refused()], {"s1": "2.15"})
+        assert not res["all_closed"] and "realized_pl" not in res
+        ledger = json.loads((tmp_path / "partial_close_legs.json").read_text())
+        assert [l["symbol"] for l in ledger["QQQ|2026-11-06"]] == ["C772"]
+
+        rest = self._spread([("C756", 1, 17.81)])
+        res = self._run(ex, rest, [_resp({"id": "l1"})], {"l1": "5.86"})
+        assert res["all_closed"]
+        assert res["realized_pl"] == round((9.90 - 2.15) * 100 - (17.81 - 5.86) * 100, 2)
+        assert json.loads((tmp_path / "partial_close_legs.json").read_text()) == {}
+
+    def test_one_cycle_close_uses_leg_fills(self, tmp_path):
+        ex = OrderExecutor("k", "s", trade_plan_dir=str(tmp_path), dry_run=False)
+        res = self._run(ex, self._spread([("C772", -1, 9.90), ("C756", 1, 17.81)]),
+                        [_resp({"id": "s1"}), _resp({"id": "l1"})], {"s1": "2.15", "l1": "5.86"})
+        assert res["realized_pl"] == -420.0
+
+    def test_unknown_fill_leaves_realized_absent(self, tmp_path):
+        ex = OrderExecutor("k", "s", trade_plan_dir=str(tmp_path), dry_run=False)
+        res = self._run(ex, self._spread([("C772", -1, 9.90), ("C756", 1, 17.81)]),
+                        [_resp({}), _resp({})], {})
+        assert res["all_closed"] and "realized_pl" not in res
+
+    def test_stale_ledger_entry_is_ignored(self, tmp_path):
+        ex = OrderExecutor("k", "s", trade_plan_dir=str(tmp_path), dry_run=False)
+        (tmp_path / "partial_close_legs.json").write_text(json.dumps({"QQQ|2026-11-06": [
+            {"symbol": "C772", "qty": -1, "avg_entry_price": 9.90, "fill_price": 2.15,
+             "closed_at": "2026-01-01T00:00:00+00:00"}]}))
+        res = self._run(ex, self._spread([("C756", 1, 17.81)]), [_resp({"id": "l1"})], {"l1": "5.86"})
+        assert res["realized_pl"] == round(-(17.81 - 5.86) * 100, 2)
+
+
+@pytest.mark.parametrize("legs,expected", [
+    ([{"qty": -1, "avg_entry_price": 9.90, "fill_price": 2.15},
+      {"qty": 1, "avg_entry_price": 17.81, "fill_price": 5.86}], -420.0),
+    ([{"qty": -2, "avg_entry_price": 1.0, "fill_price": 0.5}], 100.0),
+    ([{"qty": 1, "avg_entry_price": 1.0, "fill_price": None}], None),
+    ([], None),
+])
+def test_legs_realized_pl(legs, expected):
+    from trading_agent.executor import legs_realized_pl
+    assert legs_realized_pl(legs) == expected

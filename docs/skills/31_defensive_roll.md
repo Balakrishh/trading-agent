@@ -137,6 +137,7 @@ if (spread.exit_signal == ExitSignal.STRIKE_PROXIMITY
 - **Roll count tracking is MVP-stub.** `current_roll_count=0` is passed unconditionally. The `max_defensive_rolls_per_position=1` cap still bounds total rolls in steady state because each successful roll opens a *new* position with a fresh trade plan ID and no roll history. Follow-up: journal-based count of `defensive_roll_completed` rows linked to a position identity.
 - **Trigger band asymmetric for Aggressive.** Aggressive tightens `roll_trigger_max_pct` to 0.012 — it opens nearer-ATM so by the time spot reaches the 1.5% band it's already deeply tested. Earlier intervention preserves more reaction time before gamma blows up.
 - **Per-leg liquidity gate still applies.** The new candidate's chain has the same skill-29 leg-spread floor — a roll into an illiquid leg is rejected at risk-evaluate time, falling through to the normal close.
+- **Close half uses `close_spread` (2026-10-14).** When its per-leg fallback runs, each leg DELETE now waits for the previous leg's fill, and a close that only partly fills is remembered in `partial_close_legs.json` (skill 17 §4). An unfinished close still aborts the roll's open half, as before.
 
 ## 5. Cross-References
 
