@@ -172,6 +172,7 @@ registered. The convention is `if mon is not None: mon.record(...)`.
 - **Not for every WARNING.** Only call `record` from places where the silence actually matters operationally. Generic INFO/DEBUG logs from chain scanners aren't candidates.
 - **Idempotent across process restarts.** A cron-style cycle that exits and re-launches doesn't re-page already-paged groups today because the dedup marker is in the journal.
 - **No back-pressure.** `record` is fire-and-forget. A high-rate failure (e.g. retry loop) still pages once but journals every occurrence — the counter remains accurate for the EOD recap.
+- **Ledger and fill-poll failures are not recorded (2026-10-14).** `OrderExecutor` failures to read/write `partial_close_legs.json` or to poll a per-leg fill only log a warning/debug: the close itself still succeeded, and the cost is a realized P&L that falls back to the signal mark (skill 17 §4). A refused leg DELETE still records `executor.close_position`.
 
 ## 5. Cross-References
 
