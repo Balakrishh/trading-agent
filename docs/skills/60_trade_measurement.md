@@ -128,4 +128,4 @@ def _verdict(s: PlaybookStats, min_trades: int) -> Tuple[str, Optional[float]]:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-14.*
