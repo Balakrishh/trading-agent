@@ -56,7 +56,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 53 | incident response | mcp/tools/market.py, exception_monitor.py, journal_reader.py | test_journal_reconcile.py, test_ladder.py, test_trading_halt.py | ❌ MISSING | — |
 | 54 | tax lot review | mcp/tools/positions.py, journal_reader.py | test_journal_reconcile.py, test_ladder.py, test_position_snapshot.py | ❌ MISSING | — |
 | 55 | pending orders promotion | executor_promote.py, pending_orders_writer.py, strategy_presets.py | test_chain_scanner.py, test_debit_strategies.py, test_entry_confirmation.py, test_exit_opening_window.py, test_fill_model.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_profit_trail.py, test_streamlit/test_backtest_ui.py, test_trading_halt.py, test_wheel_filters.py, test_wheel_integration.py | conformance/test_skill_55_promote_gate.py | — |
-| 56 | daily journal reviewer | daily_reviewer.py, daily_reviewer_main.py, pending_preset_updates_writer.py, apply_preset_update.py | eval/test_daily_reviewer_scenarios.py | conformance/test_skill_56_daily_reviewer.py | — |
+| 56 | daily journal reviewer | daily_reviewer.py, daily_reviewer_main.py, pending_preset_updates_writer.py, apply_preset_update.py | eval/test_daily_reviewer_scenarios.py, test_claude_reviewer.py | conformance/test_skill_56_daily_reviewer.py | 08_raspberry_pi_deployment.md |
 | 57 | agent supervisor | agent_supervisor.py | — | conformance/test_skill_57_supervisor.py | — |
 | 58 | market state playbook | market_state.py | test_market_state.py, test_market_state_agent.py, test_wheel_integration.py | ❌ MISSING | — |
 | 59 | debit spreads calendars | debit_policy.py, decision_engine.py | test_backtest/test_synthetic_chain.py, test_debit_strategies.py, test_fill_model.py, test_wheel_filters.py | ❌ MISSING | — |
@@ -73,6 +73,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 Code paths under `trading_agent/` that NO skill currently cites. Each is a candidate for either (a) drafting a skill if the concept is non-trivial, or (b) confirming the file is implementation-detail and doesn't warrant a spec.
 
 - `trading_agent/calendar_utils.py` (last modified 2026-05-01)
+- `trading_agent/claude_reviewer.py` (last modified 2026-10-13)
 - `trading_agent/config.py` (last modified 2026-04-24)
 - `trading_agent/daily_state.py` (last modified 2026-04-19)
 - `trading_agent/data_server/__main__.py` (last modified 2026-10-08)
@@ -114,7 +115,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/wheel_lifecycle.py` (last modified 2026-09-29)
 - `trading_agent/wheel_policy.py` (last modified 2026-10-05)
 
-**Orphan source coverage:** 41 / 111 files (36% uncovered)
+**Orphan source coverage:** 42 / 112 files (37% uncovered)
 
 ## Orphan skills (no conformance test)
 

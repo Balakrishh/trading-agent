@@ -73,6 +73,20 @@ All three default to the SAFE end — auto-apply is unreachable without operator
 - `TRADING_AGENT_DAILY_REVIEWER_ENABLED` — master switch. Anything falsy (or unset) → CLI exits cleanly with a stderr note. Anything truthy → reviewer runs.
 - `TRADING_AGENT_REVIEWS_DIR` — audit JSON destination (default `daily_reviews/`).
 - `TRADING_AGENT_PENDING_PRESET_UPDATES_DIR` — proposal destination (default `pending_preset_updates/`).
+- `TRADING_AGENT_REVIEWER_LLM` — `claude_cli` routes the review through the logged-in Claude Code CLI (§3.5.1); anything else uses `LLMClient` (Ollama / OpenAI-compatible, `LLM_*` vars).
+- `CLAUDE_BIN`, `TRADING_AGENT_REVIEWER_WORKDIR` (`~/.trading-agent-reviewer`), `TRADING_AGENT_REVIEWER_SESSION` (`trade_journal/reviewer_session.json`), `TRADING_AGENT_REVIEWER_MAX_REVIEWS` (20), `TRADING_AGENT_REVIEWER_MAX_CONTEXT` (60000) — claude CLI path only.
+
+### 3.5.1 Claude CLI path — one session across days (2026-10-14, backlog A6)
+
+Ollama never ran on the Pi, so every review from 2026-10-05 to 10-13 came back `<empty response>`. `claude_reviewer.review()` sends the same system + user prompt through `claude -p --output-format json` from its own directory, with `--system-prompt` replacing Claude Code's, `--tools ""`, `--strict-mcp-config` and `--setting-sources ""` — the model reads our JSON and answers in JSON, nothing else (≈ 600 tokens overhead, measured). The first review starts a session with `--session-id`; later days `--resume` it, so each review sees the earlier days and is told to compare (`CONTINUITY_NOTE`). The state file records `session_id`, `reviews`, `last_context_tokens`.
+
+```text
+tokens read on day n of a session ≈ 600 + n × (prompt ≈ 1.8k + answer ≈ 0.5–1k) ≈ 0.6k + 2.5k·n
+rotation: n ≥ MAX_REVIEWS (20) or last call ≥ MAX_CONTEXT_TOKENS (60k)
+a new session's first prompt carries the last 5 reviews' observations
+```
+
+Over a 20-review session that is ≈ 3k tokens on day 1, ≈ 50k on day 20, ≈ 0.5M read in total, plus ≈ 15k output — billed against the operator's Claude plan, not an API key. Each audit JSON stores `output.llm_usage` (`session_id`, `resumed`, `context_tokens`, `output_tokens`, `cost_usd_equivalent`).
 
 ### 3.6 launchd unit
 
@@ -121,6 +135,8 @@ LLM and checks the parsed output.
 
 ## 4. Edge Cases / Guardrails
 
+- **Claude CLI failures (§3.5.1).** CLI missing or crashing → empty review with `<error: …>` in `raw_llm_text`, no state change. A resume that fails (session deleted) starts one fresh session in the same run. An answer that is not JSON → empty review, the text kept in `raw_llm_text`. The allowlist filter (§3.2) applies to the CLI's answer exactly as to `LLMClient`'s.
+- **Session growth.** A resumed session re-reads its history every day (24 h apart, so no prompt-cache hits); rotation caps the daily read at ~60k tokens.
 - **Read-only invariant.** `daily_reviewer.py`, `daily_reviewer_main.py`, `apply_preset_update.py`, and `pending_preset_updates_writer.py` must never import `trading_agent.executor`, `submit_order`, `place_order`, or `OrderExecutor`. AST-verified.
 - **LLM output validation.** Anything outside the JSON schema — missing keys, wrong types, hallucinated fields — is filtered to `None`/`[]` at parse time. The reviewer never crashes on bad LLM output.
 - **Field allowlist enforced at parse time.** `_parse_llm_output` only accepts `preset_proposal.field` from `_ALLOWED_PROPOSAL_FIELDS`. This is belt (system prompt) + suspenders (code check).
@@ -144,4 +160,4 @@ LLM and checks the parsed output.
 
 ---
 
-*Last verified against repo HEAD on 2026-09-30.*
+*Last verified against repo HEAD on 2026-10-14.*

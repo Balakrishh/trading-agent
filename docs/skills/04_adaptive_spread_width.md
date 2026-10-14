@@ -159,4 +159,4 @@ Both filters work in concert with this skill's width-grid retune: the 0.5% width
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-14.*

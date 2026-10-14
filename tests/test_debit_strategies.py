@@ -486,3 +486,34 @@ def test_debit_target_basis_preset_default_summary_and_bad_value():
     assert _make_custom({"debit_profit_target_basis": "max_profit"}).debit_profit_target_basis == "max_profit"
     assert _make_custom({"debit_profit_target_basis": "bogus"}).debit_profit_target_basis == "debit"
     assert _make_custom({}).debit_profit_target_basis == "debit"   # older preset files
+
+
+# ── Bear calls off by default (backlog B6, 2026-10-14) ───────────────────
+
+def test_bear_calls_off_by_default():
+    assert PRESETS["balanced"].bear_call_enabled is False
+    assert "BearCall off→put debit" in PRESETS["balanced"].to_summary_line()
+
+
+def test_bearish_high_vol_buys_a_put_debit_instead_of_selling_calls(monkeypatch):
+    pl = _planner()
+    monkeypatch.setattr(pl, "_plan_bear_call", lambda *a: pytest.fail("bear calls are off"))
+    p = pl.plan("SPY", _analysis(Regime.BEARISH, 60, 45))
+    assert p.strategy_name == "Put Debit Spread" and p.valid
+
+
+def test_bear_calls_on_restores_legacy_routing(monkeypatch):
+    from trading_agent.strategy import SpreadPlan
+    pl = _planner(preset=replace(PRESET, bear_call_enabled=True))
+    good = SpreadPlan("SPY", "Bear Call Spread", "bearish", [], 5, 1.0, 400, 0.2, "x", "")
+    monkeypatch.setattr(pl, "_plan_bear_call", lambda *a: good)
+    assert pl.plan("SPY", _analysis(Regime.BEARISH, 60, 45)) is good
+
+
+def test_vix_inhibit_no_longer_demotes_to_bear_call(monkeypatch):
+    pl = _planner()
+    monkeypatch.setattr(pl, "_plan_bear_call", lambda *a: pytest.fail("bear calls are off"))
+    a = _analysis(Regime.BULLISH, 60, 55)
+    a.inter_market_inhibit_bullish, a.vix_zscore = True, 2.4
+    p = pl.plan("SPY", a)
+    assert not p.valid and "bear calls are off" in p.rejection_reason

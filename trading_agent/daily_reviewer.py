@@ -78,6 +78,8 @@ class ReviewOutput:
     digest_lines:      List[str]
     confidence:        float = 0.0
     raw_llm_text:      str = ""
+    # claude CLI path (skill 56 §3): session id, context / output tokens.
+    llm_usage:         Dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +165,8 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
 
 _SYSTEM_PROMPT = (
     "You are a trading-strategy reviewer. Once per day, at market close, "
-    "you read one day's worth of credit-spread trade activity plus the "
+    "you read one day's worth of defined-risk options trade activity "
+    "(credit and debit spreads, calendars, Wheel puts) plus the "
     "current strategy preset, and produce a short structured report. "
     "You NEVER trade — your only job is proposal-writing. "
     "Return valid JSON with these top-level keys: observations "
@@ -245,10 +248,39 @@ def _parse_llm_output(raw: Dict[str, Any]) -> ReviewOutput:
     )
 
 
+def _empty(raw: str, usage: Optional[Dict[str, Any]] = None) -> ReviewOutput:
+    return ReviewOutput(observations=[], preset_proposal=None,
+                        watchlist_proposal=None, digest_lines=[],
+                        raw_llm_text=raw, llm_usage=usage or {})
+
+
+def _call_claude_cli(ctx: ReviewContext) -> ReviewOutput:
+    """``TRADING_AGENT_REVIEWER_LLM=claude_cli``: one persistent ``claude -p``
+    session across days (claude_reviewer.py)."""
+    from dataclasses import replace                              # noqa: PLC0415
+    from trading_agent import claude_reviewer                    # noqa: PLC0415
+    parsed, usage, err = claude_reviewer.review(
+        _SYSTEM_PROMPT, _build_user_prompt(ctx), ctx.review_date, REVIEWS_DIR)
+    if parsed is None:
+        log.warning("claude CLI review failed: %s", err)
+        return _empty(f"<error: {err}>", usage)
+    return replace(_parse_llm_output(parsed), llm_usage=usage)
+
+
 def call_llm(ctx: ReviewContext) -> ReviewOutput:
     """Send the prompt to the configured LLM. Returns ReviewOutput even
     on failure (with empty proposals + raw_llm_text populated).
+
+    ``TRADING_AGENT_REVIEWER_LLM=claude_cli`` uses the logged-in Claude
+    Code CLI (the Pi's default since 2026-10-14); anything else uses
+    ``LLMClient`` (Ollama / OpenAI-compatible).
     """
+    if os.environ.get("TRADING_AGENT_REVIEWER_LLM", "").strip().lower() == "claude_cli":
+        try:
+            return _call_claude_cli(ctx)
+        except Exception as exc:                                    # noqa: BLE001
+            log.warning("claude CLI review crashed (%s); returning empty review.", exc)
+            return _empty(f"<error: {exc}>")
     try:
         from trading_agent.llm_client import LLMClient             # noqa: PLC0415
         client = LLMClient()
@@ -370,6 +402,7 @@ def _write_audit(ctx: ReviewContext, output: ReviewOutput) -> Path:
             "digest_lines":       output.digest_lines,
             "confidence":         output.confidence,
             "raw_llm_text":       output.raw_llm_text,
+            "llm_usage":          output.llm_usage,
         },
     }
     tmp = fp.with_suffix(fp.suffix + ".tmp")
