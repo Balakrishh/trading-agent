@@ -56,7 +56,7 @@ Skills 32–35 ship alongside the live-deployment hardening pass. Phase 1 covers
 
 ## Phase 3 (Wheel, MCP surface, ops, playbooks — 2026-06 → 2026-10)
 
-Skills 40–64: the long-term / Wheel evaluator, the Claude Code MCP surface and slash-command playbooks, the supervisor, and the 2026-10 backlog phases — market risk state + playbook table (58), debit spreads / calendars / bounce bull put (59), trade measurement (60), entry confirmation (61), kill switch and drawdown governor (62), manual close (63), liveness watchdog (64). Rows generated from each skill's header.
+Skills 40–65: the long-term / Wheel evaluator, the Claude Code MCP surface and slash-command playbooks, the supervisor, and the 2026-10 backlog phases — market risk state + playbook table (58), debit spreads / calendars / bounce bull put (59), trade measurement (60), entry confirmation (61), kill switch and drawdown governor (62), manual close (63), liveness watchdog (64), earnings-aware expiries and trend entry filters (65). Rows generated from each skill's header.
 
 | # | Skill | Group | Source of truth |
 |---|---|---|---|
@@ -84,6 +84,7 @@ Skills 40–64: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 62 | [Kill Switch & Drawdown Governor](62_kill_switch_drawdown_governor.md) | risk / ops | `trading_agent/trading_halt.py` |
 | 63 | [Manual Close](63_manual_close.md) | ops / risk | `trading_agent/manual_close.py`, `trading_agent/executor.py` |
 | 64 | [Liveness Watchdog](64_liveness_watchdog.md) | ops | `trading_agent/liveness.py`, `deploy/systemd/trading-agent-liveness.*` |
+| 65 | [Earnings-Aware Expiries and Trend Entry Filters](65_earnings_expiry_and_trend_filters.md) | risk / strategy | `trading_agent/entry_filters.py`, `trading_agent/earnings_calendar.py`, `trading_agent/strategy.py` |
 
 ## Phase 2 (planned, not yet written)
 
@@ -133,7 +134,7 @@ If you have a full afternoon, read 00 first, then all 21 in order. Skills 28, 29
 - 32 (Telegram operator alerts), 33 (PDT-aware DTE cap), 34 (exception monitor) make the running system visible to the operator without log-scraping.
 - 35 (close-event collaborators) decouples the ~300-line `_journal_close_event` into four constructor-injected classes — read after 17 + 19 + 32 since it integrates all three.
 
-For **what the agent trades today**, read 58 → 59 → 37 → 60 (market state and playbook routing → debit structures → portfolio caps → measurement), then 40 for the Wheel.
+For **what the agent trades today**, read 58 → 59 → 65 → 37 → 60 (market state and playbook routing → debit structures → earnings expiries and trend filters → portfolio caps → measurement), then 40 for the Wheel.
 
 For **running it** (Raspberry Pi since 2026-10-07): 57 (supervisor, systemd unit) → 64 (liveness watchdog) → 62 (kill switch) → 63 (manual close) → 17 (close failures, per-leg close P&L) → 56 (daily review through the `claude` CLI) → 16 §4 (Schwab weekly re-login), with runbook [`08_raspberry_pi_deployment.md`](../runbooks/08_raspberry_pi_deployment.md).
 

@@ -42,7 +42,8 @@ class AnalystDecision:
     warnings: List[str]              # Edge cases or concerns flagged
 
 
-SYSTEM_PROMPT = """You are an expert options trading analyst specializing in credit spreads.
+SYSTEM_PROMPT = """You are an expert options trading analyst specializing in defined-risk option
+structures: credit spreads, debit spreads, calendars and iron condors / butterflies.
 Your role is to review proposed trades and provide a final decision: approve, modify, or skip.
 
 CORE PRINCIPLES:

@@ -41,7 +41,8 @@ OPTIMIZABLE_KEYS = [
 PRESET_PROMPTS: Dict[str, str] = {
     "Analyze Last 10 Trades + Guardrail Suggestions": (
         "You are a quantitative trading analyst. Analyze the following 10 most recent "
-        "credit-spread trade signals and provide:\n"
+        "defined-risk options trade signals (credit and debit spreads, calendars, "
+        "condors, Wheel legs) and provide:\n"
         "1. A concise performance summary (win rate, common failure modes).\n"
         "2. Specific guardrail parameter recommendations (max_delta, min_credit_ratio, "
         "max_risk_pct, daily_drawdown_limit) with numeric values.\n"

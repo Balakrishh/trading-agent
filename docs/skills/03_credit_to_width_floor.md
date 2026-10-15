@@ -96,4 +96,4 @@ A condor loses if price finishes past **either** short, so P(loss) ≈ |Δput| +
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-15.*

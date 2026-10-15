@@ -297,6 +297,7 @@ self.risk_manager = RiskManager(
 - **Bear calls off (2026-10-14, skill 59 §4).** `bear_call_enabled` False: bearish tickers buy put debit spreads; summary `BearCall off→put debit`; Strategy Profile: "Sell bear call spreads".
 - **2026-10-06.** `ladder_requires_profit` True (add to winners only, skill 37); `calendar_max_strike_drift_pct` 0.03 (calendar closes when the underlying is ≥ 3 % from its strike, skill 59). Summary: `Ladder 2/ticker ≥7d winners`, `Cal@21+28d TP25% drift≤3%`.
 - **Drawdown governor (2026-10-07, skill 62).** `halt_daily_loss_pct` 0.02, `halt_weekly_loss_pct` 0.05 (0 = off); summary `Halt −2%/d −5%/wk`; Strategy-Profile "Drawdown governor" sliders.
+- **Earnings + trend filter fields (2026-10-15, skill 65).** `earnings_guard_enabled` (True), `earnings_buffer_days` (1), `earnings_min_dte` (7), `rs_filter_mode` / `pullback_filter_mode` (`shadow` default; an unknown value in the preset file falls back to the default with a warning in `_coerce_overrides`), `rs_min_percentile` (0.50), `pullback_max_atr` (1.0). Summary token `_trend_tag()`; dashboard block "Earnings & trend entry filters". The planner reads them from the preset it already holds — no extra threading in `agent.py`.
 
 ## 5. Cross-References
 
@@ -307,4 +308,4 @@ self.risk_manager = RiskManager(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

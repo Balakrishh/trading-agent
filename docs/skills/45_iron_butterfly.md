@@ -178,6 +178,7 @@ iron_butterfly_wing_width_pct:     Tuple[float, ...] = (0.020, 0.030, 0.040)
 - **Live-cycle wiring is future work.** This skill's Phase 1 delivers the scorer, the reject taxonomy, the preset knobs, and the tests. The chain-scanner orchestration (finding the ATM strike, sweeping the wing-width grid, packaging accepted candidates as SpreadCandidate objects) is deliberately NOT in this session — it's the follow-on, alongside the backtester enablement. The pattern matches how skill 40's long-term evaluator shipped as scorer + design doc first, orchestrator second.
 
 - **Credit at natural (2026-10-05, §6.1).** `decide_iron_butterfly` prices shorts at the bid and wings at the ask under `fill_model="natural"` (legacy four-leg mids under `"mid"`).
+- **Expiry before earnings (2026-10-15, skill 65).** The butterfly's expiration comes from `_pick_expiration(KIND_IRON_CONDOR)`, so on a single stock it is pulled to the last weekly before the next report like every other structure.
 
 ## 5. Live Dispatch Wiring (added 2026-07-05)
 
@@ -223,4 +224,4 @@ Hot-reloads on the next cycle (skill 13). Set back to `false` to disable without
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

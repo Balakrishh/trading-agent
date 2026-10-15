@@ -1,4 +1,4 @@
-# Contributing to trading-agent
+# Contributing to the Defined-Risk Options Agent (`trading-agent`)
 
 Welcome. This file is the canonical entry point for anyone — human or LLM — adding a feature, fixing a bug, or refactoring inside this repo. It operationalises [`docs/skills/00_sdlc_and_conventions.md`](docs/skills/00_sdlc_and_conventions.md): if §0 is the *what* and *why*, this file is the *do this, in this order, every time*.
 

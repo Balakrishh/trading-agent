@@ -119,6 +119,7 @@ self._ticker_filters = TickerFilters(
 - **Preset is captured at construction.** A hot-reload of the preset file doesn't propagate to existing `TickerFilters` instances. `_run_cycle_impl` reloads the preset at each cycle's start and reconstructs filters as needed (this is currently a TODO — the preset is captured once at agent __init__).
 - **The filter pipeline doesn't catch exceptions from `regime_is_allowed` or `evaluate_rsi_gate`.** Those are pure functions that should never throw on valid inputs; if they do, the exception propagates to `_process_ticker` and is caught by its outer except (which is skill-34-instrumented).
 - **Filter order is documented in evaluate() docstring.** Directional bias → RSI gate → high-IV. Changing this order requires updating the docstring + a regression test.
+- **Not the place for trend filters (2026-10-15).** The relative-strength and pullback checks (skill 65) need the planned strategy's direction, so they run after planning in the agent's gate chain, not here among the pre-plan early returns.
 
 ## 5. Cross-References
 
@@ -128,4 +129,4 @@ self._ticker_filters = TickerFilters(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

@@ -38,12 +38,15 @@ Design notes
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Dict, Optional, Set
+from pathlib import Path
+from typing import Callable, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -263,4 +266,71 @@ class EarningsCalendar:
         )
 
 
-__all__ = ["EarningsCalendar", "EarningsEntry"]
+# ---------------------------------------------------------------------------
+# Disk-cached next-earnings lookup for the planner (skill 65, 2026-10-15).
+# The agent runs each cycle in a fresh process, so the in-memory cache
+# above would refetch every ~75 s; this one keeps dates in a JSON file
+# for ``EARNINGS_CACHE_MAX_AGE_H`` hours.
+# ---------------------------------------------------------------------------
+
+EARNINGS_CACHE_PATH = Path(os.environ.get(
+    "TRADING_AGENT_EARNINGS_CACHE", "trade_journal/earnings_dates.json"))
+EARNINGS_CACHE_MAX_AGE_H = 12
+
+
+def is_non_issuer(ticker: str) -> bool:
+    """ETFs / indices / treasuries — no earnings by construction."""
+    return ticker.upper() in _NON_ISSUER_TICKERS
+
+
+def _default_fetch(ticker: str) -> Optional[date]:
+    return EarningsCalendar(enabled=True)._fetch(ticker).next_date
+
+
+def next_earnings_date(ticker: str, *, path: Optional[Path] = None,
+                       max_age_hours: float = EARNINGS_CACHE_MAX_AGE_H,
+                       fetch: Optional[Callable[[str], Optional[date]]] = None,
+                       today: Optional[date] = None) -> Optional[date]:
+    """Next scheduled earnings date for ``ticker`` (today or later), or
+    None for ETFs and when unknown. Reads the JSON cache; refetches when
+    the entry is older than ``max_age_hours`` or its date has passed.
+    Never raises — a failed lookup is cached as unknown."""
+    if is_non_issuer(ticker):
+        return None
+    fp = path or EARNINGS_CACHE_PATH
+    today = today or datetime.now(timezone.utc).date()
+    now = datetime.now(timezone.utc)
+    try:
+        cache = json.loads(fp.read_text())
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, ValueError):
+        cache = {}
+    entry = cache.get(ticker.upper()) or {}
+    try:
+        age_h = (now - datetime.fromisoformat(entry["fetched_at"])).total_seconds() / 3600
+        cached = date.fromisoformat(entry["date"]) if entry.get("date") else None
+        if age_h < max_age_hours and (cached is None or cached >= today):
+            return cached
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        found = (fetch or _default_fetch)(ticker)
+    except Exception as exc:  # noqa: skill-34-exempt — unknown date → no earnings cap; logged
+        logger.warning("[%s] earnings date lookup failed: %s", ticker, exc)
+        found = None
+    if found is not None and found < today:
+        found = None
+    cache[ticker.upper()] = {"date": found.isoformat() if found else None,
+                             "fetched_at": now.isoformat()}
+    try:
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = fp.with_suffix(fp.suffix + ".tmp")
+        tmp.write_text(json.dumps(cache, indent=2, sort_keys=True))
+        tmp.replace(fp)
+    except OSError as exc:
+        logger.warning("Could not write %s: %s", fp, exc)
+    return found
+
+
+__all__ = ["EarningsCalendar", "EarningsEntry", "next_earnings_date", "is_non_issuer"]

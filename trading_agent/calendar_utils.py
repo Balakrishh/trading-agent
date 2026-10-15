@@ -109,3 +109,24 @@ def is_last_trading_day_before(today: date, expiration: date) -> bool:
         return False
     days = _valid_days(today, expiration - timedelta(days=1))
     return bool(days) and days[-1] == today
+
+
+def latest_weekly_on_or_before(today: date, cap: date,
+                               dte_min: int) -> Optional[date]:
+    """Latest weekly expiration (last trading day of a Mon–Fri week) that
+    falls on or before *cap* and at least *dte_min* days after *today*;
+    None when no week fits. Used to end a trade before an earnings
+    report (skill 65)."""
+    if (cap - today).days < dte_min:
+        return None
+    ref = cap
+    for _ in range(60):
+        monday = ref - timedelta(days=ref.weekday())
+        days = _valid_days(monday, monday + timedelta(days=4))
+        if days and days[-1] <= cap:
+            exp = days[-1]
+            return exp if (exp - today).days >= dte_min else None
+        ref = monday - timedelta(days=1)
+        if (ref - today).days < dte_min:
+            return None
+    return None

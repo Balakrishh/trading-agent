@@ -83,6 +83,7 @@ from trading_agent.position_caps import compute_position_cap_dedup_set
 
 - **Laddering (2026-10-05, backlog §6.7).** The per-ticker cap is now `PresetConfig.max_positions_per_ticker` (default 2; `MAX_POSITIONS_PER_TICKER = 1` remains the fallback for presets without the field). A 2nd+ position on a ticker passes the dedup set but then must clear `ladder_failure()` after planning (`TradingAgent._ladder_block`, recorded as a failed risk check): no entry on a ticker that already opened a position today (`ladder_same_day_entry` — otherwise the adaptive DTE grid could stack two expiries 75 s apart) and an expiration ≥ `ladder_min_gap_days` (7) from every open position on that ticker (`ladder_gap_Nd_lt_7d`). Pending orders still block the ticker entirely; sector and total-risk caps still apply.
 - **Add to winners only (2026-10-06).** `ladder_requires_profit` (default True): a 2nd+ position also needs every open position on the ticker at or above breakeven by mid P&L (`open_pls`, from the monitor summary) — otherwise `ladder_existing_losing (open P&L $…)`. The GLD put debit was −$135 to −$175 while the planner kept proposing a second GLD put debit; laddering a loser is doubling down.
+- **Gate order (2026-10-15).** After RiskManager: market-state gate → ladder gate → trend filters (skill 65; blocks only in live mode) → entry confirmation. The sector ETFs added the same day (XLK, XLV, XLY, XLI, SMH, XLU) are already mapped in `sector_map.py`; XLK + SMH share Technology and XLY + AMZN share Consumer Discretionary, so each pair counts against one sector's cap.
 
 ## 5. Cross-References
 
@@ -92,4 +93,4 @@ from trading_agent.position_caps import compute_position_cap_dedup_set
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

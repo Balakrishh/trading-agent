@@ -1,6 +1,6 @@
-# Autonomous Defined-Risk Options Agent
+# Defined-Risk Options Agent
 
-An autonomous trading agent that generates income through defined-risk options playbooks — credit spreads when premium pays, debit spreads and calendars when it doesn't, an oversold-bounce bull put, and operator-approved Wheel legs. Primary goal: **capital preservation** — every trade has a known, capped maximum loss.
+An autonomous options agent (repo and services: `trading-agent`) that generates income through defined-risk options playbooks — credit spreads when premium pays, debit spreads and calendars when it doesn't, an oversold-bounce bull put, and operator-approved Wheel legs. Primary goal: **capital preservation** — every trade has a known, capped maximum loss.
 
 ## Contents
 
@@ -83,7 +83,7 @@ Each cycle runs two stages sequentially: monitor existing positions first, then 
 
 ## Strategy Selection
 
-*Current as of 2026-10-14 (backlog phases 1–5 and the 2026-10-13 plan of record, skills 58–64).* Every cycle the agent first rates the **whole market**, then plans each ticker through a strict priority order, then gates the plan.
+*Current as of 2026-10-15 (backlog phases 1–5 and the 2026-10-13 plan of record, skills 58–65).* Every cycle the agent first rates the **whole market**, then plans each ticker through a strict priority order, then gates the plan.
 
 **0 · Market risk state (skill 58).** SPY vs its 20/50/200-day averages, SPY RSI, VIX, VIX/VIX3M and equity-ETF breadth → `NORMAL / CAUTION / DEFENSIVE / CAPITULATION / RECOVERY`. It sets a size multiplier (1.0 / 0.5 / 0.25 / 0, 0.5 in RECOVERY) and which strategy families may open; CAPITULATION skips all new entries. Exits are never gated.
 
@@ -104,7 +104,15 @@ The playbook table behind rows 4–6 (trend × volatility × RSI → playbook) l
 
 **Then the gates, in order:** RiskManager (below) → market-state strategy gate (e.g. CAUTION blocks new bull puts / call debits / CSPs) → ladder gate → total-risk sizing. A rejected plan is journaled with its reason (`risk: <first failed check>`).
 
-**Entry pacing (skill 61).** An approved plan is submitted only after the same strategy and expiry were chosen on `entry_confirm_cycles` (3) consecutive cycles, never before `no_entry_before_et` (09:45 ET), and at most `max_new_entries_per_hour` (1) per sector; a second position on a ticker is never opened the day the first was (`ladder_same_day_entry`). Entry timing (best-priced cycle of an 8-cycle window) runs in shadow by default.
+**Earnings-aware expiries (skill 65).** A single-stock trade must expire before its next earnings report (`earnings_buffer_days` = 1 day before). The planner — and the scanner — pick the latest weekly expiry that ends in time; only when none is at least `earnings_min_dte` (7) days out does the ticker wait until after the report (about a week a quarter). Calendars are skipped when the far leg would cross the report. ETFs are never affected. Dates come from yfinance, cached in `trade_journal/earnings_dates.json` for 12 h.
+
+**Trend entry filters (skill 65, shadow by default).** For directional trades (bull put, call debit / bear call, put debit):
+* *Relative strength* — 20/60-day return minus SPY's, ranked across the watchlist: bullish trades need percentile ≥ `rs_min_percentile` (0.50), bearish ≤ 0.50.
+* *Pullback* — bullish: price above the 50-day SMA and within `pullback_max_atr` (1.0) × ATR(14) of the 20-day SMA; bearish is the mirror.
+
+`rs_filter_mode` / `pullback_filter_mode` = `shadow` records each verdict in the journal (`raw_signal.trend_filters`) without blocking; `live` blocks with `risk: trend: …`; `off` skips the check.
+
+**Entry pacing (skill 61). An approved plan is submitted only after the same strategy and expiry were chosen on `entry_confirm_cycles` (3) consecutive cycles, never before `no_entry_before_et` (09:45 ET), and at most `max_new_entries_per_hour` (1) per sector; a second position on a ticker is never opened the day the first was (`ladder_same_day_entry`). Entry timing (best-priced cycle of an 8-cycle window) runs in shadow by default.
 
 **Credit vs debit economics.**
 * Credit structures need positive EV with `|Δ|` as P(ITM): `C/W ≥ |Δshort| × (1 + edge_buffer)` (one formula in three files, CI-enforced).
@@ -490,7 +498,7 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 
 | Variable | Default | Description |
 |---|---|---|
-| `TICKERS` | `SPY,QQQ` | Comma-separated underlyings |
+| `TICKERS` | `SPY,QQQ` | Comma-separated underlyings. Live (2026-10-15): SPY QQQ IWM DIA XLF XLE TLT GLD EEM GDX META AMZN XLK XLV XLY XLI SMH XLU |
 | `DRY_RUN` | `true` | Log plans; don't submit orders |
 | `MODE` | `dry_run` | `live` or `dry_run` |
 | `MAX_RISK_PCT` | `0.02` | Max loss per trade as fraction of equity |
@@ -647,6 +655,7 @@ trading-agent/
 │   ├── market_state.py               # Whole-market risk state + playbook table (skill 58)
 │   ├── debit_policy.py               # Debit / calendar / bounce constants (skill 59)
 │   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk caps (skill 37)
+│   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
 │   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)
 │   ├── trading_halt.py               # Kill switch + drawdown governor (skill 62)
 │   ├── playbook_scorecard.py         # Per-playbook stats, entry cost vs mid (skill 60)
@@ -686,7 +695,7 @@ trading-agent/
 │   │
 │   │   # ── Sentiment Pipeline ──
 │   ├── sentiment_pipeline.py         # Tier-0/1/2 facade, cycle-scoped pool
-│   ├── earnings_calendar.py          # Tier-0
+│   ├── earnings_calendar.py          # Tier-0 + cached next-earnings dates for expiry choice (skill 65)
 │   ├── sentiment_cache.py            # Tier-1
 │   ├── news_aggregator.py            # Tier-2 — NewsItem + NewsAggregator
 │   ├── fingpt_analyser.py            # Tier-2 — FinGPT specialist
@@ -732,6 +741,8 @@ Live cycles append one JSON object per line to `trade_journal/signals_live.jsonl
 **Material actions bypass the dedup gate** — `submitted`, `closed`, `close_failed`, `error`, `warning`, `dry_run`, `dry_run_close`, `position_excursion`, and the alert / silenced-exception rows — so successive cycles never silently suppress them. Rejection-spam actions (`rejected`, `skipped_*`) get per-ticker dedup with periodic heartbeat rows (every 12 cycles by default).
 
 **`close_failed`** (added 2026-05-06) tags a partial-fill close where one or more legs were rejected by Alpaca (PDT, uncovered, insufficient buying power); the position is **still open on the broker**. After 3 consecutive partial fills on a single ticker the agent enters a 60-min cooldown and the dashboard's Close Failures Today panel renders a 🚨 manual-intervention banner. See [`docs/skills/17_close_failure_and_cooldown.md`](docs/skills/17_close_failure_and_cooldown.md).
+
+**Trend filters and earnings** (skill 65): rows for a directional plan carry `trend_filters` (`direction`, `blocked`, each check's `ok` / `reason` / metrics); single-stock rows with a report ahead carry `earnings_date` and `earnings_expiry_cap`.
 
 **Realized P&L** is `raw_signal.net_unrealized_pl` on the `closed` row, with `pl_source` = `fill` (from broker fills), `signal_mark` (the exit-time mark, when fills are unknown) or `fill_corrected` (fixed by hand, with a `pl_correction` note). The exit-time mark is kept as `signal_mark_pl`.
 
@@ -794,7 +805,7 @@ When the active preset is in adaptive mode, every `plan()` invocation that runs 
 
 This project follows a Spec-Driven Development workflow: every architectural concept is documented as an atomic "skill" file before the corresponding code is shipped, and CI verifies the spec and code never drift apart. CI gates plus local checks and two workflow helpers enforce this mechanically (full list: [`scripts/checks/README.md`](scripts/checks/README.md)).
 
-**Where the specs live.** Each concept is one file under `docs/skills/NN_short_name.md` (currently 56 skills, numbered 00–64). The format is fixed: theory → math → reference Python (quoted verbatim from source) → edge cases → cross-references → footer dated to the last verification. `CLAUDE.md` documents the SDLC contract; `CONTRIBUTING.md` operationalises it into commands.
+**Where the specs live.** Each concept is one file under `docs/skills/NN_short_name.md` (currently 57 skills, numbered 00–65). The format is fixed: theory → math → reference Python (quoted verbatim from source) → edge cases → cross-references → footer dated to the last verification. `CLAUDE.md` documents the SDLC contract; `CONTRIBUTING.md` operationalises it into commands.
 
 **The CI gates** (`.github/workflows/ci.yml` runs all of them on every push):
 

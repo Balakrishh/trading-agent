@@ -292,6 +292,7 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 - **No history** — the bounce planner reports `price history unavailable` and does not trade.
 - **Backtester** — `decide_debit_spread` / `decide_calendar` are pure and importable, but the backtester does not yet replay debit structures (synthetic option pricing could not validate them anyway); the §6.6 paper scorecard is the evidence.
 - **Toggles** — `debit_spreads_enabled`, `calendar_enabled`, `bounce_bull_put_enabled` (all default on, paper). Off → that playbook never plans; the bounce/wait replacements also turn off, restoring the bear call.
+- **Earnings (2026-10-15, skill 65).** On single stocks the debit expiry (`_expiration_near`) is pulled to the last weekly before the next report, and a calendar is skipped when its far leg would end after it ("no far leg ends before earnings on D"). Debit spreads and calendars are also where the trend filters bite most: call debits need a leader near support, put debits a laggard near resistance.
 
 ## 5. Cross-References
 
@@ -303,4 +304,4 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

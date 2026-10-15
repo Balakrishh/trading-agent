@@ -947,6 +947,9 @@ class ChainScanner:
         # the agent journal write path) can surface *why* zero candidates
         # passed without inspecting log lines.
         self.last_diagnostics: Optional[ScanDiagnostics] = None
+        # Latest allowed expiration (skill 65): set per ticker by the
+        # planner to end before an earnings report; None = no limit.
+        self.max_expiration: Optional[date] = None
 
     # ------------------------------------------------------------------
     # Public scan API
@@ -978,18 +981,29 @@ class ChainScanner:
         #    weekly when DTEs are close together; dedup on the resolved
         #    expiration string so we don't fetch the same chain twice).
         seen_exps: Dict[str, int] = {}   # exp_str → dte
+        cap = self.max_expiration
         for target_dte in self.preset.dte_grid:
+            dte_lo = max(1, int(target_dte) - self.dte_window_days)
+            dte_hi = int(target_dte) + self.dte_window_days
+            if cap is not None:
+                # Skill 65: never past the earnings cap; a grid point whose
+                # whole window lies beyond it is dropped.
+                dte_hi = min(dte_hi, (cap - today).days)
+                if dte_hi < dte_lo:
+                    continue
             try:
                 exp_date = next_weekly_expiration(
                     today=today,
-                    target_dte=int(target_dte),
-                    dte_min=max(1, int(target_dte) - self.dte_window_days),
-                    dte_max=int(target_dte) + self.dte_window_days,
+                    target_dte=min(int(target_dte), dte_hi),
+                    dte_min=dte_lo,
+                    dte_max=dte_hi,
                 )
             except Exception as exc:  # noqa: skill-34-exempt — per-candidate retry; loop continues to next DTE
                 logger.warning("[%s] Expiration pick failed for DTE=%s: %s",
                                ticker, target_dte, exc)
                 continue
+            if cap is not None and exp_date > cap:
+                continue        # no weekly in the window ends before earnings
             exp_str = exp_date.strftime("%Y-%m-%d")
             dte = (exp_date - today).days
             if exp_str not in seen_exps or dte < seen_exps[exp_str]:

@@ -40,7 +40,7 @@ setup_logging(log_level=os.environ.get("LOG_LEVEL", "INFO"))
 import streamlit as st  # noqa: E402
 
 st.set_page_config(
-    page_title="Trading Agent Dashboard",
+    page_title="Defined-Risk Options Agent",
     page_icon="📈",
     layout="wide",
     # "auto" collapses the sidebar on narrow screens (<768 px) so the
@@ -168,7 +168,7 @@ from trading_agent.market_hours import is_within_market_hours  # noqa: E402
 
 _hdr_left, _hdr_right = st.columns([5, 1])
 with _hdr_left:
-    st.title("📈 Trading Agent Dashboard")
+    st.title("📈 Defined-Risk Options Agent")
     st.caption("Defined-risk options agent · Paper trading · Alpaca Markets")
 with _hdr_right:
     # Inline-styled badge — full background fill so it reads at a glance
