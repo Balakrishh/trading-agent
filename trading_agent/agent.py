@@ -315,6 +315,11 @@ class TradingAgent:
             width_value=self.preset.width_value,
             preset=self.preset,
         )
+        # Skill 65: keep single-stock expiries before the next earnings date.
+        from trading_agent.earnings_calendar import next_earnings_date
+        self.strategy_planner.earnings_lookup = next_earnings_date
+        self._trend_rs: Dict[str, Dict] = {}
+        self._trend_eval: Dict[str, Dict] = {}
         self.risk_manager = RiskManager(
             max_risk_pct=max_risk_pct,
             min_credit_ratio=min_credit_ratio,
@@ -2369,6 +2374,57 @@ class TradingAgent:
             from trading_agent.journal_reader import JournalReader
             for tk, _ in JournalReader(jsonl_path).submissions_since(1.0):
                 self._count_entry(tk)
+        trading = getattr(getattr(self, "config", None), "trading", None)
+        self._trend_rs = self._relative_strength_map(list(getattr(trading, "tickers", None) or []))
+        self._trend_eval = {}
+
+    # ── Trend entry filters (skill 65) ──────────────────────────────────
+
+    def _daily_bars(self, ticker: str) -> Dict[str, List[float]]:
+        df = self.data_provider.fetch_historical_prices(ticker, period_days=200)
+        return {k.lower(): [float(x) for x in df[k].dropna().tolist()]
+                for k in ("Close", "High", "Low")}
+
+    def _relative_strength_map(self, tickers: List[str]) -> Dict[str, Dict]:
+        """{ticker: {"score", "percentile"}} — 20/60-day return vs SPY,
+        ranked across the watchlist. Empty when the filter is off or SPY
+        history is unavailable."""
+        from trading_agent.entry_filters import RS_BENCHMARK, relative_strength, rs_percentiles
+        if not tickers or str(getattr(self.preset, "rs_filter_mode", "off")) == "off":
+            return {}
+        try:
+            bench = self._daily_bars(RS_BENCHMARK)["close"]
+        except Exception as exc:  # noqa: skill-34-exempt — filter input only; missing data never blocks
+            logger.warning("Relative strength unavailable (%s history: %s)", RS_BENCHMARK, exc)
+            return {}
+        scores: Dict[str, Optional[float]] = {}
+        for t in tickers:
+            try:
+                scores[t] = relative_strength(self._daily_bars(t)["close"], bench)
+            except Exception as exc:  # noqa: skill-34-exempt — filter input only; missing data never blocks
+                logger.debug("[%s] relative strength unavailable: %s", t, exc)
+                scores[t] = None
+        pct = rs_percentiles(scores)
+        return {t: {"score": scores.get(t), "percentile": pct.get(t)} for t in tickers}
+
+    def _trend_filter_block(self, ticker: str, plan, analysis) -> Optional[str]:
+        """Evaluate the trend filters for a valid, approved plan; journal
+        the verdict and return a failed-check text only in live mode."""
+        from trading_agent import entry_filters
+        bars = None
+        if str(getattr(self.preset, "pullback_filter_mode", "off")) != "off":
+            try:
+                bars = self._daily_bars(ticker)
+            except Exception as exc:  # noqa: skill-34-exempt — filter input only; missing data never blocks
+                logger.debug("[%s] daily bars unavailable for pullback check: %s", ticker, exc)
+        ev = entry_filters.evaluate(
+            plan.strategy_name, self.preset,
+            price=float(getattr(analysis, "current_price", 0.0) or 0.0),
+            rs=self._trend_rs.get(ticker), bars=bars)
+        if ev is None:
+            return None
+        self._trend_eval[ticker] = ev.to_journal_dict()
+        return ev.block
 
     def _entry_scope_key(self, ticker: str) -> str:
         """Bucket for the hourly entry limit: the ticker's sector, or one
@@ -2701,6 +2757,7 @@ class TradingAgent:
                          self._market_state, plan.strategy_name,
                          [l.option_type for l in plan.legs if l.action == "sell"])
                      or self._ladder_block(ticker, plan.expiration)
+                     or self._trend_filter_block(ticker, plan, analysis)
                      or self._entry_confirmation_block(ticker, plan))
             if block:
                 logger.info("[%s] %s", ticker, block)
@@ -3020,6 +3077,13 @@ class TradingAgent:
         raw["playbook"] = pb.name
         raw["playbook_implemented"] = pb.implemented
         raw.update(self._shadow_pop_fields(plan, analysis))
+        # Skill 65: trend filter verdicts (shadow or live) for this plan.
+        trend = getattr(self, "_trend_eval", {}).get(ticker)
+        if trend is not None and plan.valid:
+            raw["trend_filters"] = trend
+        earnings = getattr(self.strategy_planner, "earnings_fields", None)
+        if callable(earnings):
+            raw.update(earnings(ticker))
 
         # Adaptive-scan diagnostics: top-K candidates + selected pick. Only
         # set when the planner ran the scanner this cycle; static mode emits

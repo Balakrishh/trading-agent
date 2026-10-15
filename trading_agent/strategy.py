@@ -5,13 +5,14 @@ market regime and option chain Greeks.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import date, datetime, timedelta
+from typing import Callable, Dict, List, Optional, Tuple
 
 from trading_agent.regime import Regime, RegimeAnalysis
 from trading_agent.market_data import MarketDataProvider
-from trading_agent.calendar_utils import next_weekly_expiration
+from trading_agent.calendar_utils import latest_weekly_on_or_before, next_weekly_expiration
 from trading_agent.chain_scanner import ChainScanner, SpreadCandidate
 
 logger = logging.getLogger(__name__)
@@ -225,6 +226,14 @@ class StrategyPlanner:
         self._width_mode  = width_mode
         self._width_value = width_value
 
+        # Earnings-aware expiries (skill 65). The agent sets
+        # ``earnings_lookup`` (ticker → next earnings date or None); plan()
+        # turns it into a per-ticker latest allowed expiration.
+        self.earnings_lookup: Optional[Callable[[str], Optional[date]]] = None
+        self._expiry_cap: Optional[date] = None
+        self._earnings_date: Optional[date] = None
+        self.earnings_ticker: Optional[str] = None
+
     # ------------------------------------------------------------------
     # PDT-aware DTE cap (skill 33, added 2026-05-20)
     # ------------------------------------------------------------------
@@ -265,6 +274,104 @@ class StrategyPlanner:
         return self._scanner is not None
 
     def plan(self, ticker: str, analysis: RegimeAnalysis) -> SpreadPlan:
+        """Plan *ticker* (see ``_plan_body``), keeping every leg's expiry
+        before the ticker's next earnings report (skill 65)."""
+        self.last_scan_candidates = []
+        self.last_scan_side = None
+        self.last_scan_diagnostics = None
+        self._set_earnings_cap(ticker)
+        if self._scanner is not None:
+            self._scanner.max_expiration = self._expiry_cap
+        if self._expiry_cap is not None and self._cap_leaves_no_expiry():
+            d = self._earnings_date
+            days = (d - datetime.now().date()).days
+            return self._empty_plan(
+                ticker, "", analysis, "",
+                f"Earnings on {d} (in {days} d): no weekly expiry at least "
+                f"{self._earnings_min_dte()} d out ends before the report — "
+                f"no new {ticker} trade until after it")
+        return self._enforce_earnings_cap(ticker, analysis, self._plan_body(ticker, analysis))
+
+    # ── Earnings-aware expiries (skill 65) ───────────────────────────────
+
+    def _earnings_min_dte(self) -> int:
+        return int(getattr(self.preset, "earnings_min_dte", 7))
+
+    def earnings_fields(self, ticker: str) -> Dict[str, str]:
+        """Journal fields for the last plan()'s earnings cap — empty unless
+        that plan was for ``ticker`` and it has an upcoming report."""
+        if self.earnings_ticker != ticker or self._earnings_date is None:
+            return {}
+        return {"earnings_date": self._earnings_date.isoformat(),
+                "earnings_expiry_cap": self._expiry_cap.isoformat()}
+
+    def _set_earnings_cap(self, ticker: str) -> None:
+        """Latest allowed expiration = next earnings − buffer days; None
+        for ETFs, unknown dates, or when the guard is off."""
+        self._expiry_cap = self._earnings_date = None
+        self.earnings_ticker = ticker
+        if (self.earnings_lookup is None
+                or not getattr(self.preset, "earnings_guard_enabled", True)):
+            return
+        try:
+            d = self.earnings_lookup(ticker)
+        except Exception as exc:  # noqa: skill-34-exempt — unknown earnings date → no cap, logged
+            logger.warning("[%s] earnings lookup failed: %s", ticker, exc)
+            return
+        if d is None:
+            return
+        buffer = int(getattr(self.preset, "earnings_buffer_days", 1))
+        self._earnings_date = d
+        self._expiry_cap = d - timedelta(days=buffer)
+
+    def _cap_leaves_no_expiry(self) -> bool:
+        return latest_weekly_on_or_before(
+            datetime.now().date(), self._expiry_cap, self._earnings_min_dte()) is None
+
+    def _capped(self, expiration: date) -> date:
+        """``expiration`` if it ends before earnings, else the latest weekly
+        that does (≥ earnings_min_dte out); unchanged when none fits —
+        ``_enforce_earnings_cap`` then rejects the plan."""
+        if self._expiry_cap is None or expiration <= self._expiry_cap:
+            return expiration
+        alt = latest_weekly_on_or_before(datetime.now().date(), self._expiry_cap,
+                                         self._earnings_min_dte())
+        if alt is not None:
+            logger.info("Expiration %s spans earnings on %s — using %s",
+                        expiration, self._earnings_date, alt)
+            return alt
+        return expiration
+
+    @staticmethod
+    def _leg_expiry(symbol: str) -> Optional[date]:
+        m = re.search(r"(\d{6})[CP]\d{8}$", symbol or "")
+        if not m:
+            return None
+        try:
+            return datetime.strptime(m.group(1), "%y%m%d").date()
+        except ValueError:
+            return None
+
+    def _enforce_earnings_cap(self, ticker: str, analysis: RegimeAnalysis,
+                              plan: SpreadPlan) -> SpreadPlan:
+        """Reject a plan any of whose legs expires after the cap — the
+        calendar's far leg, or an expiry nothing could move."""
+        if self._expiry_cap is None or not plan.valid:
+            return plan
+        exps = [e for e in (self._leg_expiry(l.symbol) for l in plan.legs) if e]
+        try:
+            exps.append(date.fromisoformat(plan.expiration))
+        except (TypeError, ValueError):
+            pass
+        latest = max(exps) if exps else None
+        if latest is None or latest <= self._expiry_cap:
+            return plan
+        return self._empty_plan(
+            ticker, plan.strategy_name, analysis, plan.expiration,
+            f"{plan.strategy_name}: leg expiring {latest} spans {ticker} earnings "
+            f"on {self._earnings_date} (must expire by {self._expiry_cap})")
+
+    def _plan_body(self, ticker: str, analysis: RegimeAnalysis) -> SpreadPlan:
         """
         Build the best credit-spread plan for *ticker* given regime *analysis*.
 
@@ -288,12 +395,8 @@ class StrategyPlanner:
         explicit IC trades remain on the static path because their
         timing/strike logic is regime-driven, not edge-driven.
         """
-        # Reset scan state at the start of every plan call so leftover
-        # candidates from the previous ticker can never bleed into this
-        # one's journal.
-        self.last_scan_candidates = []
-        self.last_scan_side = None
-        self.last_scan_diagnostics = None
+        # Scan state was reset in plan() so leftover candidates from the
+        # previous ticker can never bleed into this one's journal.
         # --- Priority 1: Mean Reversion (3-std BB touch) ---
         # Mean reversion intentionally bypasses the inter-market gate —
         # a 3-std band touch IS a fear-spike condition, and the side
@@ -465,7 +568,7 @@ class StrategyPlanner:
         exp = next_weekly_expiration(today=today, target_dte=target_dte,
                                      dte_min=max(1, target_dte - window),
                                      dte_max=target_dte + window)
-        return exp.strftime("%Y-%m-%d")
+        return self._capped(exp).strftime("%Y-%m-%d")
 
     def _typed_slice(self, ticker: str, expiration: str, opt: str):
         """Fetch one expiry's chain of ``opt`` contracts as a ChainSlice."""
@@ -535,6 +638,8 @@ class StrategyPlanner:
             far_exp = (_date.fromisoformat(near_exp) + _td(days=gap + shift)).isoformat()
             if far_exp <= near_exp:
                 continue
+            if self._expiry_cap is not None and far_exp > self._expiry_cap.isoformat():
+                continue        # skill 65: the long leg must also end before earnings
             far = self._typed_slice(ticker, far_exp, opt)
             if not far.contracts:
                 continue
@@ -542,8 +647,10 @@ class StrategyPlanner:
                                                 preset=pre, spot=analysis.current_price))
             break
         if out is None:
+            why = ("no far-dated chain listed" if self._expiry_cap is None
+                   else f"no far leg ends before earnings on {self._earnings_date}")
             return self._empty_plan(ticker, "Calendar Spread", analysis, near_exp,
-                                    "Calendar Spread: no far-dated chain listed")
+                                    f"Calendar Spread: {why}")
         logger.info("[%s] Planning calendar, near %s", ticker, near_exp)
         return self._plan_from_debit_output(ticker, analysis, "calendar", out, near_exp)
 
@@ -1047,6 +1154,7 @@ class StrategyPlanner:
             dte_min=dte_min,
             dte_max=dte_max,
         )
+        candidate = self._capped(candidate)
         dte = (candidate - today).days
         logger.debug("Expiration selected: %s (%d DTE, kind=%s)",
                      candidate, dte, kind)

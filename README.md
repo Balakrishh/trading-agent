@@ -1,6 +1,6 @@
-# Autonomous Defined-Risk Options Agent
+# Defined-Risk Options Agent
 
-An autonomous trading agent that generates income through defined-risk options playbooks — credit spreads when premium pays, debit spreads and calendars when it doesn't, an oversold-bounce bull put, and operator-approved Wheel legs. Primary goal: **capital preservation** — every trade has a known, capped maximum loss.
+An autonomous options agent (repo and services: `trading-agent`) that generates income through defined-risk options playbooks — credit spreads when premium pays, debit spreads and calendars when it doesn't, an oversold-bounce bull put, and operator-approved Wheel legs. Primary goal: **capital preservation** — every trade has a known, capped maximum loss.
 
 ## Contents
 
@@ -9,6 +9,7 @@ An autonomous trading agent that generates income through defined-risk options p
 - [Strategy Selection](#strategy-selection)
 - [Adaptive Chain Scanner](#adaptive-chain-scanner)
 - [Risk Management Guardrails](#risk-management-guardrails)
+- [Operations (Raspberry Pi)](#operations-raspberry-pi)
 - [Live ↔ Backtest Unified Decision Engine](#live--backtest-unified-decision-engine)
 - [Intelligence & Sentiment Layers (Optional)](#intelligence--sentiment-layers-optional)
 - [Streamlit Dashboard](#streamlit-dashboard)
@@ -38,10 +39,12 @@ python -m trading_agent.agent --dry-run
 # launch the dashboard (Live + Backtest + LLM tabs)
 streamlit run trading_agent/streamlit/app.py
 
-# continuous: the launchd supervisor restarts the agent after every cycle
+# continuous: the supervisor restarts the agent after every cycle
 # (skill 57) — a cycle ≈ every 75 s in market hours (AGENT_CYCLE_SLEEP_SEC=60)
 python -m trading_agent.agent_supervisor
 ```
+
+The live agent runs on a Raspberry Pi under systemd user units (since 2026-10-07) — see [Operations](#operations-raspberry-pi) and runbook [`08_raspberry_pi_deployment.md`](docs/runbooks/08_raspberry_pi_deployment.md). Run the agent on **one** host only.
 
 After-hours behaviour: exits cleanly before 9:25 AM ET, after 4:05 PM ET, and on weekends. Override with `FORCE_MARKET_OPEN=true` for paper testing.
 
@@ -80,7 +83,7 @@ Each cycle runs two stages sequentially: monitor existing positions first, then 
 
 ## Strategy Selection
 
-*Current as of 2026-10-05 (backlog phases 1–5, skills 58–60).* Every cycle the agent first rates the **whole market**, then plans each ticker through a strict priority order, then gates the plan.
+*Current as of 2026-10-15 (backlog phases 1–5 and the 2026-10-13 plan of record, skills 58–65).* Every cycle the agent first rates the **whole market**, then plans each ticker through a strict priority order, then gates the plan.
 
 **0 · Market risk state (skill 58).** SPY vs its 20/50/200-day averages, SPY RSI, VIX, VIX/VIX3M and equity-ETF breadth → `NORMAL / CAUTION / DEFENSIVE / CAPITULATION / RECOVERY`. It sets a size multiplier (1.0 / 0.5 / 0.25 / 0, 0.5 in RECOVERY) and which strategy families may open; CAPITULATION skips all new entries. Exits are never gated.
 
@@ -89,15 +92,27 @@ Each cycle runs two stages sequentially: monitor existing positions first, then 
 | Priority | Condition | Plan |
 |---|---|---|
 | **1** | **Mean reversion** — price touches a 3-σ Bollinger band | Mean-Reversion Spread (bear call above / bull put below) |
-| 2 | **VIX inhibit** — `vix_z > +2 σ` and regime Bullish / Sideways | Bear Call (demoted) |
+| 2 | **VIX inhibit** — `vix_z > +2 σ` and regime Bullish / Sideways | No trade (bear calls are off by default); Bear Call when `bear_call_enabled` |
 | 3 | **Leadership bias** — `leadership_z > +1.5 σ`, Bullish / Sideways | Bull Put |
 | 4 | **Oversold downtrend** — Bearish, RSI < 30 | vol rank ≥ 30: **Bounce Bull Put** once price reclaims its 5-day high close (short strike below the 10-day low), else no trade; vol rank < 30: no trade (*wait for stabilisation*) — never a bear call into RSI < 30 |
-| 5 | **Regime credit plan** | Bullish → Bull Put · Bearish → Bear Call · Sideways → Iron Butterfly (opt-in) then Iron Condor |
+| 5 | **Regime credit plan** | Bullish → Bull Put · Bearish → **Put Debit Spread** at any volatility (Bear Call only when `bear_call_enabled`) · Sideways → Iron Butterfly (opt-in) then Iron Condor |
 | 6 | **Low-volatility fallback** — the credit plan found no positive-EV candidate and vol rank < 30 | Bullish → **Call Debit Spread** · Bearish → **Put Debit Spread** · Sideways → **Calendar Spread** |
+
+**Bear calls are off by default (2026-10-14, `bear_call_enabled = False`).** A calibration study over 2019–2026 on the 12 traded tickers (`scripts/research/calibrate_pop_rv.py`, [`docs/plans/research_pop_calibration.md`](docs/plans/research_pop_calibration.md)) found short calls finished out of the money 2–6 points *less* often than their delta implied, even in down-trends, while short puts beat theirs by 9–11 points. A bearish view is therefore expressed with a put debit spread. The Strategy Profile checkbox "Sell bear call spreads" turns them back on. Iron condors and the mean-reversion spread are unchanged.
 
 The playbook table behind rows 4–6 (trend × volatility × RSI → playbook) lives in `market_state.playbook_for`; every journal row carries `playbook` and `playbook_implemented`.
 
 **Then the gates, in order:** RiskManager (below) → market-state strategy gate (e.g. CAUTION blocks new bull puts / call debits / CSPs) → ladder gate → total-risk sizing. A rejected plan is journaled with its reason (`risk: <first failed check>`).
+
+**Earnings-aware expiries (skill 65).** A single-stock trade must expire before its next earnings report (`earnings_buffer_days` = 1 day before). The planner — and the scanner — pick the latest weekly expiry that ends in time; only when none is at least `earnings_min_dte` (7) days out does the ticker wait until after the report (about a week a quarter). Calendars are skipped when the far leg would cross the report. ETFs are never affected. Dates come from yfinance, cached in `trade_journal/earnings_dates.json` for 12 h.
+
+**Trend entry filters (skill 65, shadow by default).** For directional trades (bull put, call debit / bear call, put debit):
+* *Relative strength* — 20/60-day return minus SPY's, ranked across the watchlist: bullish trades need percentile ≥ `rs_min_percentile` (0.50), bearish ≤ 0.50.
+* *Pullback* — bullish: price above the 50-day SMA and within `pullback_max_atr` (1.0) × ATR(14) of the 20-day SMA; bearish is the mirror.
+
+`rs_filter_mode` / `pullback_filter_mode` = `shadow` records each verdict in the journal (`raw_signal.trend_filters`) without blocking; `live` blocks with `risk: trend: …`; `off` skips the check.
+
+**Entry pacing (skill 61). An approved plan is submitted only after the same strategy and expiry were chosen on `entry_confirm_cycles` (3) consecutive cycles, never before `no_entry_before_et` (09:45 ET), and at most `max_new_entries_per_hour` (1) per sector; a second position on a ticker is never opened the day the first was (`ladder_same_day_entry`). Entry timing (best-priced cycle of an 8-cycle window) runs in shadow by default.
 
 **Credit vs debit economics.**
 * Credit structures need positive EV with `|Δ|` as P(ITM): `C/W ≥ |Δshort| × (1 + edge_buffer)` (one formula in three files, CI-enforced).
@@ -108,7 +123,7 @@ The playbook table behind rows 4–6 (trend × volatility × RSI → playbook) l
 
 **Z-scored leadership bias.** `LEADERSHIP_ANCHORS` in `regime.py` maps each ticker to a sibling benchmark (`SPY → QQQ`, sector ETFs → SPY, …). The latest 5-min return differential is z-scored against its own ~20-bar distribution; `z > 1.5 σ` in a Bullish/Sideways regime picks Bull Put.
 
-**VIX inter-market gate.** `^VIX` (yfinance) z-scored over ~20 5-min bars; `vix_z > +2 σ` sets `inter_market_inhibit_bullish` and demotes Bull Put / Iron Condor → Bear Call for that cycle. Mean reversion bypasses it.
+**VIX inter-market gate.** `^VIX` (yfinance) z-scored over ~20 5-min bars; `vix_z > +2 σ` sets `inter_market_inhibit_bullish`: no new Bull Put / Iron Condor that cycle (with bear calls enabled, it demotes them to a Bear Call instead). Mean reversion bypasses it.
 
 **DTE and width.** Per-strategy and per-preset (skill 13): verticals / condors / mean reversion / debit (30) / calendar near (21); the adaptive scanner sweeps `dte_grid × delta_grid × width_grid_pct`. There is no single `TARGET_DTE`.
 
@@ -170,15 +185,44 @@ Every trade must pass **all eight checks** before execution:
 
 **Exits.**
 * *Credit spreads:* profit target 50 % of credit judged at the natural cost to close; `HARD_STOP` at 3× credit; 50 %-of-max-loss stop; `STRIKE_PROXIMITY` (within 1 % of a short strike, optional defensive roll); `DTE_SAFETY` (15:30 ET on the last trading day before expiry); regime shift.
-* *Debit spreads / calendars (skill 59):* stop at 50 % of the debit; target 50 % of max profit (verticals) or 25 % of the debit (calendars); DTE safety on the near expiry; regime exit only on a real trend change (verticals: the opposite trend; calendars: any bullish or bearish trend, never a one-cycle mean-reversion reading); calendars also close when price drifts ≥ 3 % from the strike.
+* *Debit spreads / calendars (skill 59):* stop at 50 % of the debit; target 50 % **of the debit paid** (verticals, `debit_profit_target_basis = "debit"` since 2026-10-08; `"max_profit"` restores the old share-of-max-profit rule) or 25 % of the debit (calendars); DTE safety on the near expiry; regime exit only on a real trend change (verticals: the opposite trend; calendars: any bullish or bearish trend, never a one-cycle mean-reversion reading); calendars also close when price drifts ≥ 3 % from the strike.
 * *Wheel:* 50 % of credit; CSP |Δ| ≥ 0.45 stop; otherwise assignment is accepted.
-* Closes go out as one multi-leg order (improved, then natural price); realized P&L is computed from the actual fills.
+* *Opening window (2026-10-13):* debounced exits wait until `no_exit_before_et` (09:45 ET) so the opening auction's wide quotes cannot trigger them; immediate exits (hard stop, strike proximity, DTE safety) never wait.
+* Closes go out as one multi-leg order (improved, then natural price); realized P&L is computed from the actual fills. If both prices fail, the legs close one at a time — shorts first, each waiting for the previous leg's fill — and a close that finishes over two cycles books P&L over every leg (`trade_plans/partial_close_legs.json`, skill 17 §4; the 2026-10-14 QQQ stop was first journaled at −$1,195.50 instead of −$420).
+* *Profit trailing (skill 30):* `profit_trail_mode` off / shadow / live — shadow (default) records what trailing would have earned.
 
 **Position Exit Debouncing.** Non-immediate exit signals require **3 consecutive cycles** (≈ 4 min at the ~75 s cadence). Bypassed by `HARD_STOP`, `STRIKE_PROXIMITY` and `DTE_SAFETY`.
 
 **Live Quote Refresh at Execution.** The executor re-quotes both legs right before submission and re-validates the economics-bearing checks (credit ratio or debit cap, max loss) against the live price; debit orders go at natural, credit orders one tick inside.
 
-**Measurement (skill 60).** Entry fills are written back into the trade plans the monitor reads; every journaled plan logs a realized-volatility POP beside the delta POP (shadow, no trading effect); MCP `get_playbook_scorecard` reports win rate / expectancy / return on risk per playbook with an advisory size after 20 trades.
+**Measurement (skill 60).** Entry fills are written back into the trade plans the monitor reads; every journaled plan logs a realized-volatility POP beside the delta POP (shadow, no trading effect); MCP `get_playbook_scorecard` reports win rate / expectancy / return on risk per playbook with an advisory size after 20 trades, and each playbook's entry cost vs the market mid (`entry_cost_vs_mid`, `entry_slippage_vs_mid`). Every closed position also gets a `position_excursion` journal row — its best and worst P&L while open (skill 30) — to tune targets and stops.
+
+---
+
+## Operations (Raspberry Pi)
+
+Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's launchd jobs are disabled. Full setup, cutover and rollback: runbook [`08_raspberry_pi_deployment.md`](docs/runbooks/08_raspberry_pi_deployment.md).
+
+**Services** (systemd user units in `deploy/systemd/`, linger enabled so they start at boot):
+
+| Unit | What it does |
+|---|---|
+| `trading-agent.service` | The supervisor (skill 57): one agent cycle ≈ every 75 s in NYSE hours, sleeps outside them |
+| `trading-agent-data-server.service` | Schwab quote server on `127.0.0.1:8765` for the MCP tools |
+| `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
+| `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET or `/health` fails; one page per outage plus "recovered" (skill 64) |
+| `trading-agent-dashboard.service` | Streamlit dashboard (optional, off by default) |
+
+After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer`.
+
+**Alerts (skill 32).** Telegram: trade opens / closes and the end-of-day summary on the main bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), errors and liveness pages on the error bot (`TELEGRAM_ERROR_*`). Messages are HTML-escaped; a message Telegram still rejects is resent once as plain text.
+
+**Operator controls.**
+* **Claude Code + MCP (skill 48).** `.mcp.json` starts the `trading-agent` MCP server from `myenv`: read-only tools (`list_positions`, `get_market_state`, `get_quote`, `run_scan`, `get_playbook_scorecard`, …) and slash commands `/portfolio`, `/triage`, `/propose` (stages to `pending_orders/`, never submits), `/review`, `/incident`, `/taxreview`.
+* **Manual close (skill 63).** `python -m trading_agent.manual_close --ticker X` previews; `--submit` closes one spread with the atomic close and journals it as `closed` with `exit_signal="manual"`.
+* **Kill switch (skill 62).** `python -m trading_agent.trading_halt pause --reason "…"` / `resume`.
+
+**Schwab weekly re-login (skill 16 §4).** The refresh token lasts 7 days from the browser login (refreshes don't extend it). Telegram warns when ≤ 2 days remain. Only one machine may hold or refresh the token — the refresh token rotates.
 
 ---
 
@@ -260,6 +304,12 @@ Both layers are off by default. Each degrades gracefully if its dependencies are
 | Knowledge Base / RAG | `knowledge_base.py` | File-based vector store via `nomic-embed-text`; cosine search; no external DB |
 | LLM Analyst | `llm_analyst.py` | Returns approve/modify/skip — **advisory only**, can't override the risk manager |
 | Fine-Tuning Pipeline | `fine_tuning.py` | Exports Chat JSONL / Alpaca / DPO formats once 20+ closed trades exist |
+
+### Daily journal review (skill 56)
+
+At 16:15 ET `trading_agent.daily_reviewer_main` summarizes the day's journal (opens, closes, rejection reasons, realized P&L, preset, macro, alerts) and asks an LLM for observations plus at most one preset and one watchlist proposal. Proposals go to `pending_preset_updates/` for the operator — the reviewer never trades (an AST check forbids order imports). Output: `daily_reviews/<date>.json`, `/review` in Claude Code.
+
+With `TRADING_AGENT_REVIEWER_LLM=claude_cli` (set by the Pi's reviewer unit since 2026-10-14) the review runs through the logged-in `claude` CLI (`trading_agent/claude_reviewer.py`) — no API key, no tools, no MCP servers. It keeps **one session across days** (`trade_journal/reviewer_session.json`) so each review can compare with earlier days, and rotates after 20 reviews or 60k context tokens, carrying the last 5 days' observations into the new session. ≈ 5k context tokens on day 1, growing ≈ 3k a day. Without the variable, the OpenAI-compatible client (Ollama by default) is used.
 
 ### Multi-Source Sentiment Pipeline
 
@@ -408,14 +458,14 @@ Only required if any surface is set to `schwab`.
    SCHWAB_CLIENT_SECRET=<your app secret>
    SCHWAB_REDIRECT_URI=https://127.0.0.1:8182
    ```
-3. Run the one-time authorization-code exchange:
+3. Run the one-time authorization-code exchange. The CLI reads only the shell environment, so load `.env` first:
    ```bash
-   python -m trading_agent.schwab_oauth login
+   python -c "from dotenv import load_dotenv; load_dotenv('.env'); from trading_agent.schwab_oauth import main; raise SystemExit(main(['login']))"
    ```
-   The CLI prints a Schwab login URL — open it in a browser logged into your Schwab account, click Approve. Schwab redirects to `https://127.0.0.1:8182/?code=…&session=…`. Your browser will show a "connection refused" page (expected — nothing's running on port 8182), but the URL bar contains the authorization code. Paste the full URL back into the CLI prompt; it extracts the code, exchanges it for tokens, and persists to `~/.schwab_tokens.json`.
-4. Verify with `python -m trading_agent.schwab_oauth status`.
+   The CLI prints a Schwab login URL — open it in a browser logged into your Schwab account, click Approve. Schwab redirects to `https://127.0.0.1:8182/?code=…&session=…`. Your browser will show a "connection refused" page (expected — nothing's running on port 8182), but the URL bar contains the authorization code. Paste the full URL back into the same CLI prompt **within about 30 seconds** (the code expires; relaying it through chat or another machine is too slow); it extracts the code, exchanges it for tokens, and persists to `~/.schwab_tokens.json`.
+4. Verify with the same one-liner and `main(['status'])`.
 
-**Refresh-token lifetime is 7 days, absolute.** The 30-min access token refreshes silently inside the agent loop, but every 7 days you need to re-run `login`. The agent will log a clear WARNING with the exact CLI command when this happens.
+**Refresh-token lifetime is 7 days, counted from the browser login.** The 30-min access token refreshes silently inside the agent loop, but every 7 days you need to re-run `login`. From 2026-10-13 the agent tracks the deadline from the login itself (`refresh_days_left()`) and sends a Telegram reminder after the close when ≤ 2 days remain. Only one machine may hold the token file.
 
 **Why a manual login at all?** OAuth's authorization-code flow requires the brokerage account holder to physically click "Approve" once. This is regulatory (data-access consent) and can't be bypassed by storing your username/password — that would violate Schwab's TOS and their API rules.
 
@@ -448,7 +498,7 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 
 | Variable | Default | Description |
 |---|---|---|
-| `TICKERS` | `SPY,QQQ` | Comma-separated underlyings |
+| `TICKERS` | `SPY,QQQ` | Comma-separated underlyings. Live (2026-10-15): SPY QQQ IWM DIA XLF XLE TLT GLD EEM GDX META AMZN XLK XLV XLY XLI SMH XLU |
 | `DRY_RUN` | `true` | Log plans; don't submit orders |
 | `MODE` | `dry_run` | `live` or `dry_run` |
 | `MAX_RISK_PCT` | `0.02` | Max loss per trade as fraction of equity |
@@ -596,6 +646,33 @@ trading-agent/
 │   │   # ── Position Management ──
 │   ├── position_monitor.py
 │   ├── order_tracker.py
+│   ├── profit_trail.py               # Trailing profit (shadow/live) + position excursions
+│   ├── fill_reconciler.py            # Writes entry fills back into trade plans
+│   ├── manual_close.py               # Operator close CLI (skill 63)
+│   ├── journal_reconcile.py          # Closes journal opens the broker already closed
+│   │
+│   │   # ── Portfolio risk & pacing ──
+│   ├── market_state.py               # Whole-market risk state + playbook table (skill 58)
+│   ├── debit_policy.py               # Debit / calendar / bounce constants (skill 59)
+│   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk caps (skill 37)
+│   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
+│   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)
+│   ├── trading_halt.py               # Kill switch + drawdown governor (skill 62)
+│   ├── playbook_scorecard.py         # Per-playbook stats, entry cost vs mid (skill 60)
+│   ├── shadow_pop.py                 # Realized-vol POP beside delta POP (skill 60)
+│   │
+│   │   # ── Wheel ──
+│   ├── wheel_policy.py / wheel_lifecycle.py / executor_promote.py / pending_orders_writer.py
+│   │
+│   │   # ── Ops & alerts ──
+│   ├── agent_supervisor.py           # Long-running cycle wrapper (skill 57)
+│   ├── liveness.py                   # Liveness watchdog (skill 64)
+│   ├── telegram_notifier.py          # Telegram alerts (skill 32)
+│   ├── exception_monitor.py          # Error paging + silenced-exception counts (skill 34)
+│   ├── daily_reviewer.py / daily_reviewer_main.py / claude_reviewer.py   # EOD review (skill 56)
+│   ├── schwab_oauth.py / market_data_schwab.py / market_data_factory.py  # Data providers (skill 16)
+│   ├── mcp/                          # MCP server for Claude Code (skill 48)
+│   ├── data_server/                  # Read-only Schwab quote server, localhost:8765
 │   │
 │   │   # ── Backtesting ──
 │   ├── backtest/
@@ -618,7 +695,7 @@ trading-agent/
 │   │
 │   │   # ── Sentiment Pipeline ──
 │   ├── sentiment_pipeline.py         # Tier-0/1/2 facade, cycle-scoped pool
-│   ├── earnings_calendar.py          # Tier-0
+│   ├── earnings_calendar.py          # Tier-0 + cached next-earnings dates for expiry choice (skill 65)
 │   ├── sentiment_cache.py            # Tier-1
 │   ├── news_aggregator.py            # Tier-2 — NewsItem + NewsAggregator
 │   ├── fingpt_analyser.py            # Tier-2 — FinGPT specialist
@@ -642,7 +719,13 @@ trading-agent/
 │   ├── signals_backtest.jsonl        # Backtest-mode signal log (deliberately separate)
 │   └── signals_*.md                  # Human-readable mirrors
 │
-├── trade_plans/                      # Per-ticker persistent trade-plan files
+├── trade_plans/                      # Per-ticker trade-plan files + partial_close_legs.json
+├── deploy/systemd/                   # Pi services and timers
+├── ops/launchd/                      # Mac launchd plists (disabled since the Pi move)
+├── .claude/                          # Slash commands, subagents for Claude Code
+├── scripts/checks/                   # CI + local drift gates
+├── scripts/research/                 # Offline studies (POP calibration, market-state validation)
+├── docs/skills/ · docs/runbooks/ · docs/plans/
 ├── knowledge_base/                   # RAG vector store (LLM layer) + watchlist.json (Watchlist tab)
 └── logs/
 ```
@@ -653,11 +736,15 @@ trading-agent/
 
 Live cycles append one JSON object per line to `trade_journal/signals_live.jsonl`; backtests append to `trade_journal/signals_backtest.jsonl`. The two files use identical schema. When the sentiment pipeline is active each record also carries `fingpt_sentiment`, `fingpt_event_risk`, `fingpt_recommendation`, `fingpt_agreement`, `fingpt_hallucination_flags`, and `fingpt_verified_by`.
 
-**Action values:** `dry_run`, `submitted`, `rejected`, `closed`, `close_failed`, `dry_run_close`, `warning`, `skipped_by_llm`, `skipped_existing`, `skipped_liquidation_mode`, `skipped_bias`, `skipped_rsi_gate`, `skipped_defense_first`, `skipped`, `error`, `cycle_timeout`, `daily_drawdown_circuit_breaker`. Full schema reference: [`docs/skills/19_journal_schema.md`](docs/skills/19_journal_schema.md).
+**Action values** (main ones): `dry_run`, `submitted`, `rejected`, `closed`, `close_failed`, `dry_run_close`, `warning`, `skipped_by_llm`, `skipped_existing`, `skipped_liquidation_mode`, `skipped_bias`, `skipped_rsi_gate`, `skipped_defense_first`, `skipped_pdt_blocked`, `skipped_total_risk_cap`, `skipped_entry_rate`, `skipped`, `error`, `cycle_timeout`, `daily_drawdown_circuit_breaker`, `market_state`, `trading_halt_set` / `_cleared`, `telegram_alert_sent`, `silenced_exception`, `position_reconciled`, `position_excursion`, `profit_trail_shadow`, `entry_timing_shadow`. Full schema reference: [`docs/skills/19_journal_schema.md`](docs/skills/19_journal_schema.md).
 
-**Material actions bypass the dedup gate** — `submitted`, `closed`, `close_failed`, `error`, `warning`, `dry_run`, `dry_run_close` — so successive cycles never silently suppress them. Rejection-spam actions (`rejected`, `skipped_*`) get per-ticker dedup with periodic heartbeat rows (every 12 cycles by default).
+**Material actions bypass the dedup gate** — `submitted`, `closed`, `close_failed`, `error`, `warning`, `dry_run`, `dry_run_close`, `position_excursion`, and the alert / silenced-exception rows — so successive cycles never silently suppress them. Rejection-spam actions (`rejected`, `skipped_*`) get per-ticker dedup with periodic heartbeat rows (every 12 cycles by default).
 
 **`close_failed`** (added 2026-05-06) tags a partial-fill close where one or more legs were rejected by Alpaca (PDT, uncovered, insufficient buying power); the position is **still open on the broker**. After 3 consecutive partial fills on a single ticker the agent enters a 60-min cooldown and the dashboard's Close Failures Today panel renders a 🚨 manual-intervention banner. See [`docs/skills/17_close_failure_and_cooldown.md`](docs/skills/17_close_failure_and_cooldown.md).
+
+**Trend filters and earnings** (skill 65): rows for a directional plan carry `trend_filters` (`direction`, `blocked`, each check's `ok` / `reason` / metrics); single-stock rows with a report ahead carry `earnings_date` and `earnings_expiry_cap`.
+
+**Realized P&L** is `raw_signal.net_unrealized_pl` on the `closed` row, with `pl_source` = `fill` (from broker fills), `signal_mark` (the exit-time mark, when fills are unknown) or `fill_corrected` (fixed by hand, with a `pl_correction` note). The exit-time mark is kept as `signal_mark_pl`.
 
 **`warning`** (added 2026-05-06) is emitted by `JournalKB.log_warning(source=...)` when a vendor retry budget is exhausted — order submission timed out N times, Schwab OAuth refresh failed N times, position fetch failed N times. Carries the `client_order_id` (when applicable) so an operator can search the broker UI to confirm whether any attempt landed.
 
@@ -716,17 +803,18 @@ When the active preset is in adaptive mode, every `plan()` invocation that runs 
 
 ## Spec-Driven Development (SDD)
 
-This project follows a Spec-Driven Development workflow: every architectural concept is documented as an atomic "skill" file before the corresponding code is shipped, and CI verifies the spec and code never drift apart. Five tools — three CI gates and two workflow helpers — enforce this mechanically.
+This project follows a Spec-Driven Development workflow: every architectural concept is documented as an atomic "skill" file before the corresponding code is shipped, and CI verifies the spec and code never drift apart. CI gates plus local checks and two workflow helpers enforce this mechanically (full list: [`scripts/checks/README.md`](scripts/checks/README.md)).
 
-**Where the specs live.** Each concept is one file under `docs/skills/NN_short_name.md` (currently 22 skills). The format is fixed: theory → math → reference Python (quoted verbatim from source) → edge cases → cross-references → footer dated to the last verification. `CLAUDE.md` documents the SDLC contract; `CONTRIBUTING.md` operationalises it into commands.
+**Where the specs live.** Each concept is one file under `docs/skills/NN_short_name.md` (currently 57 skills, numbered 00–65). The format is fixed: theory → math → reference Python (quoted verbatim from source) → edge cases → cross-references → footer dated to the last verification. `CLAUDE.md` documents the SDLC contract; `CONTRIBUTING.md` operationalises it into commands.
 
-**The five CI gates** (`.github/workflows/ci.yml` runs all of them on every push):
+**The CI gates** (`.github/workflows/ci.yml` runs all of them on every push):
 
 | Gate | What it asserts |
 |---|---|
 | `scan_invariant_check.py` | AST-level architectural invariants (C/W formula parity, no shadow scorers, backtest wires through `decide()`) |
 | `scan_skill_quotes_match.py` | Every skill's §3 first code-line still appears verbatim in the cited source. Catches signature drift. |
 | `scan_skill_freshness.py` | Every skill's footer date ≥ the git-mtime of every cited source file. Catches forgotten footer re-stamps. |
+| `scan_dryrun_isolation.py` | Production code never reads `signals_dryrun.jsonl`. |
 | `build_traceability.py` + `git diff --exit-code` | The skill ↔ source ↔ test coverage matrix at `docs/traceability.md` is in sync with the repo. |
 | `pytest tests/conformance/` | Documented math/behavior is asserted against the live implementation for skills 03, 04, 17, 29 (back-fill in progress). |
 

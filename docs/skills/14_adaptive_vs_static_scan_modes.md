@@ -274,6 +274,7 @@ self.executor: ExecutionPort = OrderExecutor(
 - **Diagnostics captured per cycle** — `last_scan_candidates`, `last_scan_side`, `last_scan_diagnostics` are reset at the top of every `plan()` call. The agent's journal layer reads them after the call returns. Don't move the reset; cross-ticker bleed through these attrs would wrongly attribute candidates to the next ticker.
 - **Rough long-leg delta** — `best.short_delta * 0.4` for the `SpreadLeg.delta` of the bought leg is a placeholder; the real long-leg delta rides the IV skew and isn't priced by the scanner. The number is good enough for the journal — no downstream code reads the bought-leg delta — but don't let it leak into PnL math.
 - **`SPREAD_WIDTH = 5.0`, `TARGET_DTE = 35`, `DTE_RANGE = (28, 45)` are LEGACY** — class constants on `StrategyPlanner` only fire when no preset is supplied. Any new code path should pass a preset; the constants exist solely so older tests and the original demo scripts keep working.
+- **Earnings cap on the scan (2026-10-15, skill 65).** `ChainScanner.max_expiration` (set per ticker by `StrategyPlanner.plan`) clamps each grid point's DTE window to end on or before the cap and drops points whose window lies wholly past it; `None` (ETFs, no report ahead) leaves the scan unchanged. Static mode is covered by `_pick_expiration` → `_capped`.
 
 ## 5. Cross-References
 
@@ -286,4 +287,4 @@ self.executor: ExecutionPort = OrderExecutor(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

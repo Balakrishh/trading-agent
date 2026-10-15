@@ -21,11 +21,12 @@ If you're trying to understand HOW the dedup gate works, read `docs/skills/17_cl
 | "I'm about to start a fresh LLM session for diagnosis" | [`00_using_this_with_an_llm.md`](00_using_this_with_an_llm.md) |
 | "Market just closed, did anything go wrong today?" | [`01_daily_close_review.md`](01_daily_close_review.md) |
 | "The agent didn't submit any trades, why?" | [`02_zero_trades_diagnostic.md`](02_zero_trades_diagnostic.md) *(stub — to be written when first needed)* |
-| "I have a partial-fill broken spread on the broker" | [`03_zombie_position_recovery.md`](03_zombie_position_recovery.md) |
+| "I have a partial-fill broken spread on the broker" | [`03_zombie_position_recovery.md`](03_zombie_position_recovery.md) (a close that finishes leg by leg over two cycles now books P&L over every leg — skill 17 §4) |
 | "What does this Alpaca/Schwab error code mean?" | [`04_broker_api_errors.md`](04_broker_api_errors.md) *(stub)* |
 | "I think multiple agent processes are running" | [`05_ghost_process_diagnostic.md`](05_ghost_process_diagnostic.md) *(stub)* |
 | "One ticker on the dashboard looks wrong — credit / P&L / max-loss / two-rows-instead-of-one" | [`06_ticker_dashboard_diagnostic.md`](06_ticker_dashboard_diagnostic.md) |
-| "I want to run the agent on the Raspberry Pi instead of the Mac" | [`08_raspberry_pi_deployment.md`](08_raspberry_pi_deployment.md) |
+| "I'm restarting paper trading at a new account size — what do I check first?" | [`07_25k_restart_checklist.md`](07_25k_restart_checklist.md) |
+| "I want to run the agent on the Raspberry Pi instead of the Mac" — or day-to-day on the Pi: services after a reboot, the weekly Schwab re-login, the liveness page, the `claude` CLI daily review | [`08_raspberry_pi_deployment.md`](08_raspberry_pi_deployment.md) |
 | "I want pre-tuned prompts for talking to ChatGPT / Claude / Gemini" | [`prompts.md`](prompts.md) |
 
 ---

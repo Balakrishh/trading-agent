@@ -169,6 +169,7 @@ def timing_decision(history: List[Dict[str, float]], required: int,
 - **Live waits and skips** journal as `rejected` with `risk: entry_timing_wait` / `risk: entry_timing_skip`; a skip clears the candidate (the next entry starts a new confirmation).
 - **Shadow outcomes** are resolved at entry when the rule agrees (`improvement_usd` 0), otherwise when the rule would have entered or skipped in a later cycle (filled legs re-quoted from the next cycle on; trackers older than 30 min are dropped).
 - **`entry_confirm_cycles = 1`** restores immediate entry; the Wheel's operator-staged orders (`/propose` → promote) are not affected.
+- **Trend filters before confirmation (2026-10-15, skill 65).** `_trend_filter_block` runs just before `_entry_confirmation_block`, so in live mode a filtered plan never advances its confirmation streak; in shadow it records the verdict and confirmation proceeds as before.
 
 ## 5. Cross-References
 
@@ -178,4 +179,4 @@ def timing_decision(history: List[Dict[str, float]], required: int,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-06.*
+*Last verified against repo HEAD on 2026-10-15.*

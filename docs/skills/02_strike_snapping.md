@@ -65,4 +65,4 @@ Both call sites use the identical formula. If this primitive ever needs to chang
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

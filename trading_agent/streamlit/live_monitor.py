@@ -2836,6 +2836,46 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                                           float(getattr(seed, "trail_calendar_ceiling_pct", 0.40)), 0.05,
                                           key="cust_trail_cal_ceiling")
 
+        # ── Earnings-aware expiries + trend entry filters (skill 65) ──
+        st.markdown("**Earnings & trend entry filters** *(skill 65)*")
+        tf1, tf2, tf3, tf4 = st.columns(4)
+        _modes = ["shadow", "live", "off"]
+        with tf1:
+            earnings_guard = st.checkbox(
+                "Expire before earnings",
+                value=bool(getattr(seed, "earnings_guard_enabled", True)),
+                key="cust_earnings_guard",
+                help="Single stocks: pick the latest weekly expiry that ends before the next "
+                     "earnings report; wait until after it only when none is far enough out.")
+            earnings_buffer = st.number_input(
+                "Days before the report", 0, 7, int(getattr(seed, "earnings_buffer_days", 1)), 1,
+                key="cust_earnings_buffer")
+            earnings_min_dte = st.number_input(
+                "Shortest DTE allowed", 1, 30, int(getattr(seed, "earnings_min_dte", 7)), 1,
+                key="cust_earnings_min_dte")
+        with tf2:
+            rs_mode = st.selectbox(
+                "Relative strength filter", _modes,
+                index=_modes.index(getattr(seed, "rs_filter_mode", "shadow")),
+                key="cust_rs_mode",
+                help="20/60-day return vs SPY, ranked across the watchlist. shadow: record "
+                     "only · live: block bullish trades on laggards and bearish trades on leaders.")
+            rs_min_pct = st.slider(
+                "Bullish needs percentile ≥", 0.0, 1.0,
+                float(getattr(seed, "rs_min_percentile", 0.5)), 0.05, key="cust_rs_min_pct",
+                help="Bearish trades need ≤ 1 − this.")
+        with tf3:
+            pullback_mode = st.selectbox(
+                "Pullback filter", _modes,
+                index=_modes.index(getattr(seed, "pullback_filter_mode", "shadow")),
+                key="cust_pullback_mode",
+                help="Bullish: price above the 50-day SMA and not stretched above the 20-day "
+                     "(mirror for bearish). shadow: record only · live: block.")
+        with tf4:
+            pullback_max_atr = st.slider(
+                "Max stretch from 20-day SMA (ATR)", 0.25, 3.0,
+                float(getattr(seed, "pullback_max_atr", 1.0)), 0.25, key="cust_pullback_atr")
+
         # ── Debit structures + bounce bull put (skill 59) ─────────────
         st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
         db_c1, db_c2, db_c3 = st.columns(3)
@@ -2993,6 +3033,13 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "trail_debit_ceiling_pct":      trail_debit_ceiling,
         "trail_calendar_ceiling_pct":   trail_cal_ceiling,
         "trail_max_hold_dte":           int(trail_dte),
+        "earnings_guard_enabled":       bool(earnings_guard),
+        "earnings_buffer_days":         int(earnings_buffer),
+        "earnings_min_dte":             int(earnings_min_dte),
+        "rs_filter_mode":               rs_mode,
+        "rs_min_percentile":            rs_min_pct,
+        "pullback_filter_mode":         pullback_mode,
+        "pullback_max_atr":             pullback_max_atr,
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

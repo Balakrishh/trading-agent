@@ -149,4 +149,4 @@ if (spread.exit_signal == ExitSignal.STRIKE_PROXIMITY
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

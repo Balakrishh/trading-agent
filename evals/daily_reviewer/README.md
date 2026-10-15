@@ -35,6 +35,25 @@ Two modes:
     pytest tests/eval/test_daily_reviewer_scenarios.py
   ```
 
+  The LLM is whatever `daily_reviewer.call_llm` uses: the Ollama /
+  OpenAI-compatible client by default, or the logged-in `claude` CLI
+  when `TRADING_AGENT_REVIEWER_LLM=claude_cli` (skill 56 §3.5.1 — the
+  Pi's reviewer service sets this). With `claude_cli`, **point the
+  session file and working directory somewhere else**, or the evals
+  resume the live reviewer's day-to-day session and land in its
+  history:
+
+  ```bash
+  EVAL_DAILY_REVIEWER_ONLINE=true TRADING_AGENT_REVIEWER_LLM=claude_cli \
+  TRADING_AGENT_REVIEWER_SESSION=/tmp/eval_reviewer_session.json \
+  TRADING_AGENT_REVIEWER_WORKDIR=/tmp/eval-reviewer \
+    pytest tests/eval/test_daily_reviewer_scenarios.py
+  ```
+
+  Each scenario then continues one eval session (the reviewer keeps
+  context across calls by design); delete the session file for
+  independent runs.
+
 Online runs are excluded from CI — flake risk from LLM sampling isn't
 worth the signal. Run them locally when tuning the prompt or the
 allowlist.

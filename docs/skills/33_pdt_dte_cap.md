@@ -66,6 +66,7 @@ try:
 - **`apply_pdt_dte_cap` is wrapped in try/except at the agent call site.** A planner-side bug (unlikely) must not crash the cycle.
 - **Mean-Reversion DTE typically already short.** Default Balanced has 14d; the cap is a no-op for Mean Reversion under default. The cap matters mostly for Vertical (21d) and Iron Condor (35d).
 - **Cap doesn't affect existing positions.** It only changes future entry-DTE. A position opened with DTE=35 stays open with its original expiry; only the next planning cycle sees the cap.
+- **Earnings cap stacks on the PDT cap (2026-10-15, skill 65).** The PDT cap lowers target DTEs; the earnings cap then limits the chosen expiry to the last weekly before the report. Both only shorten — whichever is earlier wins.
 
 ## 5. Cross-References
 
@@ -75,4 +76,4 @@ try:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-15.*

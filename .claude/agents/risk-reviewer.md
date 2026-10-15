@@ -1,6 +1,6 @@
 ---
 name: risk-reviewer
-description: Reviews a proposed credit-spread trade against the active preset's risk rules before it's staged. Read-only. Invoked by /propose (skill 51) after scoring and before pending_orders_writer.
+description: Reviews a proposed defined-risk trade (credit or debit spread, calendar, condor, Wheel leg) against the active preset's risk rules before it's staged. Read-only. Invoked by /propose (skill 51) after scoring and before pending_orders_writer.
 tools:
   - mcp__trading-agent__get_risk_report
   - mcp__trading-agent__get_position

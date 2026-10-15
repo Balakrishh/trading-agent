@@ -400,6 +400,32 @@ class PresetConfig:
     trail_max_hold_dte:                int   = 7
 
     # ------------------------------------------------------------------
+    # Earnings-aware expiries (skill 65, added 2026-10-15). A single-stock
+    # trade must expire at least ``earnings_buffer_days`` before the next
+    # earnings date: the planner picks the latest weekly that fits, and
+    # only when none is ≥ ``earnings_min_dte`` days out does the ticker
+    # wait until after the report. ETFs are never affected.
+    # ------------------------------------------------------------------
+    earnings_guard_enabled:            bool  = True
+    earnings_buffer_days:              int   = 1
+    earnings_min_dte:                  int   = 7
+
+    # ------------------------------------------------------------------
+    # Trend entry filters (skill 65, added 2026-10-15) for directional
+    # trades. Relative strength: the ticker's 20/60-day return minus
+    # SPY's, ranked across the watchlist — bullish trades need a
+    # percentile ≥ rs_min_percentile, bearish ≤ 1 − it. Pullback: a
+    # bullish trade needs price above the 50-day SMA and no more than
+    # pullback_max_atr × ATR(14) above the 20-day SMA (mirror for
+    # bearish). "shadow" records the verdict without blocking; "live"
+    # blocks; "off" skips the check.
+    # ------------------------------------------------------------------
+    rs_filter_mode:                    str   = "shadow"
+    rs_min_percentile:                 float = 0.50
+    pullback_filter_mode:              str   = "shadow"
+    pullback_max_atr:                  float = 1.0
+
+    # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
 
@@ -428,6 +454,13 @@ class PresetConfig:
             parts.append(f"Bounce@{self.bounce_lookback_days}d")
         parts.append("BearCall on" if self.bear_call_enabled else "BearCall off→put debit")
         return " • ".join(parts) if parts else "Debit off"
+
+    def _trend_tag(self) -> str:
+        """Summary-line token for the skill-65 earnings guard + filters."""
+        earn = (f"Earnings exp ≤ report−{self.earnings_buffer_days}d (≥{self.earnings_min_dte}d)"
+                if self.earnings_guard_enabled else "Earnings guard OFF")
+        return (f"{earn} • RS {self.rs_filter_mode} ≥p{self.rs_min_percentile:.0%} • "
+                f"Pullback {self.pullback_filter_mode} ≤{self.pullback_max_atr:g}ATR")
 
     @property
     def dte_range_vertical(self) -> Tuple[int, int]:
@@ -471,6 +504,7 @@ class PresetConfig:
                 f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Exits from {self.no_exit_before_et or 'open'} • "
                 f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
+                f"{self._trend_tag()} • "
                 f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
                 f"Profit-take @ {self.profit_target_pct:.0%} • "
                 f"{roll_tag} • "
@@ -491,6 +525,7 @@ class PresetConfig:
             f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Exits from {self.no_exit_before_et or 'open'} • "
             f"Timing {self.entry_timing_mode} ≤{self.entry_max_wait_cycles}c • "
+            f"{self._trend_tag()} • "
             f"Trail {self.profit_trail_mode} −{self.trail_giveback_pct:.0%} • "
             f"Profit-take @ {self.profit_target_pct:.0%} • "
             f"{roll_tag} • "
@@ -679,6 +714,9 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("profit_trail_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid profit_trail_mode %r — using the default",
                        out.pop("profit_trail_mode"))
+    for mode in ("rs_filter_mode", "pullback_filter_mode"):
+        if out.get(mode) not in (None, "off", "shadow", "live"):
+            logger.warning("Invalid %s %r — using the default", mode, out.pop(mode))
     for k in _TUPLE_FIELDS:
         if k in out and isinstance(out[k], list):
             out[k] = tuple(out[k])
