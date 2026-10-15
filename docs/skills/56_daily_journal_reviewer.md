@@ -1,7 +1,7 @@
 # End-of-Day Trade Journal Reviewer
 
 > **One-line summary:** Once-per-day retrospective LLM pass over the trade journal that produces observations, a preset-tuning proposal, and a watchlist diff — all staged as JSON for operator approval and echoed to Telegram. Does NOT trade; the numeric-threshold layer (skills 30, 31) keeps handling real-time exits.
-> **Source of truth:** [`trading_agent/daily_reviewer.py`](../../trading_agent/daily_reviewer.py), [`trading_agent/daily_reviewer_main.py`](../../trading_agent/daily_reviewer_main.py), [`trading_agent/pending_preset_updates_writer.py`](../../trading_agent/pending_preset_updates_writer.py), [`trading_agent/apply_preset_update.py`](../../trading_agent/apply_preset_update.py).
+> **Source of truth:** [`trading_agent/daily_reviewer.py`](../../trading_agent/daily_reviewer.py), [`trading_agent/daily_reviewer_main.py`](../../trading_agent/daily_reviewer_main.py), [`trading_agent/pending_preset_updates_writer.py`](../../trading_agent/pending_preset_updates_writer.py), [`trading_agent/apply_preset_update.py`](../../trading_agent/apply_preset_update.py), [`trading_agent/claude_reviewer.py`](../../trading_agent/claude_reviewer.py).
 > **Phase:** 3  •  **Group:** ops
 > **Depends on:** `19_journal_schema.md` (journal reads), `30_profit_target_management.md` + `31_defensive_roll_evaluator.md` (the numeric layer this reviewer runs alongside), `34_exception_monitor.md` (Telegram channel), `48_claude_code_mcp_surface.md` + `55_pending_orders_promotion.md` (the read/write seam this skill mirrors).
 > **Consumed by:** the launchd unit at `ops/launchd/com.trading-agent.daily-reviewer.plist`, plus the `/review` slash command (Phase C).

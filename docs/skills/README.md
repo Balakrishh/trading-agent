@@ -56,7 +56,7 @@ Skills 32–35 ship alongside the live-deployment hardening pass. Phase 1 covers
 
 ## Phase 3 (Wheel, MCP surface, ops, playbooks — 2026-06 → 2026-10)
 
-Skills 40–60: the long-term / Wheel evaluator, the Claude Code MCP surface and slash-command playbooks, the supervisor, and the 2026-10 backlog phases — market risk state + playbook table (58), debit spreads / calendars / bounce bull put (59), trade measurement (60). Rows generated from each skill's header.
+Skills 40–64: the long-term / Wheel evaluator, the Claude Code MCP surface and slash-command playbooks, the supervisor, and the 2026-10 backlog phases — market risk state + playbook table (58), debit spreads / calendars / bounce bull put (59), trade measurement (60), entry confirmation (61), kill switch and drawdown governor (62), manual close (63), liveness watchdog (64). Rows generated from each skill's header.
 
 | # | Skill | Group | Source of truth |
 |---|---|---|---|
@@ -75,8 +75,8 @@ Skills 40–60: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 53 | [Incident Response — Playbook](53_incident_response.md) | ops | `trading_agent/mcp/tools/market.py`, `trading_agent/exception_monitor.py`, `trading_agent/journal_reader.py` |
 | 54 | [Tax-Lot Review — Playbook](54_tax_lot_review.md) | ops | `trading_agent/mcp/tools/positions.py`, `trading_agent/journal_reader.py` |
 | 55 | [Pending-Orders Promotion — Write Gate](55_pending_orders_promotion.md) | ops | `trading_agent/executor_promote.py`, `trading_agent/pending_orders_writer.py`, `trading_agent/strategy_presets.py` |
-| 56 | [End-of-Day Trade Journal Reviewer](56_daily_journal_reviewer.md) | ops | `trading_agent/daily_reviewer.py`, `trading_agent/daily_reviewer_main.py`, `trading_agent/pending_preset_updates_writer.py` |
-| 57 | [Agent Supervisor — Long-running Wrapper](57_agent_supervisor.md) | ops | `trading_agent/agent_supervisor.py`, `ops/launchd/com.trading-agent.headless.plist` |
+| 56 | [End-of-Day Trade Journal Reviewer](56_daily_journal_reviewer.md) | ops | `trading_agent/daily_reviewer.py`, `trading_agent/daily_reviewer_main.py`, `trading_agent/claude_reviewer.py`, `trading_agent/pending_preset_updates_writer.py` |
+| 57 | [Agent Supervisor — Long-running Wrapper](57_agent_supervisor.md) | ops | `trading_agent/agent_supervisor.py`, `ops/launchd/com.trading-agent.headless.plist`, `deploy/systemd/trading-agent.service` |
 | 58 | [Market Risk State & Playbook Table](58_market_state_playbook.md) | risk / regime | `trading_agent/market_state.py` |
 | 59 | [Debit Spreads, Calendars & the Bounce Bull Put](59_debit_spreads_calendars.md) | strategy | `trading_agent/debit_policy.py`, `trading_agent/decision_engine.py` |
 | 60 | [Trade Measurement — Entry Fills, Shadow POP, Playbook Scorecard](60_trade_measurement.md) | architecture / risk | `trading_agent/fill_reconciler.py`, `trading_agent/shadow_pop.py`, `trading_agent/playbook_scorecard.py` |
@@ -135,6 +135,8 @@ If you have a full afternoon, read 00 first, then all 21 in order. Skills 28, 29
 
 For **what the agent trades today**, read 58 → 59 → 37 → 60 (market state and playbook routing → debit structures → portfolio caps → measurement), then 40 for the Wheel.
 
+For **running it** (Raspberry Pi since 2026-10-07): 57 (supervisor, systemd unit) → 64 (liveness watchdog) → 62 (kill switch) → 63 (manual close) → 17 (close failures, per-leg close P&L) → 56 (daily review through the `claude` CLI) → 16 §4 (Schwab weekly re-login), with runbook [`08_raspberry_pi_deployment.md`](../runbooks/08_raspberry_pi_deployment.md).
+
 ---
 
-*Last updated: 2026-10-05 against repo HEAD.*
+*Last updated: 2026-10-15 against repo HEAD.*

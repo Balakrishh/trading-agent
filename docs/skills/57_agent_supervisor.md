@@ -1,7 +1,7 @@
 # Agent Supervisor — Long-running Wrapper
 
 > **One-line summary:** Wraps `trading_agent.agent` in a sleep-and-restart loop so a single launchd unit keeps the agent trading every session, sleeping cleanly between market opens.
-> **Source of truth:** [`trading_agent/agent_supervisor.py`](../../trading_agent/agent_supervisor.py), [`ops/launchd/com.trading-agent.headless.plist`](../../ops/launchd/com.trading-agent.headless.plist).
+> **Source of truth:** [`trading_agent/agent_supervisor.py`](../../trading_agent/agent_supervisor.py), [`ops/launchd/com.trading-agent.headless.plist`](../../ops/launchd/com.trading-agent.headless.plist), [`deploy/systemd/trading-agent.service`](../../deploy/systemd/trading-agent.service).
 > **Phase:** 3  •  **Group:** ops
 > **Depends on:** `trading_agent.agent` (the process the supervisor runs), `trading_agent.market_hours` + `trading_agent.market_profile` (calendar for sleep math).
 > **Consumed by:** the launchd unit + any operator who wants "install once, forget about it" semantics.
@@ -85,6 +85,7 @@ The supervisor installs a `SIGTERM` handler that forwards the signal to the chil
 
 - **System sleep (2026-10-05).** On macOS `time.sleep` does not advance while the machine sleeps, so a single 12 h wait stretched by the whole lid-closed time (woke Sat 14:36 instead of 04:05; missed Monday's 09:25 open). `wall_clock_sleep` sleeps in ≤ 300 s slices and re-checks `time.time()`, so a wake is at most 5 minutes late once the Mac is awake. It cannot run while the Mac itself is asleep — keep it awake in market hours (e.g. `pmset` wake schedule or Energy settings).
 - **Cycle cadence (documented 2026-10-05).** In-session the supervisor sleeps `in_session_sleep_sec()` = `AGENT_CYCLE_SLEEP_SEC` (default 60, clamped 60–900) after each agent exit, so with ~15 s cycles the agent runs about every 75 s (≈300 cycles/day, measured 2026-09-29…10-02) — not every 5 minutes. Exit debounce of 3 cycles is therefore ≈ 4 min. Set `AGENT_CYCLE_SLEEP_SEC=285` for a ~5-minute cadence.
+- **Linux host (Raspberry Pi, since 2026-10-07).** `deploy/systemd/trading-agent.service` is the systemd user unit equivalent of the launchd plist: it runs `myenv/bin/python -m trading_agent.agent_supervisor` with `Restart=always`, `RestartSec=60`, `TimeoutStopSec=120` (SIGTERM lets a cycle finish its close loop) and `WantedBy=default.target` plus user linger, so the supervisor starts at boot. Logs append to `/tmp/trading-agent.headless.{out,err}.log`. Only one host may run the supervisor (runbook 08); `trading-agent-liveness.timer` (skill 64) pages if no cycle runs.
 
 ## 5. Cross-References
 
@@ -95,4 +96,4 @@ The supervisor installs a `SIGTERM` handler that forwards the signal to the chil
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-10-15.*
