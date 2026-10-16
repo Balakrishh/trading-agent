@@ -54,6 +54,15 @@ def is_trading_day(d: date) -> bool:
     return bool(_valid_days(d, d))
 
 
+def last_trading_day_of_week(ref: date) -> Optional[date]:
+    """Last NYSE trading day of the Monday–Friday week containing *ref* —
+    the weekly expiry of that week (Thursday when Friday is a holiday),
+    or None when the whole week is closed."""
+    monday = ref - timedelta(days=ref.weekday())
+    days = _valid_days(monday, monday + timedelta(days=4))
+    return days[-1] if days else None
+
+
 def next_weekly_expiration(today: date, target_dte: int,
                            dte_min: int, dte_max: int) -> date:
     """Pick the weekly options expiration closest to *target_dte*.
@@ -69,13 +78,7 @@ def next_weekly_expiration(today: date, target_dte: int,
     candidate whose DTE is closest to *target_dte*.
     """
     target = today + timedelta(days=target_dte)
-
-    def last_trading_day_in_week_of(ref: date) -> Optional[date]:
-        # Week = Monday-Friday containing *ref*
-        monday = ref - timedelta(days=ref.weekday())
-        friday = monday + timedelta(days=4)
-        days = _valid_days(monday, friday)
-        return days[-1] if days else None
+    last_trading_day_in_week_of = last_trading_day_of_week
 
     this_fri = last_trading_day_in_week_of(target)
     next_fri = last_trading_day_in_week_of(target + timedelta(days=7))

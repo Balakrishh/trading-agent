@@ -105,13 +105,15 @@ def candidate_expirations(today: date, target: int) -> List[date]:
     """Weekly expiry nearest ``target`` first, then the neighbouring weeks
     (not every name lists weeklies 60 days out)."""
     from datetime import timedelta
-    from trading_agent.calendar_utils import next_weekly_expiration
+    from trading_agent.calendar_utils import last_trading_day_of_week, next_weekly_expiration
     lo, hi = DTE_WINDOWS.get(target, (max(1, target - 7), target + 7))
     first = next_weekly_expiration(today, target, lo, hi)
     out = [first]
     for shift in (7, -7, 14, -14):
-        d = first + timedelta(days=shift)
-        if lo <= (d - today).days <= hi + 14 and d > today:
+        # Each neighbour is that week's own expiry: shifting a holiday
+        # Thursday by a week would land on a Thursday nothing expires on.
+        d = last_trading_day_of_week(first + timedelta(days=shift))
+        if d and lo <= (d - today).days <= hi + 14 and d > today and d not in out:
             out.append(d)
     return out
 

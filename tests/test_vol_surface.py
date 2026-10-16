@@ -76,6 +76,16 @@ def test_candidate_expirations_start_near_target():
     assert all(d > date(2026, 10, 16) for d in c)
 
 
+def test_candidate_expirations_holiday_week_neighbours_are_fridays():
+    """2026-10-16 run: the 60-day pick was Thu Dec 24 (Christmas Friday);
+    shifting it a week gave Thu Dec 17 instead of the Dec 18 monthly, so
+    names without weeklies that far out recorded no 60-day IV."""
+    c = vs.candidate_expirations(date(2026, 10, 16), 60)
+    assert c[0] == date(2026, 12, 24)
+    assert date(2026, 12, 18) in c and date(2026, 12, 17) not in c
+    assert date(2026, 12, 31) in c          # Thu: New Year's Day is a Friday
+
+
 def test_collector_never_opens_a_schwab_session():
     """Skill 16 §4: one token holder — the collector goes through the data server."""
     import ast, inspect

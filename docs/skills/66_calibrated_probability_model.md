@@ -102,6 +102,8 @@ For every ticker in `TICKERS`, at expiries near 7 / 30 / 60 days (`candidate_exp
 - **Expiry events, not trade P&L.** The model predicts where the underlying finishes or travels, not P&L after the agent's stops, targets and trailing; the touch probabilities speak to stop risk. Live shadow (phase 3) is the check.
 - **One era.** 2010–2026 is mostly a rising market; drift appears as put-side edge. The "horizon only" variant shows how much of the gain is drift alone.
 - **Skew.** ^SKEW is S&P 500 only; per-ticker skew has no free history, hence the phase-2 collector. Add `put_skew` / `rr25` buckets as a dimension only after ≥ 3–6 months of rows, tested on that period alone.
+- **Holiday-week expiries.** The neighbouring weeks tried after the first pick are each week's own last trading day (`calendar_utils.last_trading_day_of_week`), not the first pick ± 7 days. On 2026-10-16 the 60-day pick was Thu Dec 24 (Christmas Friday); ± 7 days gave Thu Dec 17 instead of the Dec 18 monthly, so the 9 names without weeklies that far out (GDX, META, AMZN, XLK, XLV, XLY, XLI, SMH, XLU) recorded no 60-day IV that day.
+- **After-close quotes.** The 16:05 run reads chains a few minutes after the close; less liquid sector ETFs then show wide ATM quotes (`atm_spread_pct` 0.77–1.02 for XLV, XLY, XLI on 2026-10-16) and their 25-delta IVs are noisier. Filter on `atm_spread_pct` before using a row.
 - **Vol surface quality.** Contracts without IV or delta are ignored; an expiry missing either side is skipped and the next candidate week is tried; `atm_spread_pct` flags wide quotes (XLU's ATM puts were 0.79 / 1.20 on 2026-10-15). Single-stock rows spanning earnings show it as a low 7/30 ratio (AMZN 0.77 on 2026-10-15, report 2026-10-29).
 
 ## 5. Cross-References
