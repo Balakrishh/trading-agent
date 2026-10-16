@@ -314,7 +314,28 @@ Both layers are off by default. Each degrades gracefully if its dependencies are
 
 ### Calibrated probability model (skill 66, research)
 
-`scripts/research/calibrate_prob_model.py` estimates the odds behind each strategy — a short strike finishing out of the money, a debit spread paying, a level touched before expiry — from the distribution of the move to expiry in realized-vol units, conditioned on horizon, asset group, direction, volatility regime, market regime and term structure (the agent's own regime and market-state code replayed on 2009 → daily data). Thin situations borrow from coarser ones; every month is predicted only from outcomes known before it (walk-forward). Results against `pop_rv` and implied odds: [`docs/plans/research_prob_model.md`](docs/plans/research_prob_model.md). Per-ticker skew has no free history, so `trading-agent-vol-surface.timer` records it daily from 2026-10-16. Not used for trading yet; next comes a shadow `pop_cal` in the journal.
+`trading_agent/prob_model.py` estimates the odds behind each strategy — a short strike finishing out of the money, a debit spread paying, a condor finishing inside, a stop level touched before expiry — from the distribution of the move to expiry in realized-vol units, conditioned on **horizon, asset group (broad / sector / alt / single), trend direction, volatility regime and market state** (the agent's own regime and market-state code replayed on 2009 → daily data). Thin situations borrow from coarser ones (shrinkage, K = 100); every month is predicted only from outcomes known before it (walk-forward), then recalibrated with isotonic regression.
+
+Result of the 2026-10-16 run (362k samples, 166 monthly folds 2013 → 2026; full report [`docs/plans/research_prob_model.md`](docs/plans/research_prob_model.md)):
+
+| | Log loss 2013–19 | Log loss 2020 → |
+|---|---|---|
+| `pop_rv` (current realized-vol POP) | 0.5836 | 0.5860 |
+| Drift / fat-tail correction only | 0.5714 | 0.5774 |
+| **Chosen model** | **0.5677** | **0.5735** |
+
+- Better than `pop_rv` on all 11 strategy events; better than implied odds (^VIX / ^VXN / ^GVZ) on puts, debits and touches, slightly worse on short calls and condors (implied vol carries call skew).
+- VIX/VIX3M term structure and ^SKEW were tested and dropped — they made it slightly worse.
+- Volatility regime matters most: a 0.75σ short put survived 86 % in high vol vs 79 % in low; a short call 77 % vs 67.5 %. Trend direction barely moves the odds.
+- **Put debits rarely paid:** a finish ≥ 0.25σ lower (about a 30-day put debit's breakeven) happened ~31 % of the time in every regime — down-trend 30.9 %, CAUTION 28.8 % — vs 41–43 % from `pop_rv` and implied odds. Call debits paid 49 %. These are expiry outcomes, not trade P&L after stops and targets.
+
+Per-ticker skew has no free history, so `trading-agent-vol-surface.timer` (`trading_agent/vol_surface.py`) records each ticker's ATM and 25-delta IV, risk reversal, butterfly and 7/30/60-day term ratios daily from 2026-10-16, reading chains through the data server only. Skew becomes a model dimension after 3–6 months of rows. **Not used for trading yet**; phase 3 journals a shadow `pop_cal` beside `pop_delta` / `pop_rv`.
+
+```bash
+python scripts/research/calibrate_prob_model.py             # full walk-forward study, rewrites the report (~4 min)
+python scripts/research/calibrate_prob_model.py --quick     # 5 tickers, one variant (smoke test)
+python -m trading_agent.vol_surface --dry-run --tickers SPY # print one snapshot, append nothing
+```
 
 ### Daily journal review (skill 56)
 
@@ -532,6 +553,7 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 | `MARKET_DATA_PROVIDER_WATCHLIST` | _(inherits)_ | Per-surface override for the Watchlist tab + market-open badge |
 | `MARKET_DATA_PROVIDER_BACKTEST` | _(inherits)_ | Reserved — backtester currently uses its own historical port |
 | `PORTFOLIO_ALERTS_ENABLED` | `true` | Hourly holdings + watchlist Telegram digest (skill 42). **`false` on the Pi since 2026-10-16** (paused at the operator's request) |
+| `TRADING_AGENT_VOL_SURFACE` | `trade_journal/vol_surface.jsonl` | Where the daily skew / term-structure snapshot is appended (skill 66) |
 | `SCHWAB_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | _(empty)_ | Required when any surface is set to `schwab`. See setup walkthrough. |
 | `SCHWAB_TOKEN_PATH` | `~/.schwab_tokens.json` | Where the OAuth helper persists access + refresh tokens |
 | `LOG_MAX_BYTES` | `10485760` | Per-file log rotation threshold (10 MB) |
@@ -741,7 +763,7 @@ trading-agent/
 ├── ops/launchd/                      # Mac launchd plists (disabled since the Pi move)
 ├── .claude/                          # Slash commands, subagents for Claude Code
 ├── scripts/checks/                   # CI + local drift gates
-├── scripts/research/                 # Offline studies (POP calibration, market-state validation)
+├── scripts/research/                 # Offline studies (POP calibration, market-state validation, calibrated probability model)
 ├── docs/skills/ · docs/runbooks/ · docs/plans/
 ├── knowledge_base/                   # RAG vector store (LLM layer) + watchlist.json (Watchlist tab)
 └── logs/
