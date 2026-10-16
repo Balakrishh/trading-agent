@@ -346,6 +346,12 @@ class PresetConfig:
     # Add to winners only (2026-10-06): a 2nd+ position on a ticker also
     # needs every open position on it at or above breakeven.
     ladder_requires_profit:            bool  = True
+    # Cool-down after a stop (2026-10-16): a stop-type close (stop_loss,
+    # hard_stop, delta_stop, strike_proximity) blocks new entries on that
+    # ticker in the same direction for the rest of the stop's session and
+    # the next N sessions. 0 = off. TLT on 2026-10-15 was stopped at 09:46
+    # ET and re-bought on the same bearish view at 09:50.
+    stop_cooldown_sessions:            int   = 1
 
     # ------------------------------------------------------------------
     # Entry confirmation (added 2026-10-05). An approved plan is submitted
@@ -500,6 +506,7 @@ class PresetConfig:
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
                 f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
+                f"Stop cool-down {f'{self.stop_cooldown_sessions} sess' if self.stop_cooldown_sessions else 'off'} • "
                 f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
                 f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Exits from {self.no_exit_before_et or 'open'} • "
@@ -521,6 +528,7 @@ class PresetConfig:
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
             f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
+                f"Stop cool-down {f'{self.stop_cooldown_sessions} sess' if self.stop_cooldown_sessions else 'off'} • "
             f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
             f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Exits from {self.no_exit_before_et or 'open'} • "

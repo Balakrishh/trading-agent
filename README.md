@@ -102,7 +102,7 @@ Each cycle runs two stages sequentially: monitor existing positions first, then 
 
 The playbook table behind rows 4–6 (trend × volatility × RSI → playbook) lives in `market_state.playbook_for`; every journal row carries `playbook` and `playbook_implemented`.
 
-**Then the gates, in order:** RiskManager (below) → market-state strategy gate (e.g. CAUTION blocks new bull puts / call debits / CSPs) → ladder gate → total-risk sizing. A rejected plan is journaled with its reason (`risk: <first failed check>`).
+**Then the gates, in order:** RiskManager (below) → market-state strategy gate (e.g. CAUTION blocks new bull puts / call debits / CSPs) → ladder gate → stop cool-down → total-risk sizing. A rejected plan is journaled with its reason (`risk: <first failed check>`).
 
 **Earnings-aware expiries (skill 65).** A single-stock trade must expire before its next earnings report (`earnings_buffer_days` = 1 day before). The planner — and the scanner — pick the latest weekly expiry that ends in time; only when none is at least `earnings_min_dte` (7) days out does the ticker wait until after the report (about a week a quarter). Calendars are skipped when the far leg would cross the report. ETFs are never affected. Dates come from yfinance, cached in `trade_journal/earnings_dates.json` for 12 h.
 
@@ -171,6 +171,7 @@ Every trade must pass **all eight checks** before execution:
 
 **Portfolio caps (skill 37).**
 * **Per ticker:** up to `max_positions_per_ticker` (2) — a second position only on a later day, with an expiration ≥ `ladder_min_gap_days` (7) from the open one, and only while the open one is at or above breakeven (add to winners only). Pending orders block the ticker.
+* **Stop cool-down (2026-10-16):** after a stop on a ticker, no new entry in the same direction (bull / bear, or the same neutral structure) for the rest of that session and `stop_cooldown_sessions` (1) more.
 * **Per sector:** 2 (`sector_map.py`); counts pending orders and every submission earlier in the same cycle.
 * **Total open risk:** Σ max loss of open defined-risk positions ≤ `max_total_risk_pct` (10 %) of equity; each trade is sized into what remains; Wheel legs excluded (their collateral has its own 40 %-of-equity rule).
 * **Market state:** size multiplier and allowed families (above).
@@ -188,6 +189,7 @@ Every trade must pass **all eight checks** before execution:
 * *Debit spreads / calendars (skill 59):* stop at 50 % of the debit; target 50 % **of the debit paid** (verticals, `debit_profit_target_basis = "debit"` since 2026-10-08; `"max_profit"` restores the old share-of-max-profit rule) or 25 % of the debit (calendars); DTE safety on the near expiry; regime exit only on a real trend change (verticals: the opposite trend; calendars: any bullish or bearish trend, never a one-cycle mean-reversion reading); calendars also close when price drifts ≥ 3 % from the strike.
 * *Wheel:* 50 % of credit; CSP |Δ| ≥ 0.45 stop; otherwise assignment is accepted.
 * *Opening window (2026-10-13):* debounced exits wait until `no_exit_before_et` (09:45 ET) so the opening auction's wide quotes cannot trigger them; immediate exits (hard stop, strike proximity, DTE safety) never wait.
+* *Debounce (2026-10-16):* a debounced exit needs the same signal on 3 **consecutive** cycles — a HOLD cycle resets the count, and cycles before 09:45 ET are not counted, so the earliest debounced exit is the third cycle after 09:45. One count per position.
 * Closes go out as one multi-leg order (improved, then natural price); realized P&L is computed from the actual fills. If both prices fail, the legs close one at a time — shorts first, each waiting for the previous leg's fill — and a close that finishes over two cycles books P&L over every leg (`trade_plans/partial_close_legs.json`, skill 17 §4; the 2026-10-14 QQQ stop was first journaled at −$1,195.50 instead of −$420).
 * *Profit trailing (skill 30):* `profit_trail_mode` off / shadow / live — shadow (default) records what trailing would have earned.
 
@@ -307,7 +309,7 @@ Both layers are off by default. Each degrades gracefully if its dependencies are
 
 ### Daily journal review (skill 56)
 
-At 16:15 ET `trading_agent.daily_reviewer_main` summarizes the day's journal (opens, closes, rejection reasons, realized P&L, preset, macro, alerts) and asks an LLM for observations plus at most one preset and one watchlist proposal. Proposals go to `pending_preset_updates/` for the operator — the reviewer never trades (an AST check forbids order imports). Output: `daily_reviews/<date>.json`, `/review` in Claude Code.
+At 16:15 ET `trading_agent.daily_reviewer_main` summarizes the day's journal (opens, closes with P&L and exit reason, rejection reasons, realized P&L, preset, the agent's `TICKERS` list and the dashboard watchlist, the market-state snapshot with its VIX zone, shadow trend-filter verdicts, alerts) and asks an LLM for observations plus at most one preset and one watchlist proposal. Proposals go to `pending_preset_updates/` for the operator — the reviewer never trades (an AST check forbids order imports). Output: `daily_reviews/<date>.json`, `/review` in Claude Code.
 
 With `TRADING_AGENT_REVIEWER_LLM=claude_cli` (set by the Pi's reviewer unit since 2026-10-14) the review runs through the logged-in `claude` CLI (`trading_agent/claude_reviewer.py`) — no API key, no tools, no MCP servers. It keeps **one session across days** (`trade_journal/reviewer_session.json`) so each review can compare with earlier days, and rotates after 20 reviews or 60k context tokens, carrying the last 5 days' observations into the new session. ≈ 5k context tokens on day 1, growing ≈ 3k a day. Without the variable, the OpenAI-compatible client (Ollama by default) is used.
 

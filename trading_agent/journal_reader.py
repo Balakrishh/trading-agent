@@ -623,8 +623,11 @@ class JournalReader:
                 or "(no reason recorded)"
             )
             # Truncate noisy long reasons but keep them grouping-stable
-            # (don't include unique numbers in the key).
-            reason_text = str(reason)[:120]
+            # (don't include unique numbers in the key). 240, not 120
+            # (2026-10-16): the fallback reasons put the cause last —
+            # "…fallback Put Debit Spread: no acceptable candidate
+            # (leg_spread_wide)" — and 120 cut it off.
+            reason_text = str(reason)[:240]
             c[reason_text] += 1
         return c.most_common(top_n)
 

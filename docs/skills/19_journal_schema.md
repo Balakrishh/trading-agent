@@ -180,6 +180,7 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 - **Close rows carry the fill-based P&L (2026-10-01).** `raw_signal.net_unrealized_pl` on a `closed` row is the realized P&L from the actual close fill when known (`pl_source: "fill"`), else the exit-signal mark (`pl_source: "signal_mark"`). The mark is always kept as `signal_mark_pl`; `close_fill_debit` records the fill. Rows written before 2026-10-01 have no `pl_source` and hold the mark.
 
 - **Risk-vetoed rejects carry a reason (2026-10-05).** When the plan is valid but RiskManager rejects it, `raw_signal.rejection_reason` is now `"risk: <first checks_failed entry>"` (previously `None`, which grouped as "(no reason recorded)"). `JournalReader.reject_reasons_today` falls back to `checks_failed[0]` for older rows.
+- **Reject reasons grouped on 240 chars (2026-10-16, was 120).** Fallback reasons put the cause last (`…fallback Put Debit Spread: no acceptable candidate (leg_spread_wide)`), and 120 cut it off, so `/portfolio` and the daily reviewer could not see why the bearish fallback failed.
 
 - **Operator closes — `exit_signal="manual"` (2026-10-08).** `python -m trading_agent.manual_close` (skill 63) writes an ordinary `closed` (or `close_failed`) row through the agent's close writer; only the `exit_signal` value `manual` is new, so every reader that sums `closed` rows counts it. Preferred over `journal_reconcile` whenever the position is still open at the broker.
 - **Unrecoverable opens — `position_reconciled` (2026-10-05).** A `submitted` row whose broker close was never journaled stays in `open_trades()` forever (`expired_unrecorded`). `python -m trading_agent.journal_reconcile --ticker … --strategy … --expiration … --reason … [--realized-pl X] [--apply]` (dry run by default) appends either a normal `closed` row (`exit_signal="reconciled"`, `pl_source="operator reconciliation"`) when the P&L is known, or a `position_reconciled` row (`pl_known=false`, `net_unrealized_pl=null`) when it is not. `open_trades()` and the playbook scorecard pair the latter with the open; it is never a close, never in realized P&L or win rate. Used for the 2026-07-08 XLE iron condor (old paper account, order history unreachable). Append-only — no row is ever edited.
@@ -201,4 +202,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-10-15.*
+*Last verified against repo HEAD on 2026-10-16.*

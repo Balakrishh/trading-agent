@@ -227,3 +227,20 @@ def tally_exit_vote(
     state = store.update(_mutator)
     entry = state.exit_vote_counts.get(ticker, {})
     return int(entry.get("count", 0))
+
+
+def reset_exit_vote(store: DailyStateStore, key: str) -> None:
+    """Drop the vote count for *key* (2026-10-16). Called when a position
+    reads HOLD, so the debounce really needs consecutive cycles: on
+    2026-10-14 the QQQ stop fired on votes from 09:32, 09:37 and 09:57
+    with ~20 HOLD cycles in between. Writes only when a count exists."""
+    if key not in (store.load().exit_vote_counts or {}):
+        return
+
+    def _mutator(state: DailyState) -> DailyState:
+        votes = dict(state.exit_vote_counts or {})
+        votes.pop(key, None)
+        state.exit_vote_counts = votes
+        return state
+
+    store.update(_mutator)

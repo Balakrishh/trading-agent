@@ -2743,6 +2743,11 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Add to winners only", value=bool(getattr(seed, "ladder_requires_profit", True)),
                 key="cust_ladder_winners",
                 help="A second position on a ticker only while the open one is at or above breakeven.")
+            stop_cooldown = st.number_input(
+                "Stop cool-down (sessions)", 0, 5,
+                int(getattr(seed, "stop_cooldown_sessions", 1)), 1, key="cust_stop_cooldown",
+                help="After a stop on a ticker, no new entry in the same direction for the rest "
+                     "of that session and this many more. 0 = off.")
 
         # ── Entry confirmation + trailing profit (skills 61, 30) ─────────
         st.markdown("**Drawdown governor** *(skill 62)* — pauses new entries; exits keep running; only you resume")
@@ -3014,6 +3019,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "max_positions_per_ticker":     int(max_per_ticker),
         "ladder_min_gap_days":          int(ladder_gap),
         "ladder_requires_profit":       bool(ladder_winners),
+        "stop_cooldown_sessions":       int(stop_cooldown),
         "calendar_max_strike_drift_pct": cal_drift,
         "halt_daily_loss_pct":          halt_daily,
         "halt_weekly_loss_pct":         halt_weekly,

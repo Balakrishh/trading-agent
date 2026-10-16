@@ -28,7 +28,7 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
     """Gather every field the LLM needs. No LLM call yet."""
 ```
 
-Reads: today's opens/closes/rejects/PnL (from `JournalReader`), the currently-loaded `PresetConfig`, the watchlist, a best-effort macro snapshot (VIX zone), and today's `ExceptionMonitor` silenced-exception list. All fields are pure data; `ReviewContext` is a frozen dataclass so tests can pin an exact input.
+Reads: today's opens/closes/rejects/PnL (from `JournalReader`), the currently-loaded `PresetConfig`, the agent's scan list (`trading_universe`, from `TICKERS`), the dashboard Watchlist tab (`watchlist` — what a `watchlist_proposal` edits), a best-effort macro snapshot, today's shadow trend-filter tally (`trend_filters`), and today's `ExceptionMonitor` silenced-exception list. All fields are pure data; `ReviewContext` is a frozen dataclass so tests can pin an exact input.
 
 ### 3.2 LLM prompt allowlist
 
@@ -148,6 +148,7 @@ LLM and checks the parsed output.
 - **`save_active_preset` callers are CI-restricted.** Only `apply_preset_update.py`, `strategy_presets.py` itself, and Streamlit surfaces may import it. A new scheduled task or MCP tool cannot silently mutate live config — enforced by `test_skill_56_save_active_preset_callers_restricted`.
 - **`pending_preset_updates/` + `daily_reviews/` must be `.gitignore`d.** Both may contain live PnL and account context.
 
+- **Inputs the LLM was misreading (fixed 2026-10-16).** (1) Closes read `pnl` / `reason`, which `ClosedTrade` does not have, so every close reached the LLM as `pnl=null, reason=null`; they now map `realized_pl`, `exit_signal`, `exit_reason`, `expiration`, `closed_at_utc` (opens add `max_loss`, `expiration`, `opened_at_utc`). (2) `watchlist` was the 31-symbol dashboard list, so the reviewer flagged TLT as "not on the watchlist" two days running; `trading_universe` now carries `TICKERS` and the system prompt explains the two lists. (3) The macro snapshot called a `current_vix_zone()` that never existed, so `vix_zone` was always null; `_load_macro_snapshot` now reads the agent's market-state file (skill 58: state, reasons, size multiplier, CSP pause, VIX/VIX3M/term ratio, breadth, SPY vs SMAs, account balance, snapshot age) and classifies the zone with `vix_regime_monitor.classify_vix`. A missing snapshot leaves `{"vix_zone": null}`. (4) `trend_filters` counts plans checked and would-block verdicts per filter (skill 65). The macro snapshot is the latest one, so a `--date` backfill gets today's macro. Tests: `tests/test_daily_reviewer_inputs.py`.
 - **`--date` backfill (fixed 2026-09-30).** `assemble_context(review_date)` builds `JournalReader(as_of=review_date)`; before the fix a backfill labelled the current day's (often empty) data with the requested date.
 
 ## 5. Cross-References
@@ -160,4 +161,4 @@ LLM and checks the parsed output.
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-16.*

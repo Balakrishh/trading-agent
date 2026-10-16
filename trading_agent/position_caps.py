@@ -199,3 +199,58 @@ def open_defined_risk(monitor_results: Dict) -> float:
 __all__ = ["compute_position_cap_dedup_set", "register_open",
            "open_defined_risk", "TOTAL_RISK_EXCLUDED", "ladder_failure",
            "open_expirations", "open_pls"]
+
+
+# ── Cool-down after a stop (added 2026-10-16) ───────────────────────────
+# 2026-10-15: the TLT put debit stopped at 09:46 ET and the agent bought
+# a new TLT put debit on the same bearish view at 09:50. The ladder rules
+# only see OPEN positions, so a full close cleared every block.
+
+STOP_EXIT_SIGNALS = frozenset({"stop_loss", "hard_stop", "delta_stop", "strike_proximity"})
+_BULL = frozenset({"Bull Put Spread", "Call Debit Spread", "Bounce Bull Put Spread",
+                   "Cash-Secured Put"})
+_BEAR = frozenset({"Bear Call Spread", "Put Debit Spread"})
+
+
+def trade_direction(strategy: str) -> str:
+    """"bull" / "bear" for directional structures, else the strategy name
+    itself (a neutral structure only cools down its own kind)."""
+    if strategy in _BULL:
+        return "bull"
+    if strategy in _BEAR:
+        return "bear"
+    return str(strategy)
+
+
+def sessions_between(start: date, end: date) -> int:
+    """Weekdays after ``start`` up to and including ``end`` (0 on the same
+    day). Exchange holidays are not excluded — a holiday only shortens
+    the cool-down by one session."""
+    if end <= start:
+        return 0
+    n, d = 0, start
+    while d < end:
+        d = date.fromordinal(d.toordinal() + 1)
+        if d.weekday() < 5:
+            n += 1
+    return n
+
+
+def stop_cooldown_failure(ticker: str, strategy: str, today: date,
+                          recent_stops: Iterable[Tuple[str, str, date]],
+                          sessions: int) -> Optional[str]:
+    """Reason a new entry on ``ticker`` is blocked because a position on
+    it in the same direction was stopped out within the cool-down, else
+    None. ``recent_stops`` holds (ticker, strategy, ET close date) of
+    stop-type closes. The stop's own session and the next ``sessions``
+    sessions are blocked; ``sessions`` ≤ 0 disables the check."""
+    if sessions <= 0:
+        return None
+    want = trade_direction(strategy)
+    for tk, strat, closed_on in recent_stops:
+        if tk != ticker or trade_direction(strat) != want:
+            continue
+        if sessions_between(closed_on, today) <= sessions:
+            return (f"stop_cooldown ({strat} stopped {closed_on.isoformat()}; "
+                    f"no new {want} entry for {sessions} session(s) after)")
+    return None

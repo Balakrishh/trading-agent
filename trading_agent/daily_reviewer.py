@@ -67,6 +67,11 @@ class ReviewContext:
     macro:           Dict[str, Any]
     recent_alerts:   List[str]
     cold_start:      bool = False
+    # Append-only (2026-10-16): the tickers the agent actually scans
+    # (TICKERS) — ``watchlist`` is the dashboard Watchlist tab, the list
+    # a watchlist_proposal edits — and the shadow trend-filter tally.
+    trading_universe: List[str] = field(default_factory=list)
+    trend_filters:   Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -103,15 +108,81 @@ def _load_watchlist() -> List[str]:
         return []
 
 
-def _load_macro_snapshot() -> Dict[str, Any]:
-    """Best-effort macro read — never blocks the review on a data outage."""
-    out: Dict[str, Any] = {}
+def _load_trading_universe() -> List[str]:
+    """The agent's scan list (``TICKERS`` in .env)."""
     try:
-        from trading_agent.vix_regime_monitor import current_vix_zone
-        out["vix_zone"] = current_vix_zone()
-    except Exception:                                              # noqa: BLE001
-        out["vix_zone"] = None
+        from trading_agent.config import load_config               # noqa: PLC0415
+        return list(load_config().trading.tickers)
+    except Exception as exc:                                       # noqa: BLE001
+        log.warning("Could not load TICKERS (%s); using empty list.", exc)
+        return []
+
+
+def _load_macro_snapshot() -> Dict[str, Any]:
+    """Best-effort macro read from the agent's last market-state snapshot
+    (skill 58) — never blocks the review on a data outage. Before
+    2026-10-16 this called a ``current_vix_zone`` that never existed, so
+    ``vix_zone`` was always null."""
+    out: Dict[str, Any] = {"vix_zone": None}
+    try:
+        from trading_agent.market_state import read_state          # noqa: PLC0415
+        from trading_agent.vix_regime_monitor import classify_vix  # noqa: PLC0415
+        snap = read_state()
+        if not snap:
+            return out
+        inputs = snap.get("inputs") or {}
+        gate = snap.get("gate") or {}
+        vix = inputs.get("vix")
+        out.update({
+            "market_state":    snap.get("state"),
+            "state_reasons":   snap.get("reasons") or [],
+            "size_multiplier": gate.get("size_multiplier"),
+            "allow_new_csp":   gate.get("allow_new_csp"),
+            "vix":             vix,
+            "vix_zone":        classify_vix(float(vix)).name if vix is not None else None,
+            "vix3m":           inputs.get("vix3m"),
+            "term_ratio":      inputs.get("term_ratio"),
+            "breadth":         inputs.get("breadth"),
+            "breadth_n":       inputs.get("breadth_n"),
+            "spy_price":       inputs.get("spy_price"),
+            "spy_sma20":       inputs.get("spy_sma20"),
+            "spy_sma50":       inputs.get("spy_sma50"),
+            "spy_sma200":      inputs.get("spy_sma200"),
+            "spy_rsi":         inputs.get("spy_rsi"),
+            "account_balance": snap.get("account_balance"),
+            "snapshot_age_s":  snap.get("age_seconds"),
+        })
+    except Exception as exc:                                       # noqa: BLE001
+        log.warning("Could not read market state (%s).", exc)
     return out
+
+
+def _trend_filter_tally(reader) -> Dict[str, Any]:
+    """Today's shadow trend-filter verdicts (skill 65): how many plans
+    were checked and how many each filter would have blocked in live
+    mode, with the tickers involved."""
+    from collections import Counter                                # noqa: PLC0415
+    today = reader._today_et()
+    checked = 0
+    fails: Counter = Counter()
+    tickers: Dict[str, set] = {}
+    for rec in reader._iter_rows():
+        if reader._row_et_date(rec) != today:
+            continue
+        rs = rec.get("raw_signal") or {}
+        tf = rs.get("trend_filters") if isinstance(rs, dict) else None
+        if not isinstance(tf, dict):
+            continue
+        checked += 1
+        for chk in tf.get("checks") or []:
+            if chk.get("ok") is False:
+                name = str(chk.get("name"))
+                fails[name] += 1
+                tickers.setdefault(name, set()).add(rec.get("ticker"))
+    return {"plans_checked": checked,
+            "would_block": dict(fails),
+            "would_block_tickers": {k: sorted(t for t in v if t)
+                                    for k, v in tickers.items()}}
 
 
 def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
@@ -130,6 +201,9 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
             "ticker":   getattr(o, "ticker", None),
             "strategy": getattr(o, "strategy", None),
             "credit":   getattr(o, "credit", None),
+            "max_loss": getattr(o, "max_loss", None),
+            "expiration": getattr(o, "expiration", None),
+            "opened_at_utc": getattr(o, "timestamp_utc", None),
         }
         for o in reader.opens_today()
     ]
@@ -137,8 +211,13 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
         {
             "ticker":   getattr(c, "ticker", None),
             "strategy": getattr(c, "strategy", None),
-            "pnl":      getattr(c, "pnl", None),
-            "reason":   getattr(c, "reason", None),
+            # ClosedTrade has realized_pl / exit_signal / exit_reason;
+            # reading "pnl" / "reason" sent null to the LLM until 2026-10-16.
+            "pnl":         getattr(c, "realized_pl", None),
+            "exit_signal": getattr(c, "exit_signal", None),
+            "reason":      getattr(c, "exit_reason", None),
+            "expiration":  getattr(c, "expiration", None),
+            "closed_at_utc": getattr(c, "timestamp_utc", None),
         }
         for c in reader.closes_today()
     ]
@@ -156,7 +235,17 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
         macro=_load_macro_snapshot(),
         recent_alerts=[str(e) for e in reader.silenced_exceptions_today()],
         cold_start=cold_start,
+        trading_universe=_load_trading_universe(),
+        trend_filters=_safe_trend_tally(reader),
     )
+
+
+def _safe_trend_tally(reader) -> Dict[str, Any]:
+    try:
+        return _trend_filter_tally(reader)
+    except Exception as exc:                                       # noqa: BLE001
+        log.warning("Could not tally trend filters (%s).", exc)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +261,12 @@ _SYSTEM_PROMPT = (
     "Return valid JSON with these top-level keys: observations "
     "(list of strings), preset_proposal (object or null), "
     "watchlist_proposal (object or null), digest_lines (list of strings), "
-    "confidence (float 0.0-1.0). When you propose a preset change, use "
+    "confidence (float 0.0-1.0). trading_universe is the list of tickers "
+    "the agent scans and trades; watchlist is the separate dashboard "
+    "Watchlist tab, which is what a watchlist_proposal edits — a ticker "
+    "in trading_universe but not in watchlist is expected. macro is the "
+    "agent's last whole-market risk snapshot. trend_filters counts the "
+    "shadow relative-strength / pullback verdicts. When you propose a preset change, use "
     "one of these fields only: profit_target_pct, edge_buffer, min_pop, "
     "max_leg_spread_cents, defensive_roll_enabled. Never propose changes "
     "to max_risk_pct, max_delta, or dte_* fields."
@@ -188,8 +282,10 @@ def _build_user_prompt(ctx: ReviewContext) -> str:
         "reject_reasons_top5": ctx.reject_reasons,
         "realized_pl_today":   ctx.realized_pl,
         "current_preset": ctx.preset,
+        "trading_universe": ctx.trading_universe,
         "watchlist":      ctx.watchlist,
         "macro":          ctx.macro,
+        "trend_filters":  ctx.trend_filters,
         "recent_alerts":  ctx.recent_alerts,
     }
     return (
@@ -390,8 +486,10 @@ def _write_audit(ctx: ReviewContext, output: ReviewOutput) -> Path:
             "reject_reasons": ctx.reject_reasons,
             "realized_pl":    ctx.realized_pl,
             "preset":         ctx.preset,
+            "trading_universe": ctx.trading_universe,
             "watchlist":      ctx.watchlist,
             "macro":          ctx.macro,
+            "trend_filters":  ctx.trend_filters,
             "recent_alerts":  ctx.recent_alerts,
             "cold_start":     ctx.cold_start,
         },
