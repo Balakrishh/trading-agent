@@ -224,6 +224,9 @@ After a reboot: `systemctl --user is-active trading-agent trading-agent-data-ser
 * **Claude Code + MCP (skill 48).** `.mcp.json` starts the `trading-agent` MCP server from `myenv`: read-only tools (`list_positions`, `get_market_state`, `get_quote`, `run_scan`, `get_playbook_scorecard`, …) and slash commands `/portfolio`, `/triage`, `/propose` (stages to `pending_orders/`, never submits), `/review`, `/incident`, `/taxreview`.
 * **Manual close (skill 63).** `python -m trading_agent.manual_close --ticker X` previews; `--submit` closes one spread with the atomic close and journals it as `closed` with `exit_signal="manual"`.
 * **Kill switch (skill 62).** `python -m trading_agent.trading_halt pause --reason "…"` / `resume`.
+* **Holdings + watchlist digest (skill 42).** Paused since 2026-10-16 with `PORTFOLIO_ALERTS_ENABLED=false` in `.env`. To turn it back on, remove the line and restart the agent outside market hours. Fix its journal dedup write first (`log_signal() got an unexpected keyword argument 'payload'`), or it can resend within its hourly window.
+
+**After a deploy.** Code reaches the agent on the next `systemctl --user restart trading-agent` (do it outside market hours). The MCP server Claude Code started keeps the old code until you run `/mcp` → reconnect, so `/portfolio` can show an older preset until then.
 
 **Schwab weekly re-login (skill 16 §4).** The refresh token lasts 7 days from the browser login (refreshes don't extend it). Telegram warns when ≤ 2 days remain. Only one machine may hold or refresh the token — the refresh token rotates.
 
@@ -402,6 +405,8 @@ The Live Monitoring tab has a Strategy Profile expander that controls the four k
 
 **Where the preset is applied.** `agent.__init__` calls `load_active_preset()` and forwards the knobs into `StrategyPlanner` + `RiskManager`; `strategy._pick_expiration(kind=...)` honours the per-strategy DTE override; `strategy._pick_spread_width` honours `width_mode`; `agent._process_ticker` calls `regime_is_allowed(regime, bias)` after classify and writes `action="skipped_bias"` to the live journal on rejection.
 
+The **Custom** profile exposes every other preset field too. Recent additions: "Earnings & trend entry filters" (skill 65), "Stop cool-down (sessions)" beside the ladder controls (skill 37), and "Mid-first ladder (C1)" with its step count and cycles per step under "Debit stop" (skill 59).
+
 `STRATEGY_PRESET.json` is written atomically (temp + rename). Missing / malformed JSON falls back to **Balanced** (logged) so a fresh install is always operational without touching the dashboard.
 
 ### Backtest Quote Model
@@ -521,6 +526,7 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 | `MARKET_DATA_PROVIDER_LIVE` | _(inherits)_ | Per-surface override for the trading agent loop |
 | `MARKET_DATA_PROVIDER_WATCHLIST` | _(inherits)_ | Per-surface override for the Watchlist tab + market-open badge |
 | `MARKET_DATA_PROVIDER_BACKTEST` | _(inherits)_ | Reserved — backtester currently uses its own historical port |
+| `PORTFOLIO_ALERTS_ENABLED` | `true` | Hourly holdings + watchlist Telegram digest (skill 42). **`false` on the Pi since 2026-10-16** (paused at the operator's request) |
 | `SCHWAB_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | _(empty)_ | Required when any surface is set to `schwab`. See setup walkthrough. |
 | `SCHWAB_TOKEN_PATH` | `~/.schwab_tokens.json` | Where the OAuth helper persists access + refresh tokens |
 | `LOG_MAX_BYTES` | `10485760` | Per-file log rotation threshold (10 MB) |
@@ -657,6 +663,7 @@ trading-agent/
 │   │   # ── Portfolio risk & pacing ──
 │   ├── market_state.py               # Whole-market risk state + playbook table (skill 58)
 │   ├── debit_policy.py               # Debit / calendar / bounce constants (skill 59)
+│   ├── debit_ladder.py               # Mid-first debit entry ladder, shadow (backlog C1, skill 59)
 │   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk caps (skill 37)
 │   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
 │   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)
@@ -739,9 +746,9 @@ trading-agent/
 
 Live cycles append one JSON object per line to `trade_journal/signals_live.jsonl`; backtests append to `trade_journal/signals_backtest.jsonl`. The two files use identical schema. When the sentiment pipeline is active each record also carries `fingpt_sentiment`, `fingpt_event_risk`, `fingpt_recommendation`, `fingpt_agreement`, `fingpt_hallucination_flags`, and `fingpt_verified_by`.
 
-**Action values** (main ones): `dry_run`, `submitted`, `rejected`, `closed`, `close_failed`, `dry_run_close`, `warning`, `skipped_by_llm`, `skipped_existing`, `skipped_liquidation_mode`, `skipped_bias`, `skipped_rsi_gate`, `skipped_defense_first`, `skipped_pdt_blocked`, `skipped_total_risk_cap`, `skipped_entry_rate`, `skipped`, `error`, `cycle_timeout`, `daily_drawdown_circuit_breaker`, `market_state`, `trading_halt_set` / `_cleared`, `telegram_alert_sent`, `silenced_exception`, `position_reconciled`, `position_excursion`, `profit_trail_shadow`, `entry_timing_shadow`. Full schema reference: [`docs/skills/19_journal_schema.md`](docs/skills/19_journal_schema.md).
+**Action values** (main ones): `dry_run`, `submitted`, `rejected`, `closed`, `close_failed`, `dry_run_close`, `warning`, `skipped_by_llm`, `skipped_existing`, `skipped_liquidation_mode`, `skipped_bias`, `skipped_rsi_gate`, `skipped_defense_first`, `skipped_pdt_blocked`, `skipped_total_risk_cap`, `skipped_entry_rate`, `skipped`, `error`, `cycle_timeout`, `daily_drawdown_circuit_breaker`, `market_state`, `trading_halt_set` / `_cleared`, `telegram_alert_sent`, `silenced_exception`, `position_reconciled`, `position_excursion`, `profit_trail_shadow`, `entry_timing_shadow`, `debit_ladder_shadow`. Full schema reference: [`docs/skills/19_journal_schema.md`](docs/skills/19_journal_schema.md).
 
-**Material actions bypass the dedup gate** — `submitted`, `closed`, `close_failed`, `error`, `warning`, `dry_run`, `dry_run_close`, `position_excursion`, and the alert / silenced-exception rows — so successive cycles never silently suppress them. Rejection-spam actions (`rejected`, `skipped_*`) get per-ticker dedup with periodic heartbeat rows (every 12 cycles by default).
+**Material actions bypass the dedup gate** — `submitted`, `closed`, `close_failed`, `error`, `warning`, `dry_run`, `dry_run_close`, `position_excursion`, `debit_ladder_shadow`, and the alert / silenced-exception rows — so successive cycles never silently suppress them. Rejection-spam actions (`rejected`, `skipped_*`) get per-ticker dedup with periodic heartbeat rows (every 12 cycles by default).
 
 **`close_failed`** (added 2026-05-06) tags a partial-fill close where one or more legs were rejected by Alpaca (PDT, uncovered, insufficient buying power); the position is **still open on the broker**. After 3 consecutive partial fills on a single ticker the agent enters a 60-min cooldown and the dashboard's Close Failures Today panel renders a 🚨 manual-intervention banner. See [`docs/skills/17_close_failure_and_cooldown.md`](docs/skills/17_close_failure_and_cooldown.md).
 
@@ -801,6 +808,11 @@ When the active preset is in adaptive mode, every `plan()` invocation that runs 
 | `credit_non_positive` | `bid_short − ask_long ≤ 0` |
 | `credit_ge_width` | Credit ≥ width — would be a debit, not a credit |
 | `cw_below_floor` | `C/W < |Δ| × (1 + edge_buffer)` — most common in thin-premium regimes |
+| `leg_spread_wide` | A leg's bid-ask is wider than both `max_leg_spread_cents` and `max_leg_spread_pct_mid` of its mid (skill 29) — the most common put-debit reject on the smaller sector ETFs |
+| `debit_above_fair` | Debit structures: natural debit > market mid × (1 + `debit_max_overpay`) |
+| `reward_risk_below_min` | Debit verticals: (width − debit) ÷ debit < `debit_min_reward_risk` |
+
+Debit scans also carry `diagnostics.ladder_candidate` (2026-10-16, backlog C1): the cheapest pair rejected only for `debit_above_fair` that a mid-first ladder could still trade — leg symbols, `natural`, `mid`, `cap`, `reward_risk_at_cap`. The ladder shadow tracks it (skill 59).
 
 ---
 
