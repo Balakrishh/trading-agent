@@ -25,7 +25,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 13 | preset system hot reload | strategy_presets.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_debit_ladder.py, test_debit_strategies.py, test_earnings_and_trend_filters.py, test_entry_confirmation.py, test_exit_opening_window.py, test_fill_model.py, test_journal_derived_cooldown.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_production_readiness.py, test_profit_trail.py, test_schwab_reauth_warning.py, test_shadow_pop.py, test_stop_hygiene.py, test_streamlit/test_backtest_ui.py, test_trading_halt.py, test_wheel_filters.py | conformance/test_skill_13_preset_system_hot_reload.py | — |
 | 14 | adaptive vs static scan modes | strategy_presets.py, strategy.py, chain_scanner.py | test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_debit_ladder.py, test_debit_strategies.py, test_earnings_and_trend_filters.py, test_entry_confirmation.py, test_executor.py, test_exit_opening_window.py, test_fill_model.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_profit_trail.py, test_risk_manager.py, test_shadow_pop.py, test_stop_hygiene.py, test_strategy.py, test_streamlit/test_backtest_ui.py, test_trading_halt.py, test_wheel_filters.py | conformance/test_skill_14_adaptive_vs_static_scan_modes.py | 02_zero_trades_diagnostic.md |
 | 15 | backtest live parity | backtest/__init__.py, backtest/runner.py, backtest/cycle.py, backtest/sim_position.py, backtest/account.py, backtest/historical_port.py, backtest/synthetic_chain.py, backtest/clock.py, backtest/black_scholes.py, streamlit/backtest_ui.py | test_backtest/test_account.py, test_backtest/test_black_scholes.py, test_backtest/test_clock.py, test_backtest/test_historical_port.py, test_backtest/test_sim_position.py, test_backtest/test_synthetic_chain.py, test_streamlit/test_backtest_ui.py | conformance/test_skill_15_backtest_live_parity.py | — |
-| 16 | market data provider routing | market_data_factory.py, market_data_schwab.py, market_data_yahoo.py, schwab_oauth.py | test_market_data_factory.py, test_market_data_schwab.py, test_production_readiness.py, test_schwab_oauth.py, test_schwab_reauth_warning.py | conformance/test_skill_16_market_data_provider_routing.py | 02_zero_trades_diagnostic.md, 04_broker_api_errors.md |
+| 16 | market data provider routing | market_data_factory.py, market_data_schwab.py, market_data_yahoo.py, schwab_oauth.py | test_market_data_factory.py, test_market_data_schwab.py, test_production_readiness.py, test_schwab_oauth.py, test_schwab_reauth_warning.py, test_vol_surface.py | conformance/test_skill_16_market_data_provider_routing.py | 02_zero_trades_diagnostic.md, 04_broker_api_errors.md |
 | 17 | close failure and cooldown | agent.py, streamlit/live_monitor.py, sector_map.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_debit_ladder.py, test_earnings_and_trend_filters.py, test_entry_confirmation.py, test_executor.py, test_exit_opening_window.py, test_journal_derived_cooldown.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_production_readiness.py, test_profit_trail.py, test_schwab_reauth_warning.py, test_sector_map.py, test_shadow_pop.py, test_stop_hygiene.py, test_streamlit/test_live_monitor.py, test_trading_halt.py, test_wheel_filters.py | conformance/test_skill_17_pdt_reactive_block.py, conformance/test_skill_17_position_cap.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md, 05_ghost_process_diagnostic.md |
 | 18 | order submission idempotency | executor.py | test_debit_strategies.py, test_executor.py, test_fill_reconciler.py, test_manual_close.py, test_plan_retention.py, test_production_readiness.py, test_wheel_integration.py | conformance/test_skill_18_order_submission_idempotency.py | 03_zombie_position_recovery.md, 04_broker_api_errors.md |
 | 19 | journal schema | journal_kb.py, agent.py | test_after_hours_shutdown.py, test_agent_integration.py, test_close_cooldown.py, test_cycle_singleton.py, test_debit_ladder.py, test_earnings_and_trend_filters.py, test_entry_confirmation.py, test_exit_opening_window.py, test_journal_dedup.py, test_journal_derived_cooldown.py, test_journal_kb.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_production_readiness.py, test_profit_trail.py, test_schwab_reauth_warning.py, test_shadow_pop.py, test_stop_hygiene.py, test_trading_halt.py | conformance/test_skill_19_journal_reader.py, conformance/test_skill_19_journal_schema.py | 01_daily_close_review.md, 03_zombie_position_recovery.md |
@@ -60,14 +60,15 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 57 | agent supervisor | agent_supervisor.py | — | conformance/test_skill_57_supervisor.py | — |
 | 58 | market state playbook | market_state.py | test_market_state.py, test_market_state_agent.py, test_wheel_integration.py | ❌ MISSING | — |
 | 59 | debit spreads calendars | debit_policy.py, decision_engine.py | test_backtest/test_synthetic_chain.py, test_debit_ladder.py, test_debit_strategies.py, test_earnings_and_trend_filters.py, test_fill_model.py, test_wheel_filters.py | ❌ MISSING | — |
-| 60 | trade measurement | fill_reconciler.py, shadow_pop.py, playbook_scorecard.py | test_fill_reconciler.py, test_journal_reconcile.py, test_playbook_scorecard.py, test_shadow_pop.py | ❌ MISSING | — |
+| 60 | trade measurement | fill_reconciler.py, shadow_pop.py, playbook_scorecard.py | test_fill_reconciler.py, test_journal_reconcile.py, test_playbook_scorecard.py, test_prob_model.py, test_shadow_pop.py | ❌ MISSING | — |
 | 61 | entry confirmation | entry_confirmation.py | test_entry_confirmation.py | ❌ MISSING | — |
 | 62 | kill switch drawdown governor | trading_halt.py | test_trading_halt.py | ❌ MISSING | — |
 | 63 | manual close | manual_close.py, executor.py | test_debit_strategies.py, test_executor.py, test_fill_reconciler.py, test_manual_close.py, test_plan_retention.py, test_production_readiness.py, test_wheel_integration.py | ❌ MISSING | — |
 | 64 | liveness watchdog | liveness.py | test_liveness.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
 | 65 | earnings expiry and trend filters | strategy.py, chain_scanner.py, earnings_calendar.py, entry_filters.py, agent.py, calendar_utils.py | test_after_hours_shutdown.py, test_agent_integration.py, test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_debit_ladder.py, test_debit_strategies.py, test_earnings_and_trend_filters.py, test_earnings_calendar.py, test_entry_confirmation.py, test_executor.py, test_exit_opening_window.py, test_fill_model.py, test_journal_derived_cooldown.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_production_readiness.py, test_profit_trail.py, test_risk_manager.py, test_schwab_reauth_warning.py, test_shadow_pop.py, test_stop_hygiene.py, test_strategy.py, test_trading_halt.py | ❌ MISSING | — |
+| 66 | calibrated probability model | prob_model.py, vol_surface.py, scripts/research/calibrate_prob_model.py | test_prob_model.py, test_vol_surface.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
 
-**Skills with conformance tests:** 43 / 57 (75%)
+**Skills with conformance tests:** 43 / 58 (74%)
 
 ## Orphan source files
 
@@ -114,7 +115,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/wheel_lifecycle.py` (last modified 2026-09-29)
 - `trading_agent/wheel_policy.py` (last modified 2026-10-05)
 
-**Orphan source coverage:** 40 / 114 files (35% uncovered)
+**Orphan source coverage:** 40 / 116 files (34% uncovered)
 
 ## Orphan skills (no conformance test)
 
@@ -134,6 +135,7 @@ Skills with no corresponding `tests/conformance/test_skill_NN_*.py` file. These 
 - `docs/skills/63_manual_close.md`
 - `docs/skills/64_liveness_watchdog.md`
 - `docs/skills/65_earnings_expiry_and_trend_filters.md`
+- `docs/skills/66_calibrated_probability_model.md`
 
 ---
 
