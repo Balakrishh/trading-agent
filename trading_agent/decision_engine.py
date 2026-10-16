@@ -577,6 +577,7 @@ def decide_debit_spread(inp: DecisionInput, *,
     max_overpay = float(getattr(preset, "debit_max_overpay", 0.05))
     min_rr = float(getattr(preset, "debit_min_reward_risk", 1.0))
     model = str(getattr(preset, "fill_model", "natural"))
+    ladder = str(getattr(preset, "debit_ladder_mode", "off")) != "off"
     diag = ScanDiagnostics(grid_points_total=len(inp.chain_slices) * len(widths),
                            expirations_resolved=len(inp.chain_slices))
     cands: List[DebitCandidate] = []
@@ -606,16 +607,36 @@ def decide_debit_spread(inp: DecisionInput, *,
                 diag.record(REJECT_LEG_SPREAD_WIDE)
                 continue
             cand = _debit_vertical_candidate(side, opt, slc, long_c, short_c, model,
-                                             max_overpay, min_rr, diag)
+                                             max_overpay, min_rr, diag, ladder=ladder)
             if cand is not None:
                 cands.append(cand)
     cands.sort(key=lambda c: (c.debit, -c.reward_risk))
     return DebitDecisionOutput(candidates=cands[:max_candidates], diagnostics=diag)
 
 
+def _offer_ladder_candidate(diag, slc, long_c, short_c, natural, width,
+                            mid, cap, min_rr) -> None:
+    """Keep the cheapest-cap ``debit_above_fair`` pair whose reward/risk
+    at the cap (the ladder's worst price) still clears ``min_rr``."""
+    if cap <= 0 or (width - cap) / cap < min_rr:
+        return
+    cur = diag.ladder_candidate
+    if cur is not None and cur["cap"] <= cap:
+        return
+    diag.ladder_candidate = {
+        "expiration": slc.expiration, "width": width,
+        "long_symbol": long_c.get("symbol"), "short_symbol": short_c.get("symbol"),
+        "long_strike": float(long_c["strike"]), "short_strike": float(short_c["strike"]),
+        "natural": round(natural, 4), "mid": round(mid, 4), "cap": round(cap, 4),
+        "reward_risk_at_cap": round((width - cap) / cap, 3)}
+
+
 def _debit_vertical_candidate(side, opt, slc, long_c, short_c, model, max_overpay,
-                              min_rr, diag) -> Optional[DebitCandidate]:
-    """Price + score one (long, short) pair; record rejects in ``diag``."""
+                              min_rr, diag, ladder: bool = False) -> Optional[DebitCandidate]:
+    """Price + score one (long, short) pair; record rejects in ``diag``.
+    With ``ladder``, a pair rejected only for ``debit_above_fair`` whose
+    reward/risk at the cap still clears ``min_rr`` is offered as
+    ``diag.ladder_candidate`` (cheapest cap wins; backlog C1)."""
     k_long = float(long_c["strike"])
     width = abs(float(short_c["strike"]) - k_long)
     lb, la = float(long_c["bid"]), float(long_c["ask"])
@@ -634,6 +655,9 @@ def _debit_vertical_candidate(side, opt, slc, long_c, short_c, model, max_overpa
                     "reward_risk": round(r["rr"], 3)}
             if diag.best_near_miss is None or near["reward_risk"] > diag.best_near_miss.get("reward_risk", -1):
                 diag.best_near_miss = near
+            if ladder and r["reason"] == DEBIT_REJECT_ABOVE_FAIR:
+                _offer_ladder_candidate(diag, slc, long_c, short_c, debit, width,
+                                        r["fair"], r["ceiling"], min_rr)
         return None
     return DebitCandidate(
             kind=side, option_type=opt, expiration=slc.expiration, dte=slc.dte,

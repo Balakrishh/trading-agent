@@ -95,6 +95,14 @@ MAX_HISTORY = 200   # max state_history entries kept per ticker
 # drift.  ``OrderExecutor._calculate_qty`` now delegates here.  This
 # keeps the live↔backtest sizing parity invariant honest by construction
 # — there is one definition, period.
+def _limit_or_none(value) -> Optional[float]:
+    """An order payload's ``limit_price`` (string) as a float, else None."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def realized_pl_from_close(legs, fill_debit: float) -> Optional[float]:
     """Realized P&L of a fully closed position from broker entry prices.
 
@@ -738,6 +746,9 @@ class OrderExecutor:
                 result = {
                     "status": "submitted",
                     "qty": int(order_payload.get("qty") or 0),
+                    # Signed as sent (debit > 0); the C1 ladder shadow
+                    # compares against it (2026-10-16).
+                    "limit_price": _limit_or_none(order_payload.get("limit_price")),
                     "order_id": order_id,
                     "client_order_id": client_order_id,
                     "retry_attempts": attempt,

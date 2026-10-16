@@ -2381,6 +2381,10 @@ class TradingAgent:
         trading = getattr(getattr(self, "config", None), "trading", None)
         self._trend_rs = self._relative_strength_map(list(getattr(trading, "tickers", None) or []))
         self._trend_eval = {}
+        self._ladder = None
+        if str(getattr(self.preset, "debit_ladder_mode", "off")) == "shadow":
+            from trading_agent.debit_ladder import LadderShadow
+            self._ladder = LadderShadow()
 
     # ── Trend entry filters (skill 65) ──────────────────────────────────
 
@@ -2471,8 +2475,10 @@ class TradingAgent:
         self._entries_by_scope[key] = self._entries_by_scope.get(key, 0) + 1
 
     def _finish_entry_gates(self) -> None:
-        """End of Stage 2: advance shadow entry timing, persist candidates."""
+        """End of Stage 2: advance shadow entry timing and the debit ladder
+        shadow, persist candidates."""
         self._advance_entry_timing_shadow()
+        self._advance_debit_ladder_shadow()
         try:
             self._entry_confirm.save()
         except OSError as exc:
@@ -2505,6 +2511,52 @@ class TradingAgent:
             logger.info("[%s] entry timing (shadow): %s — %s", o["ticker"], o["decision"], o["reason"])
             self.journal_kb.log_signal(ticker=o["ticker"], action="entry_timing_shadow",
                                        price=0.0, raw_signal=o)
+
+    # ── Mid-first debit ladder, shadow (backlog C1, skill 59 §3) ───────
+
+    def _debit_ladder_observe(self, ticker: str, plan, exec_result: Dict,
+                              scan_results: Optional[Dict]) -> None:
+        """Start a shadow tracker for a debit order sent at natural, or for
+        the scanner's best over-the-cap near miss when no plan came out.
+        Never affects trading."""
+        ladder = getattr(self, "_ladder", None)
+        if ladder is None:
+            return
+        from trading_agent.debit_ladder import LadderParams
+        params = LadderParams.from_preset(self.preset)
+        try:
+            if (exec_result or {}).get("status") == "submitted":
+                limit = exec_result.get("limit_price")
+                ladder.start_submitted(ticker, plan, int(exec_result.get("qty") or 1),
+                                       abs(limit) if limit else None, params)
+            elif not plan.valid:
+                cand = ((scan_results or {}).get("diagnostics") or {}).get("ladder_candidate")
+                if cand:
+                    ladder.start_unlocked(ticker, plan.strategy_name, cand, params)
+        except Exception as exc:  # noqa: skill-34-exempt — shadow log only; never affects trading
+            logger.warning("[%s] Debit ladder shadow not started: %s", ticker, exc)
+
+    def _advance_debit_ladder_shadow(self) -> None:
+        """Re-quote tracked debit ladders and journal resolved
+        ``debit_ladder_shadow`` rows. Never affects trading."""
+        ladder = getattr(self, "_ladder", None)
+        if ladder is None:
+            return
+        from trading_agent.debit_ladder import LadderParams
+        try:
+            rows = ladder.advance(self.data_provider.fetch_option_quotes,
+                                  LadderParams.from_preset(self.preset))
+            ladder.save()
+        except Exception as exc:  # noqa: skill-34-exempt — shadow log only; never affects trading
+            logger.warning("Debit ladder shadow skipped: %s", exc)
+            return
+        for row in rows:
+            ticker = row["ticker"]
+            logger.info("[%s] debit ladder (shadow, %s): %s", ticker, row["kind"],
+                        f"step {row['fill_step'] + 1} at ${row['ladder_debit']:.2f}"
+                        if row["filled"] else "no fill up to the cap")
+            self.journal_kb.log_signal(ticker=ticker, action="debit_ladder_shadow",
+                                       price=0.0, raw_signal=row)
 
     def _entry_rate_gate(self, ticker: str) -> Optional[Dict]:
         """Skip result when ``max_new_entries_per_hour`` submissions already
@@ -2921,6 +2973,7 @@ class TradingAgent:
             analysis, plan, verdict, llm_decision, exec_result,
             scan_results=scan_results,
         )
+        self._debit_ladder_observe(ticker, plan, exec_result, scan_results)
 
         result = {
             "ticker": ticker,

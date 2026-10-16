@@ -30,7 +30,7 @@ All open items below, grouped by theme and ordered. Older sections keep the hist
 - [ ] **B5 Re-check large-cap option quotes** (§7).
 
 ### C. Pay less to get in and out
-- [ ] **C1 Mid-first entry ladder** (10.3) — 10/13 debit near misses were 8–10¢ over the ceiling.
+- [ ] **C1 Mid-first entry ladder** (10.3) — 10/13 debit near misses were 8–10¢ over the ceiling. *Shadow since 2026-10-16 — `debit_ladder_shadow` rows (skill 59 §3); decide on live after ~1 week of `saving_usd` / `missed_trade` / `would_open`.*
 - [x] **C2 Slippage vs mid, not vs estimate** (§7). *Done 2026-10-13 — scorecard `entry_cost_vs_mid` (skill 60 §4).*
 
 ### D. Exits and open positions

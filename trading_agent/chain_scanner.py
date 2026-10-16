@@ -894,6 +894,11 @@ class ScanDiagnostics:
     # plain dict (not SpreadCandidate) to keep the diagnostic decoupled
     # from the journal format.
     best_near_miss:       Optional[Dict[str, Any]] = None
+    # Debit verticals, debit_ladder_mode != "off" (backlog C1, 2026-10-16):
+    # the cheapest pair rejected only for debit_above_fair whose
+    # reward/risk still clears the floor at the cap — what a mid-first
+    # ladder could have tried. Leg symbols included for the shadow tracker.
+    ladder_candidate:     Optional[Dict[str, Any]] = None
 
     def record(self, reason: str, count: int = 1) -> None:
         """Increment the histogram bucket for ``reason``."""
@@ -910,6 +915,7 @@ class ScanDiagnostics:
             "grid_points_priced":   self.grid_points_priced,
             "rejects_by_reason":    dict(self.rejects_by_reason),
             "best_near_miss":       self.best_near_miss,
+            "ladder_candidate":     self.ladder_candidate,
         }
 
 
