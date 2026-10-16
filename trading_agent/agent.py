@@ -56,7 +56,7 @@ import re
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from trading_agent.config import AppConfig, load_config
@@ -108,6 +108,7 @@ from trading_agent.market_hours import (
 from trading_agent.daily_state import (
     DailyStateStore,
     check_daily_drawdown,
+    reset_exit_vote,
     tally_exit_vote,
 )
 from trading_agent.thesis_builder import build_thesis
@@ -1283,7 +1284,7 @@ class TradingAgent:
 
         closed = []
         for spread in spreads:
-            if spread.exit_signal != ExitSignal.HOLD and self._should_exit_spread(spread):
+            if self._should_exit_spread(spread):
                 # ── Cooldown guard ────────────────────────────────────────
                 # If this ticker has hit PARTIAL_CLOSE_COOLDOWN_THRESHOLD
                 # consecutive partial fills, park further auto-closes for
@@ -2369,11 +2370,14 @@ class TradingAgent:
             int(getattr(self.preset, "entry_confirm_cycles", 1))).begin()
         self._entry_plans = {}
         self._entries_by_scope: Dict[str, int] = {}
+        self._recent_stops: List[Tuple[str, str, date]] = []
         jsonl_path = getattr(self.journal_kb, "jsonl_path", None)
         if isinstance(jsonl_path, str) and jsonl_path:
             from trading_agent.journal_reader import JournalReader
-            for tk, _ in JournalReader(jsonl_path).submissions_since(1.0):
+            reader = JournalReader(jsonl_path)
+            for tk, _ in reader.submissions_since(1.0):
                 self._count_entry(tk)
+            self._recent_stops = self._stops_from(reader)
         trading = getattr(getattr(self, "config", None), "trading", None)
         self._trend_rs = self._relative_strength_map(list(getattr(trading, "tickers", None) or []))
         self._trend_eval = {}
@@ -2425,6 +2429,35 @@ class TradingAgent:
             return None
         self._trend_eval[ticker] = ev.to_journal_dict()
         return ev.block
+
+    # ── Cool-down after a stop (2026-10-16) ─────────────────────────────
+
+    @staticmethod
+    def _stops_from(reader) -> List[Tuple[str, str, date]]:
+        """(ticker, strategy, ET date) of stop-type closes in the last week."""
+        from zoneinfo import ZoneInfo
+        from trading_agent.position_caps import STOP_EXIT_SIGNALS
+        out = []
+        for c in reader.closes_since(7):
+            if c.exit_signal not in STOP_EXIT_SIGNALS:
+                continue
+            try:
+                ts = datetime.fromisoformat(c.timestamp_utc.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            out.append((c.ticker, c.strategy, ts.astimezone(ZoneInfo("America/New_York")).date()))
+        return out
+
+    def _stop_cooldown_block(self, ticker: str, plan) -> Optional[str]:
+        """Reason a new entry is blocked by a recent same-direction stop on
+        ``ticker`` (``stop_cooldown_sessions``), else None."""
+        from zoneinfo import ZoneInfo
+        from trading_agent.position_caps import stop_cooldown_failure
+        return stop_cooldown_failure(
+            ticker, plan.strategy_name,
+            datetime.now(ZoneInfo("America/New_York")).date(),
+            getattr(self, "_recent_stops", []) or [],
+            int(getattr(self.preset, "stop_cooldown_sessions", 0)))
 
     def _entry_scope_key(self, ticker: str) -> str:
         """Bucket for the hourly entry limit: the ticker's sector, or one
@@ -2757,6 +2790,7 @@ class TradingAgent:
                          self._market_state, plan.strategy_name,
                          [l.option_type for l in plan.legs if l.action == "sell"])
                      or self._ladder_block(ticker, plan.expiration)
+                     or self._stop_cooldown_block(ticker, plan)
                      or self._trend_filter_block(ticker, plan, analysis)
                      or self._entry_confirmation_block(ticker, plan))
             if block:
@@ -3141,18 +3175,32 @@ class TradingAgent:
     # Risk guardrail helpers (delegated to daily_state module)
     # ==================================================================
 
+    @staticmethod
+    def _exit_vote_key(spread) -> str:
+        """Debounce key: one vote count per position, so two laddered
+        positions on a ticker never share (or reset) each other's count."""
+        return "|".join(str(getattr(spread, f, "") or "")
+                        for f in ("underlying", "expiration", "strategy_name"))
+
     def _should_exit_spread(self, spread: SpreadPosition) -> bool:
         """
         3-cycle debounce guard for non-immediate exit signals.
 
         Immediate signals (HARD_STOP, STRIKE_PROXIMITY, DTE_SAFETY) bypass
         debounce and return True immediately.  All other signals require
-        the SAME signal on 3 consecutive cycles before this returns True,
-        and are held until ``preset.no_exit_before_et`` (09:45 ET) — the
-        votes keep counting, so a confirmed exit goes out on the first
-        cycle after the window opens (skill 30 §4).
+        the SAME signal on 3 consecutive cycles (skill 30 §4):
+
+        * a HOLD cycle resets the count (2026-10-16 — before, a HOLD left
+          it standing, so the QQQ stop on 2026-10-14 fired on three
+          one-cycle touches at 09:32, 09:37 and 09:57);
+        * before ``preset.no_exit_before_et`` (09:45 ET) no votes are
+          counted at all, so a confirmed exit needs three cycles of
+          post-open quotes (2026-10-16 — before, votes cast in the
+          opening's wide quotes fired on the first cycle at 09:45).
         """
+        key = self._exit_vote_key(spread)
         if spread.exit_signal == ExitSignal.HOLD:
+            reset_exit_vote(self.daily_state, key)
             return False
 
         if spread.exit_signal in IMMEDIATE_EXIT_SIGNALS:
@@ -3162,23 +3210,25 @@ class TradingAgent:
             )
             return True
 
+        from trading_agent.entry_confirmation import before_entry_window
+        not_before = str(getattr(self.preset, "no_exit_before_et", "") or "")
+        if not_before and before_entry_window(datetime.now(timezone.utc), not_before):
+            reset_exit_vote(self.daily_state, key)
+            logger.info(
+                "[%s] Exit signal %s before %s ET — not counted "
+                "(opening quotes too wide)",
+                spread.underlying, spread.exit_signal.value, not_before,
+            )
+            return False
+
         count = tally_exit_vote(
             self.daily_state,
-            ticker=spread.underlying,
+            ticker=key,
             signal_val=spread.exit_signal.value,
             required=EXIT_DEBOUNCE_REQUIRED,
         )
 
         if count >= EXIT_DEBOUNCE_REQUIRED:
-            from trading_agent.entry_confirmation import before_entry_window
-            not_before = str(getattr(self.preset, "no_exit_before_et", "") or "")
-            if not_before and before_entry_window(datetime.now(timezone.utc), not_before):
-                logger.info(
-                    "[%s] Exit signal %s confirmed but held until %s ET "
-                    "(opening quotes too wide)",
-                    spread.underlying, spread.exit_signal.value, not_before,
-                )
-                return False
             logger.warning(
                 "[%s] Exit signal %s confirmed after %d cycles — acting",
                 spread.underlying, spread.exit_signal.value, count,
@@ -3186,7 +3236,7 @@ class TradingAgent:
             return True
 
         logger.info(
-            "[%s] Exit signal %s vote %d/%d — debouncing (next check in ~5 min)",
+            "[%s] Exit signal %s vote %d/%d — debouncing",
             spread.underlying, spread.exit_signal.value,
             count, EXIT_DEBOUNCE_REQUIRED,
         )

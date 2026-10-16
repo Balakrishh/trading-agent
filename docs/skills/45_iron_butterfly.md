@@ -224,4 +224,4 @@ Hot-reloads on the next cycle (skill 13). Set back to `false` to disable without
 
 ---
 
-*Last verified against repo HEAD on 2026-10-15.*
+*Last verified against repo HEAD on 2026-10-16.*

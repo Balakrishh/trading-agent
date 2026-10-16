@@ -187,4 +187,4 @@ Preset (`PresetConfig`, dashboard "Earnings & trend entry filters"): `earnings_g
 
 ---
 
-*Last verified against repo HEAD on 2026-10-15.*
+*Last verified against repo HEAD on 2026-10-16.*

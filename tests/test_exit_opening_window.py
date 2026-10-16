@@ -17,6 +17,7 @@ def _agent(monkeypatch, *, votes, before_window, not_before="09:45"):
     a.preset = SimpleNamespace(no_exit_before_et=not_before)
     a.daily_state = object()
     monkeypatch.setattr(agent_mod, "tally_exit_vote", lambda *a, **k: votes)
+    monkeypatch.setattr(agent_mod, "reset_exit_vote", lambda *a, **k: None)
     monkeypatch.setattr("trading_agent.entry_confirmation.before_entry_window",
                         lambda now, nb: before_window)
     return a

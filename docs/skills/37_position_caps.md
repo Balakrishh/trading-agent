@@ -85,6 +85,8 @@ from trading_agent.position_caps import compute_position_cap_dedup_set
 - **Add to winners only (2026-10-06).** `ladder_requires_profit` (default True): a 2nd+ position also needs every open position on the ticker at or above breakeven by mid P&L (`open_pls`, from the monitor summary) — otherwise `ladder_existing_losing (open P&L $…)`. The GLD put debit was −$135 to −$175 while the planner kept proposing a second GLD put debit; laddering a loser is doubling down.
 - **Gate order (2026-10-15).** After RiskManager: market-state gate → ladder gate → trend filters (skill 65; blocks only in live mode) → entry confirmation. The sector ETFs added the same day (XLK, XLV, XLY, XLI, SMH, XLU) are already mapped in `sector_map.py`; XLK + SMH share Technology and XLY + AMZN share Consumer Discretionary, so each pair counts against one sector's cap.
 
+- **Cool-down after a stop (2026-10-16).** `PresetConfig.stop_cooldown_sessions` (default 1; 0 = off). A stop-type close (`STOP_EXIT_SIGNALS`: `stop_loss`, `hard_stop`, `delta_stop`, `strike_proximity`) blocks new entries on that ticker in the same direction for the rest of the stop's session and the next N sessions (`stop_cooldown_failure`, journaled as `risk: stop_cooldown (…)`). Direction (`trade_direction`): bull = Bull Put, Call Debit, Bounce Bull Put, Cash-Secured Put; bear = Bear Call, Put Debit; any other structure cools down only its own kind. Sessions are weekdays (`sessions_between`; an exchange holiday shortens the cool-down by one session). The stops come from `JournalReader.closes_since(7)` once per cycle in `_begin_entry_gates` (`TradingAgent._stops_from`, close time converted to the ET date). Why: TLT's put debit was stopped at 09:46 ET on 2026-10-15 and a new TLT put debit on the same view was bought at 09:50 — the ladder rules only see open positions, so a full close cleared every block. Gate order is now market-state → ladder → stop cool-down → trend filters → entry confirmation. Dashboard: "Stop cool-down (sessions)" next to the ladder controls; summary token `Stop cool-down N sess`.
+
 ## 5. Cross-References
 
 - `17_close_failure_and_cooldown.md` — the close-side counterpart to this open-side gate.
@@ -93,4 +95,4 @@ from trading_agent.position_caps import compute_position_cap_dedup_set
 
 ---
 
-*Last verified against repo HEAD on 2026-10-15.*
+*Last verified against repo HEAD on 2026-10-16.*
