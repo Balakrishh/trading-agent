@@ -2957,6 +2957,22 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Debit stop (% of debit)", 0.2, 0.9,
                 float(getattr(seed, "debit_stop_loss_pct", 0.50)), 0.05,
                 key="cust_debit_sl")
+            _ladder_modes = ["shadow", "off"]
+            debit_ladder_mode = st.selectbox(
+                "Mid-first ladder (C1)", _ladder_modes,
+                index=_ladder_modes.index(getattr(seed, "debit_ladder_mode", "shadow")
+                                          if getattr(seed, "debit_ladder_mode", "shadow")
+                                          in _ladder_modes else "shadow"),
+                key="cust_debit_ladder_mode",
+                help="shadow: orders still go out at natural; record what offering mid → "
+                     "cap in steps would have saved, and which rejected near misses it "
+                     "would have opened. Live mode is not built yet.")
+            debit_ladder_steps = st.number_input(
+                "Ladder steps", 1, 8, int(getattr(seed, "debit_ladder_steps", 4)), 1,
+                key="cust_debit_ladder_steps")
+            debit_ladder_step_cycles = st.number_input(
+                "Cycles per step", 1, 5, int(getattr(seed, "debit_ladder_step_cycles", 1)), 1,
+                key="cust_debit_ladder_cycles")
         with db_e3:
             cal_tp = st.slider(
                 "Calendar TP (% of debit)", 0.1, 0.6,
@@ -2997,6 +3013,9 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "dte_debit":                    int(dte_debit),
         "debit_long_delta":             debit_long_delta,
         "debit_max_overpay":            debit_overpay,
+        "debit_ladder_mode":            debit_ladder_mode,
+        "debit_ladder_steps":           int(debit_ladder_steps),
+        "debit_ladder_step_cycles":     int(debit_ladder_step_cycles),
         "debit_min_reward_risk":        debit_min_rr,
         "debit_profit_target_pct":      debit_tp,
         "debit_profit_target_basis":    debit_tp_basis,

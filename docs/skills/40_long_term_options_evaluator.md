@@ -365,4 +365,4 @@ def render_long_term_evaluator() -> None:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-07.*
+*Last verified against repo HEAD on 2026-10-16.*

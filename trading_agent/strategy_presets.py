@@ -306,6 +306,14 @@ class PresetConfig:
     # "max_profit" — of width − debit (the pre-2026-10-08 rule; ≈ +80 % on
     # cost for a 1.6:1 spread, and IWM's +$444 peak never reached it).
     debit_profit_target_basis:         str   = "debit"
+    # Mid-first entry ladder for debit verticals (backlog C1, 2026-10-16,
+    # skill 59 §3). Orders still go out at natural; "shadow" measures
+    # what offering mid → cap in debit_ladder_steps prices, each held
+    # debit_ladder_step_cycles cycles, would have saved or unlocked
+    # (``debit_ladder_shadow`` journal rows). "live" is not built yet.
+    debit_ladder_mode:                 str   = "shadow"
+    debit_ladder_steps:                int   = 4
+    debit_ladder_step_cycles:          int   = 1
 
     # ------------------------------------------------------------------
     # Total open-risk cap (added 2026-10-05). Σ max loss of all open
@@ -452,7 +460,9 @@ class PresetConfig:
                          f"RR≥{self.debit_min_reward_risk:g} "
                          f"TP{self.debit_profit_target_pct:.0%} of "
                          f"{'cost' if self.debit_profit_target_basis == 'debit' else 'max'}"
-                         f"/SL{self.debit_stop_loss_pct:.0%}")
+                         f"/SL{self.debit_stop_loss_pct:.0%} "
+                         f"Ladder {self.debit_ladder_mode}"
+                         f"{'' if self.debit_ladder_mode == 'off' else f' {self.debit_ladder_steps}×{self.debit_ladder_step_cycles}c'}")
         if self.calendar_enabled:
             parts.append(f"Cal@{self.dte_calendar_near}+{self.calendar_gap_days}d "
                          f"TP{self.calendar_profit_target_pct:.0%} drift≤{self.calendar_max_strike_drift_pct:.0%}")
@@ -722,6 +732,10 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("profit_trail_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid profit_trail_mode %r — using the default",
                        out.pop("profit_trail_mode"))
+    if out.get("debit_ladder_mode") not in (None, "off", "shadow"):
+        # "live" is not built yet (backlog C1) — fall back to shadow.
+        logger.warning("Invalid debit_ladder_mode %r — using the default",
+                       out.pop("debit_ladder_mode"))
     for mode in ("rs_filter_mode", "pullback_filter_mode"):
         if out.get(mode) not in (None, "off", "shadow", "live"):
             logger.warning("Invalid %s %r — using the default", mode, out.pop(mode))
