@@ -85,6 +85,7 @@ Skills 40–65: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 63 | [Manual Close](63_manual_close.md) | ops / risk | `trading_agent/manual_close.py`, `trading_agent/executor.py` |
 | 64 | [Liveness Watchdog](64_liveness_watchdog.md) | ops | `trading_agent/liveness.py`, `deploy/systemd/trading-agent-liveness.*` |
 | 65 | [Earnings-Aware Expiries and Trend Entry Filters](65_earnings_expiry_and_trend_filters.md) | risk / strategy | `trading_agent/entry_filters.py`, `trading_agent/earnings_calendar.py`, `trading_agent/strategy.py` |
+| 66 | [Calibrated Probability Model and Daily Vol Surface](66_calibrated_probability_model.md) | strategy / data_quality | `trading_agent/prob_model.py`, `trading_agent/vol_surface.py`, `scripts/research/calibrate_prob_model.py`, `deploy/systemd/trading-agent-vol-surface.*` |
 
 ## Phase 2 (planned, not yet written)
 

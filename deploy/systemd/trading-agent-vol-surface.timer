@@ -1,0 +1,11 @@
+# 16:05 ET on weekdays (after the close, before the 16:15 reviewer),
+# whatever the Pi's own timezone is. Holidays exit without recording.
+[Unit]
+Description=Record the daily volatility surface at 16:05 ET on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri 16:05 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

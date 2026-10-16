@@ -213,10 +213,11 @@ Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's lau
 | `trading-agent.service` | The supervisor (skill 57): one agent cycle ≈ every 75 s in NYSE hours, sleeps outside them |
 | `trading-agent-data-server.service` | Schwab quote server on `127.0.0.1:8765` for the MCP tools |
 | `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
+| `trading-agent-vol-surface.timer` | 16:05 ET on weekdays: per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
 | `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET or `/health` fails; one page per outage plus "recovered" (skill 64) |
 | `trading-agent-dashboard.service` | Streamlit dashboard (optional, off by default) |
 
-After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer`.
+After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer`.
 
 **Alerts (skill 32).** Telegram: trade opens / closes and the end-of-day summary on the main bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), errors and liveness pages on the error bot (`TELEGRAM_ERROR_*`). Messages are HTML-escaped; a message Telegram still rejects is resent once as plain text.
 
@@ -310,6 +311,10 @@ Both layers are off by default. Each degrades gracefully if its dependencies are
 | Knowledge Base / RAG | `knowledge_base.py` | File-based vector store via `nomic-embed-text`; cosine search; no external DB |
 | LLM Analyst | `llm_analyst.py` | Returns approve/modify/skip — **advisory only**, can't override the risk manager |
 | Fine-Tuning Pipeline | `fine_tuning.py` | Exports Chat JSONL / Alpaca / DPO formats once 20+ closed trades exist |
+
+### Calibrated probability model (skill 66, research)
+
+`scripts/research/calibrate_prob_model.py` estimates the odds behind each strategy — a short strike finishing out of the money, a debit spread paying, a level touched before expiry — from the distribution of the move to expiry in realized-vol units, conditioned on horizon, asset group, direction, volatility regime, market regime and term structure (the agent's own regime and market-state code replayed on 2009 → daily data). Thin situations borrow from coarser ones; every month is predicted only from outcomes known before it (walk-forward). Results against `pop_rv` and implied odds: [`docs/plans/research_prob_model.md`](docs/plans/research_prob_model.md). Per-ticker skew has no free history, so `trading-agent-vol-surface.timer` records it daily from 2026-10-16. Not used for trading yet; next comes a shadow `pop_cal` in the journal.
 
 ### Daily journal review (skill 56)
 
@@ -664,6 +669,8 @@ trading-agent/
 │   ├── market_state.py               # Whole-market risk state + playbook table (skill 58)
 │   ├── debit_policy.py               # Debit / calendar / bounce constants (skill 59)
 │   ├── debit_ladder.py               # Mid-first debit entry ladder, shadow (backlog C1, skill 59)
+│   ├── prob_model.py                 # Calibrated probability model, walk-forward (skill 66)
+│   ├── vol_surface.py                # Daily per-ticker skew / term-structure snapshot (skill 66)
 │   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk caps (skill 37)
 │   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
 │   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)
@@ -820,7 +827,7 @@ Debit scans also carry `diagnostics.ladder_candidate` (2026-10-16, backlog C1): 
 
 This project follows a Spec-Driven Development workflow: every architectural concept is documented as an atomic "skill" file before the corresponding code is shipped, and CI verifies the spec and code never drift apart. CI gates plus local checks and two workflow helpers enforce this mechanically (full list: [`scripts/checks/README.md`](scripts/checks/README.md)).
 
-**Where the specs live.** Each concept is one file under `docs/skills/NN_short_name.md` (currently 57 skills, numbered 00–65). The format is fixed: theory → math → reference Python (quoted verbatim from source) → edge cases → cross-references → footer dated to the last verification. `CLAUDE.md` documents the SDLC contract; `CONTRIBUTING.md` operationalises it into commands.
+**Where the specs live.** Each concept is one file under `docs/skills/NN_short_name.md` (currently 58 skills, numbered 00–66). The format is fixed: theory → math → reference Python (quoted verbatim from source) → edge cases → cross-references → footer dated to the last verification. `CLAUDE.md` documents the SDLC contract; `CONTRIBUTING.md` operationalises it into commands.
 
 **The CI gates** (`.github/workflows/ci.yml` runs all of them on every push):
 

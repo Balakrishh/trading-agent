@@ -1,0 +1,14 @@
+# Daily skew / term-structure snapshot — one shot, started by
+# trading-agent-vol-surface.timer (skill 66). Reads chains from the local
+# data server (/chain), never opens its own Schwab session.
+[Unit]
+Description=Trading agent daily volatility-surface snapshot
+After=trading-agent-data-server.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.vol_surface
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/tmp/trading-agent.vol-surface.out.log
+StandardError=append:/tmp/trading-agent.vol-surface.err.log
