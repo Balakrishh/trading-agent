@@ -1,6 +1,6 @@
 # Calibrated Probability Model (walk-forward) and Daily Vol Surface
 
-> **One-line summary:** Estimates the odds behind every strategy (finish beyond a strike, touch a level before expiry) from the conditional distribution of the standardized move, by horizon, asset group, direction, volatility regime, market regime and term structure, fitted walk-forward so only information known at the decision time is used; plus a daily per-ticker skew / term-structure snapshot to add skew once enough history exists.
+> **One-line summary:** Estimates the odds behind every strategy (finish beyond a strike, touch a level before expiry) from the conditional distribution of the standardized move, by horizon, asset group, direction, volatility regime and market regime (term structure and ^SKEW tested and dropped), fitted walk-forward so only information known at the decision time is used; plus a daily per-ticker skew / term-structure snapshot to add skew once enough history exists.
 > **Source of truth:** [`trading_agent/prob_model.py`](../../trading_agent/prob_model.py), [`trading_agent/vol_surface.py`](../../trading_agent/vol_surface.py), [`scripts/research/calibrate_prob_model.py`](../../scripts/research/calibrate_prob_model.py), [`deploy/systemd/trading-agent-vol-surface.*`](../../deploy/systemd/)
 > **Phase:** 2  •  **Group:** strategy / data_quality
 > **Depends on:** `01_pop_from_delta.md`, `58_market_risk_state.md`, `60_measurement_shadow_pop_scorecard.md`, `16_market_data_provider_routing.md`, `47_schwab_data_server.md`
