@@ -161,6 +161,7 @@ def test_scanner_offers_ladder_candidate(mode, expect):
     assert (lc is not None) is expect
     if expect:
         assert (lc["long_symbol"], lc["short_symbol"]) == ("P100", "P95")
+        assert lc["strategy"] == "Put Debit Spread"
         assert lc["natural"] > lc["cap"] > lc["mid"]
         assert lc["reward_risk_at_cap"] >= pre.debit_min_reward_risk
         assert out.diagnostics.to_journal_dict()["ladder_candidate"] == lc
@@ -204,6 +205,18 @@ def test_agent_starts_submitted_and_unlocked(tmp_path):
                             {"status": "rejected"}, {"diagnostics": {"ladder_candidate": cand}})
     kinds = sorted(t["kind"] for t in a._ladder.trackers.values())
     assert kinds == ["submitted", "unlocked"]
+
+
+def test_unlocked_tracker_named_after_the_debit_spread(tmp_path):
+    """2026-10-16: a bear-call plan's put-debit fallback was journaled as
+    "Bear Call Spread"; the candidate's own strategy wins."""
+    a = _agent(tmp_path)
+    cand = {"strategy": "Put Debit Spread", "expiration": "2026-11-20", "width": 2.0,
+            "long_symbol": "GDX_L", "short_symbol": "GDX_S",
+            "natural": 1.10, "mid": 0.95, "cap": 0.9975, "reward_risk_at_cap": 1.005}
+    a._debit_ladder_observe("GDX", SimpleNamespace(valid=False, strategy_name="Bear Call Spread"),
+                            {"status": "rejected"}, {"diagnostics": {"ladder_candidate": cand}})
+    assert [t["strategy"] for t in a._ladder.trackers.values()] == ["Put Debit Spread"]
 
 
 def test_agent_advance_journals_rows(tmp_path):

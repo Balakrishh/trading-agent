@@ -2532,7 +2532,7 @@ class TradingAgent:
             elif not plan.valid:
                 cand = ((scan_results or {}).get("diagnostics") or {}).get("ladder_candidate")
                 if cand:
-                    ladder.start_unlocked(ticker, plan.strategy_name, cand, params)
+                    ladder.start_unlocked(ticker, cand.get("strategy") or plan.strategy_name, cand, params)
         except Exception as exc:  # noqa: skill-34-exempt — shadow log only; never affects trading
             logger.warning("[%s] Debit ladder shadow not started: %s", ticker, exc)
 

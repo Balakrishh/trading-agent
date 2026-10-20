@@ -615,7 +615,7 @@ def decide_debit_spread(inp: DecisionInput, *,
 
 
 def _offer_ladder_candidate(diag, slc, long_c, short_c, natural, width,
-                            mid, cap, min_rr) -> None:
+                            mid, cap, min_rr, opt: str = "") -> None:
     """Keep the cheapest-cap ``debit_above_fair`` pair whose reward/risk
     at the cap (the ladder's worst price) still clears ``min_rr``."""
     if cap <= 0 or (width - cap) / cap < min_rr:
@@ -624,6 +624,7 @@ def _offer_ladder_candidate(diag, slc, long_c, short_c, natural, width,
     if cur is not None and cur["cap"] <= cap:
         return
     diag.ladder_candidate = {
+        "strategy": {"put": "Put Debit Spread", "call": "Call Debit Spread"}.get(opt, ""),
         "expiration": slc.expiration, "width": width,
         "long_symbol": long_c.get("symbol"), "short_symbol": short_c.get("symbol"),
         "long_strike": float(long_c["strike"]), "short_strike": float(short_c["strike"]),
@@ -657,7 +658,7 @@ def _debit_vertical_candidate(side, opt, slc, long_c, short_c, model, max_overpa
                 diag.best_near_miss = near
             if ladder and r["reason"] == DEBIT_REJECT_ABOVE_FAIR:
                 _offer_ladder_candidate(diag, slc, long_c, short_c, debit, width,
-                                        r["fair"], r["ceiling"], min_rr)
+                                        r["fair"], r["ceiling"], min_rr, opt)
         return None
     return DebitCandidate(
             kind=side, option_type=opt, expiration=slc.expiration, dte=slc.dte,
