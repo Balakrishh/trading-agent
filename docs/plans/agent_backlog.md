@@ -45,14 +45,16 @@ All open items below, grouped by theme and ordered. Older sections keep the hist
 - [ ] **E1 Breadth from the 11 sector SPDRs** (§7) — CAUTION 3 sessions on 4 of 8 tickers with VIX 15.
 - [ ] **E2 Direction-aware sector cap** (10.6).
 - [ ] **E3 Same-ticker add on strong two-model EV**, not only when the open position is profitable.
-- [ ] **E4 Book direction balance** (§7).
+- [ ] **E4 Book direction balance** (§7, 11.1) — beta-weighted net-delta budget: warn, then prefer trades that pull the book back toward neutral. **Scheduled: build Fri 2026-10-23.**
+- [ ] **E6 Correlated-risk groups** (11.2) — TLT + XLU (+ later rate-sensitive names) count as one "rates" group for position / entry limits; cap one-direction risk per group and for the whole book. **Scheduled: build Fri 2026-10-23.**
 - [x] **E5 Market-state SPY input** (10.5). *Answered 2026-10-13 — SPY trend and breadth use the prior close by design, VIX is intraday (skill 58 §4).*
 
 ### F. Engineering hygiene
+- [ ] **F6 Positions with contracts and total risk** (11.3) — `list_positions` and the daily reviewer get contract counts, total max loss, broker legs and mid P&L. **Scheduled: build Fri 2026-10-23.**
 - [ ] **F1 `scripts/ci_local.sh`** (§7). **F2 Day-replay harness** (§9). **F3 Stage 2 as a gate pipeline** (§9). **F4 Promotion-by-evidence report** (§9). **F5 Delete merged branches** (§4, plus `feat/manual-close`, `feat/data-server-key-guard`, `feat/debit-target-on-cost`).
 
 ### G. Operator
-- [ ] Schwab re-login by **Tue 2026-10-20 ~08:58 ET** (Telegram now warns 2 days ahead). Refresh the June holdings paste. Confirm the rotated data-server token is the only valid one.
+- [ ] Schwab re-login by **Mon 2026-10-26 ~22:00 ET** (logged in 2026-10-19 22:01; the data server ran pre-A1 code until 2026-10-19, so the countdown is only trustworthy from that login). Refresh the June holdings paste. Confirm the rotated data-server token is the only valid one.
 
 ### H. Later
 - [ ] Quality + momentum stock sleeve (§3).
@@ -202,6 +204,14 @@ Motivation: the agent judges each ticker alone. In a broad 10–20 % correction,
 - [ ] **10.4 CSP delta stop vs the Wheel.** A stop that turns a $21 credit into a $97 loss needs an ~82 % win rate to break even, and closing at Δ 0.45 means a Wheel put is never assigned on a name it was screened to own. Decide per name: roll down-and-out for a credit, accept assignment, or keep the stop (with 10.1). Design decision first, then the Wheel skill.
 - [ ] **10.5 Market-state SPY input.** `market_state.json` showed SPY 773.93 all session on 2026-10-09 while SPY traded up to $778 — confirm whether the state is meant to use the prior daily close; if so, say so in skill 58. (Breadth on 8 tickers kept CAUTION all day at 3 of 8 — see §7 "Broader breadth input".)
 - [ ] **10.6 Direction-aware sector cap.** IWM / DIA were `skipped_existing` 1,080 times a day because SPY (neutral calendar) + QQQ (bullish) fill the Broad Market cap of 2, while IWM (bearish) was the week's only big winner. Consider counting bullish and bearish positions per sector separately, or not counting calendars; weigh against concentration risk (ties to §7 "Portfolio direction balance").
+
+## 11. Book-level risk — direction and correlation (added 2026-10-19)
+
+**Evidence (2026-10-19).** Seven open positions, five of them put debit spreads: ≈ $1,935 of $2,974 total max loss bearish (6.6 % of equity), and TLT ×2 + XLU (≈ $839) are close to one bet on higher yields. `entry_rate_scope="sector"` treats Treasuries and Utilities as different sectors, so nothing limits it. Account daily P&L vs SPY daily return, 2026-09-29 → 10-19 (15 sessions, Alpaca portfolio history): correlation 0.15, and 0.0 without the noisy first two sessions; same sign on 7 days, opposite on 8. The book is not long the market — it swings with whichever direction the individual tickers' regimes pick, and realized losses came from directional bets the market went against (QQQ call debit on 10-14, TLT put debit on 10-15, VZ CSP on 10-09). No defined-risk strategy wins in every market (directional spreads need the direction, condors / calendars need a range, long volatility needs a big move); what the agent can control is which risks the book carries at once.
+
+- [ ] **11.1 Net-delta budget (E4).** Beta-weighted net delta of the book (SPY-equivalent shares, from leg deltas × contracts × 100 × beta to SPY) computed each cycle and journaled. Preset `max_net_beta_delta_pct` (share of equity, SPY-equivalent notional). Above the budget: candidates that add to the tilt are rejected (`net_delta_budget`), candidates that reduce it are allowed, neutral structures (condor, calendar, butterfly) pass. Shadow first (would-block counts in the daily review), then live. Show the number in `/portfolio` and the dashboard.
+- [ ] **11.2 Correlated-risk groups (E6).** A `risk_group` map beside `sector_map` (start: rates = TLT, XLU; gold = GLD, GDX; US large-cap = SPY, QQQ, DIA, XLK, SMH). Position and entry-rate limits count by group as well as sector; `max_group_direction_risk_pct` caps max loss in one direction per group (start 3 %), `max_book_direction_risk_pct` across the book (start 6 %). Ties to E2: counting bullish and bearish separately per group.
+- [ ] **11.3 Positions with contracts and total risk (F6).** `list_positions` returns `contracts` and `total_max_loss` (the `max_loss` field is per contract — the 10-16 and 10-19 briefs understated risk as $1,769 vs $2,974). The reviewer context gets the same plus broker legs and mid P&L, so it stops asking about positions it cannot see (TLT count, the QQQ leg the broker no longer holds) and judges debit cost per dollar of width, not in dollars.
 
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 
