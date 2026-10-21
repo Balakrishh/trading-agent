@@ -89,7 +89,7 @@ def summarize_expiry(calls: List[Dict[str, Any]], puts: List[Dict[str, Any]]
                      ) -> Optional[Dict[str, Any]]:
 ```
 
-For every ticker in `TICKERS`, at expiries near 7 / 30 / 60 days (`candidate_expirations`: the weekly nearest the target, then neighbouring weeks): ATM IV (mean of the call and put nearest |Δ| 0.50), 25-delta put and call IV, `rr25` = call25 − put25, `fly25`, `put_skew` = put25 − ATM, ATM bid-ask %, and the term ratios 7/30 and 30/60. One row per ticker per day appended to `trade_journal/vol_surface.jsonl` (`TRADING_AGENT_VOL_SURFACE`); a ticker already recorded that day is skipped. Chains come from the data server's `/chain` (skill 47) through `mcp.tools.market._data_server_get` — **never a Schwab session of its own** (one token holder, skill 16 §4; AST-tested). `trading-agent-vol-surface.timer` runs it at 16:05 ET on weekdays; on a non-trading day it exits without recording. ~0.3 s between calls; 18 tickers take about 2½ minutes.
+For every ticker in `TICKERS`, at expiries near 7 / 30 / 60 days (`candidate_expirations`: the weekly nearest the target, then neighbouring weeks): ATM IV (mean of the call and put nearest |Δ| 0.50), 25-delta put and call IV, `rr25` = call25 − put25, `fly25`, `put_skew` = put25 − ATM, ATM bid-ask %, and the term ratios 7/30 and 30/60. One row per ticker per day appended to `trade_journal/vol_surface.jsonl` (`TRADING_AGENT_VOL_SURFACE`); a ticker already recorded that day is skipped. Chains come from the data server's `/chain` (skill 47) through `mcp.tools.market._data_server_get` — **never a Schwab session of its own** (one token holder, skill 16 §4; AST-tested). `trading-agent-vol-surface.timer` runs it at 15:50 ET on weekdays (before the close, so quotes are live); on a non-trading day it exits without recording. ~0.3 s between calls; 18 tickers take about 2½ minutes.
 
 ## 4. Edge Cases / Guardrails
 
@@ -103,7 +103,8 @@ For every ticker in `TICKERS`, at expiries near 7 / 30 / 60 days (`candidate_exp
 - **One era.** 2010–2026 is mostly a rising market; drift appears as put-side edge. The "horizon only" variant shows how much of the gain is drift alone.
 - **Skew.** ^SKEW is S&P 500 only; per-ticker skew has no free history, hence the phase-2 collector. Add `put_skew` / `rr25` buckets as a dimension only after ≥ 3–6 months of rows, tested on that period alone.
 - **Holiday-week expiries.** The neighbouring weeks tried after the first pick are each week's own last trading day (`calendar_utils.last_trading_day_of_week`), not the first pick ± 7 days. On 2026-10-16 the 60-day pick was Thu Dec 24 (Christmas Friday); ± 7 days gave Thu Dec 17 instead of the Dec 18 monthly, so the 9 names without weeklies that far out (GDX, META, AMZN, XLK, XLV, XLY, XLI, SMH, XLU) recorded no 60-day IV that day.
-- **After-close quotes.** The 16:05 run reads chains a few minutes after the close; less liquid sector ETFs then show wide ATM quotes (`atm_spread_pct` 0.77–1.02 for XLV, XLY, XLI on 2026-10-16) and their 25-delta IVs are noisier. Filter on `atm_spread_pct` before using a row.
+- **After-close quotes.** Until 2026-10-20 the timer ran at 16:05, after the close; the less liquid sector ETFs then quote wide (`atm_spread_pct` 0.77–1.02 for XLV, XLY, XLI on 10-16; 0.85–1.60 for XLE, XLV, XLY, XLI, XLU on 10-20, when XLU's 30-day ATM IV read 0.50 vs 0.16 the session before). Since 2026-10-20 it runs at 15:50 ET. Rows before that: filter on `atm_spread_pct` (≤ 0.25) before using them.
+- **Token shared with the agent.** The collector reads through the data server, whose Schwab session shares `~/.schwab_tokens.json` with the agent. On 2026-10-20 the data server still held the refresh token from before the previous evening's login and every chain came back empty (0 of 18 recorded at 16:05; rerun at 20:24 after a data-server restart). `SchwabOAuth` now re-reads the cache when another process has written it (skill 16 §4).
 - **Vol surface quality.** Contracts without IV or delta are ignored; an expiry missing either side is skipped and the next candidate week is tried; `atm_spread_pct` flags wide quotes (XLU's ATM puts were 0.79 / 1.20 on 2026-10-15). Single-stock rows spanning earnings show it as a low 7/30 ratio (AMZN 0.77 on 2026-10-15, report 2026-10-29).
 
 ## 5. Cross-References
@@ -117,4 +118,4 @@ For every ticker in `TICKERS`, at expiries near 7 / 30 / 60 days (`candidate_exp
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-10-21.*

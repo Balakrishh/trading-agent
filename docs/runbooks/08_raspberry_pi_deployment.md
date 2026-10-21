@@ -126,7 +126,7 @@ myenv/bin/python -c "from dotenv import load_dotenv; load_dotenv('.env'); from t
 myenv/bin/python -m trading_agent.trading_halt status       # kill switch state carried over
 systemctl --user enable --now trading-agent.service trading-agent-reviewer.timer
 systemctl --user enable --now trading-agent-liveness.timer       # pages Telegram if cycles stop in session (skill 64)
-systemctl --user enable --now trading-agent-vol-surface.timer    # 16:05 ET daily skew / term snapshot via the data server (skill 66)
+systemctl --user enable --now trading-agent-vol-surface.timer    # 15:50 ET daily skew / term snapshot via the data server (skill 66)
 systemctl --user enable --now trading-agent-data-server.service # Schwab quotes for the MCP tools
 curl -s http://127.0.0.1:8765/health                         # → {"status":"ok"…}
 systemctl --user enable --now trading-agent-dashboard.service   # optional: http://myrasberrypi.local:8501

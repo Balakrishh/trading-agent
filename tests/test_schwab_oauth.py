@@ -287,3 +287,53 @@ def test_refresh_days_left_none_without_tokens(tmp_path):
     o = SchwabOAuth("id", "secret", "https://127.0.0.1:8182",
                     token_path=tmp_path / "missing.json")
     assert o.refresh_days_left() is None
+
+
+# ── Shared cache across processes (2026-10-20) ───────────────────────
+
+
+def _tokenset(access: str, refresh: str, access_in: float = 1800) -> TokenSet:
+    return TokenSet(access_token=access, refresh_token=refresh,
+                    expires_at=time.time() + access_in,
+                    refresh_expires_at=time.time() + 86400)
+
+
+def test_adopts_tokens_another_process_wrote(tmp_path):
+    """The data server loaded its tokens before a `login` in another
+    process; it must use the new refresh token, not the revoked one."""
+    path = tmp_path / "tokens.json"
+    server = SchwabOAuth("id", "secret", "https://127.0.0.1:8182", token_path=path)
+    server._save(_tokenset("OLD_ACCESS", "OLD_REFRESH", access_in=30))
+    login = SchwabOAuth("id", "secret", "https://127.0.0.1:8182", token_path=path)
+    time.sleep(0.01)
+    login._save(_tokenset("NEW_ACCESS", "NEW_REFRESH", access_in=30))
+
+    with patch("trading_agent.schwab_oauth.requests.post") as post:
+        post.return_value = MagicMock(status_code=200, json=lambda: {
+            "access_token": "REFRESHED", "refresh_token": "NEW_REFRESH",
+            "token_type": "Bearer", "expires_in": 1800})
+        assert server.get_access_token() == "REFRESHED"
+    assert post.call_args.kwargs["data"]["refresh_token"] == "NEW_REFRESH"
+
+
+def test_fresh_access_token_from_another_process_skips_refresh(tmp_path):
+    path = tmp_path / "tokens.json"
+    a = SchwabOAuth("id", "secret", "https://127.0.0.1:8182", token_path=path)
+    a._save(_tokenset("A_EXPIRING", "R", access_in=30))
+    b = SchwabOAuth("id", "secret", "https://127.0.0.1:8182", token_path=path)
+    time.sleep(0.01)
+    b._save(_tokenset("B_FRESH", "R"))
+    with patch("trading_agent.schwab_oauth.requests.post") as post:
+        assert a.get_access_token() == "B_FRESH"
+    post.assert_not_called()
+
+
+def test_unchanged_file_is_not_reread(tmp_path):
+    o = SchwabOAuth("id", "secret", "https://127.0.0.1:8182",
+                    token_path=tmp_path / "tokens.json")
+    o._save(_tokenset("ACCESS", "R"))
+    o.get_access_token()                     # first use reads the file
+    with patch.object(o, "_load", wraps=o._load) as load:
+        o.get_access_token()
+        o.get_access_token()
+    load.assert_not_called()
