@@ -4,6 +4,7 @@ All tests use synthetic data — no real API calls.
 """
 
 import os
+from pathlib import Path
 import pytest
 import pandas as pd
 import numpy as np
@@ -205,3 +206,46 @@ def _isolate_entry_and_trail_state(tmp_path, monkeypatch):
     monkeypatch.setattr(profit_trail, "STATE_PATH", tmp_path / "profit_trail.json")
     from trading_agent import trading_halt
     monkeypatch.setattr(trading_halt, "STATE_PATH", tmp_path / "trading_halt.json")
+
+
+_REPO_ENV = (Path(__file__).resolve().parent.parent / ".env").resolve()
+
+
+@pytest.fixture(autouse=True)
+def _never_read_operator_env(monkeypatch):
+    """Tests must never load the operator's ``.env`` or keep its values.
+
+    2026-10-20: running the suite in the live checkout on the Pi let
+    ``load_config()`` → ``load_dotenv()`` pull the real ``.env`` into
+    ``os.environ``. A later test that ran an agent cycle then sent real
+    Telegram "VIX regime change — Unknown → Normal" alerts on every run,
+    and three config / retry tests failed on the live Alpaca keys.
+
+    * ``load_dotenv`` with no path, or with a path resolving to the
+      repo's ``.env``, is a no-op (explicit temp files still load).
+    * ``TELEGRAM_*`` variables are removed for every test.
+    * ``os.environ`` is restored after every test, so nothing leaks.
+    """
+    import dotenv
+    real = dotenv.load_dotenv
+
+    def guarded(dotenv_path=None, *args, **kwargs):
+        if dotenv_path is None or Path(str(dotenv_path)).resolve() == _REPO_ENV:
+            return False
+        return real(dotenv_path, *args, **kwargs)
+
+    import importlib
+    for name in ("dotenv", "trading_agent.config", "trading_agent.mcp.__main__",
+                 "trading_agent.data_server.__main__"):
+        try:
+            mod = importlib.import_module(name)
+        except Exception:  # noqa: BLE001 — optional entry points
+            continue
+        if hasattr(mod, "load_dotenv"):
+            monkeypatch.setattr(mod, "load_dotenv", guarded)
+    for key in [k for k in os.environ if k.startswith("TELEGRAM_")]:
+        monkeypatch.delenv(key)
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
