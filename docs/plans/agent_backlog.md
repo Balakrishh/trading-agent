@@ -19,6 +19,7 @@ All open items below, grouped by theme and ordered. Older sections keep the hist
 - [x] **A4 MCP `get_quote` for option symbols** via `/quotes` (skill 48). *Done 2026-10-13.*
 - [x] **A5 Liveness watchdog** — Telegram page when no cycle for 10 min in session (from 09:40 ET) or the data server is down (skill 64). *Done 2026-10-13; enable `trading-agent-liveness.timer` on deploy.*
 - [x] **A6 Daily review on Claude, not Ollama** (§9 "Reliable reviewer"). *Done 2026-10-14 — logged-in `claude -p`, one session across days, rotated after 20 reviews / 60k tokens (skill 56 §3.5.1).*
+- [ ] **A8 Watchdog pages on Schwab auth failures** (skill 64) — on 2026-10-20 the data server's refresh token was invalid from 10:15 to 20:22 (stale in-memory token after the previous night's login; fixed by reloading the cache on change) while `/health` stayed 200, so no page went out. Page when the data server or agent logs `refresh PERMANENTLY FAILED`, or when `/ready` reports no Schwab session, in session hours. **Scheduled: build Fri 2026-10-23.**
 - [x] **A7 Telegram buttons** — *Dropped 2026-10-14: the operator runs the `claude` CLI from the phone (Termius) instead.*
 
 ### B. Find real edge
