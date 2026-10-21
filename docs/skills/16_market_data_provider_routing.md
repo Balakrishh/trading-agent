@@ -88,7 +88,7 @@ The `_fetch_account_cached` callsite (`live_monitor.py:1128`) **intentionally st
 Schwab uses OAuth 2.0 authorization-code flow.  Access tokens last **30 min** (refreshed silently); refresh tokens last **7 days, absolute** (re-auth weekly).
 
 `SchwabOAuth.get_access_token()` is called on every API request.  It:
-1. Loads tokens from `~/.schwab_tokens.json` (override via `SCHWAB_TOKEN_PATH`).
+1. Loads tokens from `~/.schwab_tokens.json` (override via `SCHWAB_TOKEN_PATH`), and re-reads the file whenever another process has written it since (`_reload_if_changed`, by file mtime).
 2. If access token has < `REFRESH_LEEWAY_SEC` (120s) remaining → POST to `https://api.schwabapi.com/v1/oauth/token` with `grant_type=refresh_token`, persists the rotated refresh token atomically (temp+rename per CLAUDE.md soft rule).
 3. If the refresh token has expired → raises `RuntimeError` with the exact CLI command to re-auth.
 
@@ -159,6 +159,7 @@ def from_schwab_symbol(schwab: str) -> str:
 - **No tokens on disk** — `SchwabOAuth.get_access_token()` raises `RuntimeError("No Schwab tokens on disk yet…")`.  `SchwabMarketDataProvider._get` catches this, logs a one-time WARNING with the exact CLI fix (`python -m trading_agent.schwab_oauth login`), then drops to DEBUG so the log isn't spammed every cycle.  All Schwab-routed surfaces will see no data until login completes.
 - **Refresh token expired (>7 days)** — Same `RuntimeError` path.  Operator must re-run the login flow.
 - **The 7 days run from the browser login, not the last refresh** (2026-10-13). `_ingest_token_response` sets `refresh_expires_at = now + REFRESH_LIFETIME_SEC` only on the authorization-code exchange; `_refresh` carries the stored value forward. Before the fix every 30-min refresh restarted the clock, so `status` always read ~7 days and the token died silently (Oct 9 file said 3.3 days left; Schwab had already revoked it). A cache written before the fix carries a too-late expiry until the next login.
+- **One cache, several processes** (2026-10-20). The agent and the data server each hold a `SchwabOAuth` on the same file. Before the fix each kept its tokens in memory after the first load: the data server was restarted at 21:57 on 10-19, the operator logged in at 22:01, and from 10:15 on 10-20 every data-server refresh failed with "Refresh token is invalid" (the agent, which happened to re-load, was fine). Now `get_access_token` adopts the file when its mtime differs from the one recorded at the last load / save, so a login, or the other process's refresh, is picked up on the next call with no restart. An unchanged file is not re-read.
 - **Weekly login reminder.** After the close, `TradingAgent._maybe_warn_schwab_reauth` reads the cache (`refresh_days_left()`, no Schwab call) and, when ≤ `SCHWAB_REAUTH_WARN_DAYS` (2) remain or the token has expired, sends `notify_schwab_reauth_due` on the error channel — once per UTC day (`schwab_reauth_due` dedup, skill 32). No Schwab config or no token file → silent.
 - **Refresh-time transient failure (5xx, 429, network blip)** — `_refresh` retries up to 3 times with exponential backoff (2s/4s, capped at 8s).  Pre-2026-05-06 a single 5xx halted the agent until manual restart; the retry budget is tuned to recover from typical gateway hiccups without racing the cycle's 270s hard guard.  See §3 "Refresh retry policy" above.
 - **Refresh-time permanent failure (4xx ≠ 429)** — Refresh-token revoked, client credentials wrong, scope misconfigured.  `_refresh` short-circuits on the first 4xx (no retries) and raises `RuntimeError("...permanently failed...refresh-token likely revoked; re-auth required.")`.  Operator runs the login CLI and the next cycle resumes.
@@ -183,4 +184,4 @@ def from_schwab_symbol(schwab: str) -> str:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-21.*

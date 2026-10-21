@@ -1,10 +1,11 @@
-# 16:05 ET on weekdays (after the close, before the 16:15 reviewer),
+# 15:50 ET on weekdays (live quotes before the close; after the close the
+# less liquid ETFs' option quotes go 80–160 % wide and their IVs are noise),
 # whatever the Pi's own timezone is. Holidays exit without recording.
 [Unit]
-Description=Record the daily volatility surface at 16:05 ET on weekdays
+Description=Record the daily volatility surface at 15:50 ET on weekdays
 
 [Timer]
-OnCalendar=Mon..Fri 16:05 America/New_York
+OnCalendar=Mon..Fri 15:50 America/New_York
 Persistent=true
 
 [Install]

@@ -164,6 +164,9 @@ class SchwabOAuth:
         self.redirect_uri = redirect_uri
         self.token_path = Path(token_path)
         self._tokens: Optional[TokenSet] = None
+        # mtime of the cache file when ``_tokens`` was read or written;
+        # a newer file means another process logged in or refreshed.
+        self._tokens_mtime_ns: int = 0
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -197,16 +200,36 @@ class SchwabOAuth:
         tmp = self.token_path.with_suffix(self.token_path.suffix + ".tmp")
         tmp.write_text(json.dumps(ts.to_dict(), indent=2))
         tmp.replace(self.token_path)
+        self._tokens_mtime_ns = self._file_mtime_ns()
         # Make sure no one else can read your refresh token on a shared host.
         try:
             os.chmod(self.token_path, 0o600)
         except OSError:  # noqa: PERF203 — Windows / FS without permission bits
             pass
 
+    def _file_mtime_ns(self) -> int:
+        try:
+            return self.token_path.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def _reload_if_changed(self) -> None:
+        """Adopt the cache file when another process wrote it after we
+        last read or wrote it. The agent and the data server share one
+        file; on 2026-10-19 a `login` at 22:01 replaced the refresh token
+        while the data server kept the pre-login one in memory, and every
+        refresh it tried on 10-20 failed with "Refresh token is invalid"."""
+        if self._tokens is not None and self._file_mtime_ns() != self._tokens_mtime_ns:
+            fresh = self._load()
+            if fresh is not None:
+                logger.info("Schwab token cache changed on disk — reloading it.")
+                self._tokens = fresh
+
     def _load(self) -> Optional[TokenSet]:
         if not self.token_path.exists():
             return None
         try:
+            self._tokens_mtime_ns = self._file_mtime_ns()
             data = json.loads(self.token_path.read_text())
             return TokenSet.from_dict(data)
         except (json.JSONDecodeError, OSError) as exc:
@@ -483,6 +506,7 @@ class SchwabOAuth:
             * The refresh token has expired (must re-auth manually).
             * Schwab returned a non-200 on the refresh exchange.
         """
+        self._reload_if_changed()
         if self._tokens is None:
             self._tokens = self._load()
         if self._tokens is None:

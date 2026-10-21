@@ -213,7 +213,7 @@ Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's lau
 | `trading-agent.service` | The supervisor (skill 57): one agent cycle ≈ every 75 s in NYSE hours, sleeps outside them |
 | `trading-agent-data-server.service` | Schwab quote server on `127.0.0.1:8765` for the MCP tools |
 | `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
-| `trading-agent-vol-surface.timer` | 16:05 ET on weekdays: per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
+| `trading-agent-vol-surface.timer` | 15:50 ET on weekdays (before the close): per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
 | `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET or `/health` fails; one page per outage plus "recovered" (skill 64) |
 | `trading-agent-dashboard.service` | Streamlit dashboard (optional, off by default) |
 
