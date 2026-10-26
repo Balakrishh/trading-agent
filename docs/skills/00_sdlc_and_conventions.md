@@ -262,6 +262,9 @@ Read this list as "if you're about to touch X, you must understand Y first."
 | Pausing new entries (kill switch, drawdown governor) | [62 Kill switch & drawdown governor](62_kill_switch_drawdown_governor.md) |
 | Closing a position by hand (operator close CLI) | [63 Manual close](63_manual_close.md) |
 | Paging when the agent stops cycling (watchdog timer) | [64 Liveness watchdog](64_liveness_watchdog.md) |
+| Earnings-aware expiries, trend entry filters | [65 Earnings expiry & trend filters](65_earnings_expiry_and_trend_filters.md) |
+| Calibrated odds, the daily vol-surface snapshot | [66 Calibrated probability model](66_calibrated_probability_model.md) |
+| Revenue growth / analyst revisions, the quality-at-lows long-option shadow scan | [67 Quality-at-lows sleeve](67_quality_at_lows_sleeve.md) |
 | Trailing profit-taking | [30 Profit-target management](30_profit_target_management.md) §3.1b |
 
 ## 8. Edge Cases / Guardrails
@@ -307,4 +310,4 @@ External documents:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-26.*

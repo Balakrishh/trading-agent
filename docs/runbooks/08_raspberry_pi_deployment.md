@@ -127,6 +127,7 @@ myenv/bin/python -m trading_agent.trading_halt status       # kill switch state 
 systemctl --user enable --now trading-agent.service trading-agent-reviewer.timer
 systemctl --user enable --now trading-agent-liveness.timer       # pages Telegram if cycles stop in session (skill 64)
 systemctl --user enable --now trading-agent-vol-surface.timer    # 15:50 ET daily skew / term snapshot via the data server (skill 66)
+systemctl --user enable --now trading-agent-quality-lows.timer   # 15:40 ET quality-at-lows shadow scan, no orders (skill 67)
 systemctl --user enable --now trading-agent-data-server.service # Schwab quotes for the MCP tools
 curl -s http://127.0.0.1:8765/health                         # → {"status":"ok"…}
 systemctl --user enable --now trading-agent-dashboard.service   # optional: http://myrasberrypi.local:8501
@@ -172,7 +173,7 @@ sudo tailscale funnel --https=443 off           # turn it off
 
 | Task | Command |
 |---|---|
-| After a reboot: everything back? | `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer`; `curl -s http://127.0.0.1:8765/health`; `tailscale funnel status` |
+| After a reboot: everything back? | `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer trading-agent-quality-lows.timer`; `curl -s http://127.0.0.1:8765/health`; `tailscale funnel status` |
 | Status / restart / stop the agent | `systemctl --user status|restart|stop trading-agent` (restart only outside market hours) |
 | Pause / resume new entries | `myenv/bin/python -m trading_agent.trading_halt pause --reason "…"` / `resume` |
 | Deploy new code | `git pull && systemctl --user restart trading-agent` (after the close) |
@@ -203,4 +204,4 @@ sudo tailscale funnel --https=443 off           # turn it off
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-26.*

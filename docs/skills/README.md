@@ -86,6 +86,7 @@ Skills 40–65: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 64 | [Liveness Watchdog](64_liveness_watchdog.md) | ops | `trading_agent/liveness.py`, `deploy/systemd/trading-agent-liveness.*` |
 | 65 | [Earnings-Aware Expiries and Trend Entry Filters](65_earnings_expiry_and_trend_filters.md) | risk / strategy | `trading_agent/entry_filters.py`, `trading_agent/earnings_calendar.py`, `trading_agent/strategy.py` |
 | 66 | [Calibrated Probability Model and Daily Vol Surface](66_calibrated_probability_model.md) | strategy / data_quality | `trading_agent/prob_model.py`, `trading_agent/vol_surface.py`, `scripts/research/calibrate_prob_model.py`, `deploy/systemd/trading-agent-vol-surface.*` |
+| 67 | [Quality-at-Lows Sleeve](67_quality_at_lows_sleeve.md) | strategy / data_quality | `trading_agent/quality_lows.py`, `trading_agent/analyst_estimates.py`, `trading_agent/market_data_schwab.py`, `scripts/research/quality_lows_backtest.py`, `deploy/systemd/trading-agent-quality-lows.*` |
 
 ## Phase 2 (planned, not yet written)
 
@@ -141,4 +142,4 @@ For **running it** (Raspberry Pi since 2026-10-07): 57 (supervisor, systemd unit
 
 ---
 
-*Last updated: 2026-10-15 against repo HEAD.*
+*Last updated: 2026-10-26 against repo HEAD.*
