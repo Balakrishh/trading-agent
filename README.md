@@ -214,10 +214,11 @@ Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's lau
 | `trading-agent-data-server.service` | Schwab quote server on `127.0.0.1:8765` for the MCP tools |
 | `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
 | `trading-agent-vol-surface.timer` | 15:50 ET on weekdays (before the close): per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
+| `trading-agent-quality-lows.timer` | 15:40 ET on weekdays: quality-at-lows shadow scan — 52-week-low stages, revenue growth, analyst revisions, priced LEAPS / call-spread / CSP choices → `trade_journal/quality_lows.jsonl`; places no orders (skill 67) |
 | `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET or `/health` fails; one page per outage plus "recovered" (skill 64) |
 | `trading-agent-dashboard.service` | Streamlit dashboard (optional, off by default) |
 
-After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer`.
+After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer trading-agent-quality-lows.timer`.
 
 **Alerts (skill 32).** Telegram: trade opens / closes and the end-of-day summary on the main bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), errors and liveness pages on the error bot (`TELEGRAM_ERROR_*`). Messages are HTML-escaped; a message Telegram still rejects is resent once as plain text.
 
@@ -335,6 +336,25 @@ Per-ticker skew has no free history, so `trading-agent-vol-surface.timer` (`trad
 python scripts/research/calibrate_prob_model.py             # full walk-forward study, rewrites the report (~4 min)
 python scripts/research/calibrate_prob_model.py --quick     # 5 tickers, one variant (smoke test)
 python -m trading_agent.vol_surface --dry-run --tickers SPY # print one snapshot, append nothing
+```
+
+### Quality-at-lows sleeve (skill 67, shadow)
+
+Finds strong companies near their 52-week low for a sentiment reason and records which long-option trade it *would* make — no orders. Once a day at 15:40 ET (`trading-agent-quality-lows.timer`), for the watchlist plus `QUALITY_LOWS_EXTRA_TICKERS`:
+
+- **Stage:** `not_near_low` → `watch` (base in the bottom 10 % of the 52-week range) → `basing` (≥ 10 sessions without a new low, RSI > 40) → `turn` (close above SMA-20 with a higher low) → `confirmed` (above SMA-50); `excluded` when quality fails or the drop is fundamental.
+- **Quality:** the Wheel screen with P/E ≤ 120 and beta ≤ 3 (growth names at lows have both high).
+- **Growth intact:** Schwab revenue growth (`rev_change_ttm_pct`, new 2026-10-26) and net-margin direction, plus Yahoo analyst estimates (`analyst_estimates.py`: consensus EPS change over 30 / 90 days, up / down revisions, forward revenue growth, price targets, recommendation trend — no API key).
+- **Drop cause:** `fundamental` (growth not intact), `sector` (the sector ETF fell ≥ 60 % as far), `sentiment`, or `unclear`.
+- **Structure** at a turn, priced from the data server's chains: LEAPS call (Δ ≈ 0.75, 9–18 months) by default; call debit spread up to the 52-week high when implied vol > 1.3 × realized; a budget-fitting spread; a cash-secured put at the base; nothing within 14 days of earnings. Sized to 2 % of equity in premium (CSP: 15 % in cash); `affordable` names the first that fits.
+
+Backtest of the price signal alone (6 years, 38 tickers, stock returns): median trade +1.7 % vs SPY over the same dates, win 51 % — no edge by itself; the quality / growth / revision filters are what the shadow rows test. Details and the quality-only subset: skill 67 §3.6.
+
+```bash
+python -m trading_agent.quality_lows --dry-run              # full scan, print, append nothing
+python -m trading_agent.quality_lows --report               # latest day's watch / basing / turn names
+python -m trading_agent.analyst_estimates NFLX ORCL         # analyst summary for a few tickers
+python scripts/research/quality_lows_backtest.py --years 6  # price-signal backtest (~5 min)
 ```
 
 ### Daily journal review (skill 56)
@@ -554,6 +574,9 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 | `MARKET_DATA_PROVIDER_BACKTEST` | _(inherits)_ | Reserved — backtester currently uses its own historical port |
 | `PORTFOLIO_ALERTS_ENABLED` | `true` | Hourly holdings + watchlist Telegram digest (skill 42). **`false` on the Pi since 2026-10-16** (paused at the operator's request) |
 | `TRADING_AGENT_VOL_SURFACE` | `trade_journal/vol_surface.jsonl` | Where the daily skew / term-structure snapshot is appended (skill 66) |
+| `TRADING_AGENT_QUALITY_LOWS` | `trade_journal/quality_lows.jsonl` | Where the daily quality-at-lows shadow rows are appended (skill 67) |
+| `TRADING_AGENT_ANALYST_CACHE` | `trade_journal/analyst_estimates.json` | 20-hour cache of Yahoo analyst estimates / revisions (skill 67) |
+| `QUALITY_LOWS_EXTRA_TICKERS` | `JNJ,LLY,PG,KO,WMT,COST,XOM,CAT,HD,UNH` | Non-watchlist names the quality-at-lows scan also screens (comma list; empty = watchlist only) |
 | `SCHWAB_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | _(empty)_ | Required when any surface is set to `schwab`. See setup walkthrough. |
 | `SCHWAB_TOKEN_PATH` | `~/.schwab_tokens.json` | Where the OAuth helper persists access + refresh tokens |
 | `LOG_MAX_BYTES` | `10485760` | Per-file log rotation threshold (10 MB) |
@@ -693,6 +716,8 @@ trading-agent/
 │   ├── debit_ladder.py               # Mid-first debit entry ladder, shadow (backlog C1, skill 59)
 │   ├── prob_model.py                 # Calibrated probability model, walk-forward (skill 66)
 │   ├── vol_surface.py                # Daily per-ticker skew / term-structure snapshot (skill 66)
+│   ├── quality_lows.py               # Quality-at-lows sleeve, long-option shadow scan (skill 67)
+│   ├── analyst_estimates.py          # Analyst estimates / revisions from Yahoo, cached (skill 67)
 │   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk caps (skill 37)
 │   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
 │   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)

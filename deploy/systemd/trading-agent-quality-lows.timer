@@ -1,0 +1,13 @@
+# 15:40 ET on weekdays: live option quotes before the close (after it the
+# chains go wide), ten minutes ahead of the 15:50 vol-surface snapshot so
+# the two do not share the data server's Schwab rate limit. Holidays exit
+# without recording.
+[Unit]
+Description=Run the quality-at-lows shadow scan at 15:40 ET on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri 15:40 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

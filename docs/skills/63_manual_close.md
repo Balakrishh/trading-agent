@@ -81,7 +81,7 @@ Usage:
 ```bash
 python -m trading_agent.manual_close --ticker IWM                    # preview: legs, quotes, prices, estimated P&L
 python -m trading_agent.manual_close --ticker IWM --submit \
-       [--strategy "Put Debit Spread"] [--reason "taking profit early"]
+       [--strategy "Put Debit Spread"] [--expiration 2026-11-06] [--reason "taking profit early"]
 ```
 
 Exit codes: `0` closed / preview shown, `1` no such position, `2` refused (or broker fetch failed), `3` not filled or unresolved.
@@ -89,7 +89,7 @@ Exit codes: `0` closed / preview shown, `1` no such position, `2` refused (or br
 ## 4. Edge Cases / Guardrails
 
 - **Preview by default.** Without `--submit` nothing is sent and nothing is journalled.
-- **Two positions on one ticker.** `select_spread` refuses and lists them; `--strategy` (case-insensitive) picks one. Never picks silently.
+- **Two positions on one ticker.** `select_spread` refuses and lists them; `--strategy` (case-insensitive) and/or `--expiration YYYY-MM-DD` pick one. Never picks silently. `--expiration` added 2026-10-26: on 2026-10-23 two GLD put debits (Nov 6, Nov 20) shared ticker and strategy and the close needed a one-off wrapper.
 - **Single-leg positions (wheel CSP / CC).** Refused — the atomic close needs two or more legs; close in the Alpaca UI.
 - **Unequal leg quantities (partial fill).** Refused — the mleg order needs one ratio; close in the Alpaca UI.
 - **DRY_RUN on / market closed.** Refused before any order.
@@ -110,4 +110,4 @@ Exit codes: `0` closed / preview shown, `1` no such position, `2` refused (or br
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-10-26.*

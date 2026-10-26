@@ -820,6 +820,16 @@ class SchwabMarketDataProvider(MarketDataProvider):
               "net_profit_margin_ttm":  0.25,
               "operating_margin_ttm":   0.30,
               "short_int_to_float":     0.008,
+              "rev_change_ttm_pct":     14.65,   # revenue growth, last 12 months, %
+              "rev_change_year_pct":    15.85,   # revenue growth, year on year, %
+              "gross_margin_mrq":       52.78,   # latest quarter (vs *_ttm → direction)
+              "net_profit_margin_mrq":  28.46,
+              "return_on_investment":   18.2,
+              "current_ratio":          1.1,
+              "interest_coverage":      25.0,
+              "lt_debt_to_equity":      0.6,
+              "total_debt_to_capital":  37.0,
+              "short_int_days_to_cover": 1.4,
               "as_of":             ISO utc timestamp of the fetch,
             }
 
@@ -921,6 +931,23 @@ class SchwabMarketDataProvider(MarketDataProvider):
             # interest, so 0.0 means "not provided" → None.
             "short_int_to_float":   _safe_float(_pick(
                 "shortIntToFloat", "shortIntToFloatRatio")) or None,
+            # Growth and quality fields (added 2026-10-26, skill 67).
+            # Verified on the 2026-10-25 raw payload (NFLX, ORCL, AVGO,
+            # BAC): revChangeTTM / revChangeYear are populated percents
+            # (AVGO 48.69 / 23.87); revChangeIn and epsChangeYear read
+            # 0.0 on every ticker, so an exact 0.0 means "not provided"
+            # → None, the short-interest convention above. MRQ margins
+            # next to the TTM ones give the margin direction.
+            "rev_change_ttm_pct":   _safe_float(_pick("revChangeTTM")) or None,
+            "rev_change_year_pct":  _safe_float(_pick("revChangeYear")) or None,
+            "gross_margin_mrq":     _safe_float(_pick("grossMarginMRQ")),
+            "net_profit_margin_mrq": _safe_float(_pick("netProfitMarginMRQ")),
+            "return_on_investment": _safe_float(_pick("returnOnInvestment")),
+            "current_ratio":        _safe_float(_pick("currentRatio")),
+            "interest_coverage":    _safe_float(_pick("interestCoverage")),
+            "lt_debt_to_equity":    _safe_float(_pick("ltDebtToEquity")),
+            "total_debt_to_capital": _safe_float(_pick("totalDebtToCapital")),
+            "short_int_days_to_cover": _safe_float(_pick("shortIntDayToCover")) or None,
             "as_of":              datetime.now(timezone.utc).isoformat(),
             # Optional raw echo — flip
             # SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW=true to see every

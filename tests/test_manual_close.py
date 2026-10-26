@@ -48,6 +48,16 @@ def test_select_never_picks_between_two_positions():
     assert err is None and s.strategy_name == "Calendar Spread"
 
 
+def test_select_by_expiration_when_strategy_is_shared():
+    two = [spread(), spread(expiration="2026-11-20")]
+    s, err = mc.select_spread(two, "IWM", "Put Debit Spread")
+    assert s is None and "--expiration" in err
+    s, err = mc.select_spread(two, "IWM", None, "2026-11-06")
+    assert err is None and s.expiration == "2026-11-06"
+    s, err = mc.select_spread(two, "IWM", None, "2026-12-18")
+    assert s is None and "exp 2026-12-18" in err and "exp 2026-11-20" in err
+
+
 # ── refusal ────────────────────────────────────────────────────────────
 
 def test_refusal_allows_a_normal_spread_in_session():

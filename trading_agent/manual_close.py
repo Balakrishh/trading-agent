@@ -8,7 +8,7 @@ with ``exit_signal="manual"``.
 
     python -m trading_agent.manual_close --ticker IWM              # preview — no order
     python -m trading_agent.manual_close --ticker IWM --submit     # close it
-        [--strategy "Put Debit Spread"] [--reason "taking profit early"]
+        [--strategy "Put Debit Spread"] [--expiration 2026-11-06] [--reason "taking profit early"]
 
 Preview is the default. Quotes come from Alpaca, never Schwab: the live
 agent holds the Schwab token, whose refresh token rotates on every use.
@@ -34,19 +34,26 @@ EXIT_NOT_FILLED = 3
 DEFAULT_REASON = "operator manual close"
 
 
-def select_spread(spreads: List[SpreadPosition], ticker: str,
-                  strategy: Optional[str]) -> Tuple[Optional[SpreadPosition], Optional[str]]:
-    """The one open spread on ``ticker`` (and ``strategy``, when given),
-    or an error message. Never picks silently between two positions."""
+def select_spread(spreads: List[SpreadPosition], ticker: str, strategy: Optional[str],
+                  expiration: Optional[str] = None
+                  ) -> Tuple[Optional[SpreadPosition], Optional[str]]:
+    """The one open spread on ``ticker`` (and ``strategy`` / ``expiration``,
+    when given), or an error message. Never picks silently between two
+    positions. ``expiration`` (YYYY-MM-DD) tells apart two spreads of the
+    same strategy — the two GLD put debits of 2026-10-23."""
     ticker = ticker.upper()
     found = [s for s in spreads if s.underlying.upper() == ticker
-             and (strategy is None or s.strategy_name.lower() == strategy.lower())]
+             and (strategy is None or s.strategy_name.lower() == strategy.lower())
+             and (expiration is None or str(s.expiration) == expiration)]
     if not found:
-        held = ", ".join(sorted(f"{s.underlying} {s.strategy_name}" for s in spreads)) or "none"
-        return None, f"No open {ticker}{' ' + strategy if strategy else ''} position. Open: {held}."
+        held = ", ".join(sorted(f"{s.underlying} {s.strategy_name} exp {s.expiration}"
+                                for s in spreads)) or "none"
+        what = "".join(f" {x}" for x in (strategy, expiration and f"exp {expiration}") if x)
+        return None, f"No open {ticker}{what} position. Open: {held}."
     if len(found) > 1:
         names = "; ".join(f"{s.strategy_name} exp {s.expiration}" for s in found)
-        return None, f"{len(found)} open {ticker} positions ({names}) — pass --strategy."
+        return None, (f"{len(found)} open {ticker} positions ({names}) — "
+                      "pass --strategy and/or --expiration.")
     return found[0], None
 
 
@@ -176,6 +183,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--ticker", required=True)
     ap.add_argument("--strategy", default=None, help="needed when the ticker has two positions")
+    ap.add_argument("--expiration", default=None,
+                    help="YYYY-MM-DD; needed when two positions share ticker and strategy")
     ap.add_argument("--reason", default=DEFAULT_REASON)
     ap.add_argument("--submit", action="store_true", help="send the close order (default: preview)")
     a = ap.parse_args(argv)
@@ -191,7 +200,7 @@ def main(argv=None) -> int:
         print("Broker position fetch failed — nothing done.")
         return EXIT_REFUSED
     spreads = monitor.group_into_spreads(positions, load_trade_plans(cfg.logging.trade_plan_dir))
-    spread, err = select_spread(spreads, a.ticker, a.strategy)
+    spread, err = select_spread(spreads, a.ticker, a.strategy, a.expiration)
     if spread is None:
         print(err)
         return EXIT_NOT_FOUND

@@ -35,7 +35,7 @@ GET  /chain/{underlying}?expiration=&option_type=
 POST /quotes           body {"symbols": [...]}   — batch option/stock quote lookup
 POST /snapshots        body {"tickers": [...]}   — batch stock snapshots with indicators
 GET  /market-status                              — is_within_market_hours() + next open/close
-GET  /fundamentals/{ticker}                      — P/E, EPS, market cap, dividend, beta, 52w range, ROE/ROA
+GET  /fundamentals/{ticker}                      — P/E, EPS, market cap, dividend, beta, 52w range, ROE/ROA, revenue growth, MRQ margins, debt ratios
 ```
 
 **Explicitly NOT exposed** — CI-verified via `test_readonly_no_forbidden_imports`:
@@ -162,6 +162,8 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 - **Refuses to start without a strong key (2026-10-08).** The server can be published to the internet with Tailscale Funnel (runbook 08 §8b), where the bearer key is the only protection. `key_policy_error()` in `__main__.py` stops startup (exit 4, before the Schwab provider is built) when `SCHWAB_API_SERVER_KEY` is missing, blank or shorter than 24 characters, unless `SCHWAB_API_ALLOW_NO_KEY=true` is set for a tailnet-only server. The error message never echoes the key. Under systemd (`Restart=always`) a refused start retries every 30 s and logs the reason to `/tmp/trading-agent.data-server.err.log` until the key is fixed.
 
+- **Growth fields in `/fundamentals` (2026-10-26, skill 67).** `rev_change_ttm_pct`, `rev_change_year_pct`, `gross_margin_mrq`, `net_profit_margin_mrq`, `return_on_investment`, `current_ratio`, `interest_coverage`, `lt_debt_to_equity`, `total_debt_to_capital`, `short_int_days_to_cover` — mapped from the raw Schwab block checked with `SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW=true` on 2026-10-25. Revenue growth and days-to-cover read exact 0.0 → None (Schwab's "not provided"; `revChangeIn` and `epsChangeYear` were 0.0 on every ticker and are not mapped). New fields reach clients only after the data server restarts. No analyst forecasts here — those come from `analyst_estimates.py` (Yahoo).
+
 ## 5. Cross-References
 
 - `16_market_data_provider_routing.md` — the underlying provider this server wraps. When the surface routing picks Schwab, we're calling the same code path this server exposes.
@@ -171,4 +173,4 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 ---
 
-*Last verified against repo HEAD on 2026-10-08.*
+*Last verified against repo HEAD on 2026-10-26.*
