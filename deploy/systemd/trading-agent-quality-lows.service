@@ -1,7 +1,9 @@
 # Quality-at-lows sleeve shadow scan — one shot, started by
 # trading-agent-quality-lows.timer (skill 67). Bars and analyst estimates
 # from Yahoo; fundamentals and chains from the local data server, never
-# its own Schwab session. Records only — places no orders.
+# its own Schwab session. News for the drop-cause label from Alpaca + Yahoo
+# RSS, read by the operator's logged-in `claude` CLI (PATH below, as in the
+# reviewer unit). Records only — places no orders.
 [Unit]
 Description=Trading agent quality-at-lows shadow scan
 After=trading-agent-data-server.service
@@ -11,5 +13,6 @@ Type=oneshot
 WorkingDirectory=%h/Documents/trading-agent
 ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.quality_lows
 Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 StandardOutput=append:/tmp/trading-agent.quality-lows.out.log
 StandardError=append:/tmp/trading-agent.quality-lows.err.log

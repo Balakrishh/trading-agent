@@ -532,3 +532,131 @@ class NewsAggregator:
     ) -> None:
         with self._lock:
             self._cache[(ticker, source)] = (items, time.monotonic())
+
+
+# --------------------------------------------------------------------------
+# Longer-window ticker news (skill 67 §2.4 — the drop-cause classifier)
+# --------------------------------------------------------------------------
+# yfinance's ``Ticker.news`` returned nothing on 2026-10-26 (yfinance 1.7.0),
+# so the classifier reads Alpaca's news API (Benzinga + others; the paper
+# keys already in .env) and Yahoo's headline RSS instead.
+
+DEFAULT_SOURCE_WEIGHTS.setdefault("alpaca_news", 0.75)
+DEFAULT_SOURCE_WEIGHTS.setdefault("yahoo_rss", 0.70)
+
+
+def fetch_alpaca_news(ticker: str, days: int = 30, limit: int = 50, pages: int = 6,
+                      max_symbols: int = 3, session=requests) -> List[NewsItem]:
+    """Items about ``ticker`` from the last ``days`` days, newest first, up
+    to ``pages`` pages of ``limit`` (a busy name fills one page in under a
+    week). Round-ups tagging more than ``max_symbols`` tickers are dropped
+    (they rarely say anything about this one). [] without keys; whatever
+    arrived before an error otherwise."""
+    import os
+    key, secret = os.getenv("ALPACA_API_KEY", ""), os.getenv("ALPACA_SECRET_KEY", "")
+    if not key or not secret:
+        return []
+    start = (_utc_now() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    raw: List[Dict] = []
+    token = None
+    for _ in range(pages):
+        params = {"symbols": ticker, "start": start, "limit": limit, "sort": "desc"}
+        if token:
+            params["page_token"] = token
+        try:
+            resp = session.get(
+                "https://data.alpaca.markets/v1beta1/news", params=params,
+                headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception as exc:                 # noqa: BLE001 — a failed source is skipped
+            logger.warning("[%s] Alpaca news fetch failed: %s", ticker, exc)
+            break
+        raw.extend(body.get("news") or [])
+        token = body.get("next_page_token")
+        if not token:
+            break
+    items: List[NewsItem] = []
+    for n in raw:
+        if len(n.get("symbols") or []) > max_symbols or not n.get("headline"):
+            continue
+        try:
+            pub = datetime.fromisoformat(str(n.get("created_at")).replace("Z", "+00:00"))
+        except ValueError:
+            pub = None
+        items.append(NewsItem(
+            source="alpaca_news", ticker=ticker, title=str(n["headline"]).strip(),
+            body=str(n.get("summary") or "").strip(), url=n.get("url") or "",
+            published_at=pub, author=str(n.get("source") or ""),
+            source_weight=DEFAULT_SOURCE_WEIGHTS["alpaca_news"],
+        ))
+    return items
+
+
+def fetch_yahoo_rss(ticker: str, days: int = 30, session=requests) -> List[NewsItem]:
+    """Yahoo Finance headline RSS for ``ticker`` (about the last 20 items)."""
+    try:
+        resp = session.get(
+            "https://feeds.finance.yahoo.com/rss/2.0/headline",
+            params={"s": ticker, "region": "US", "lang": "en-US"},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=15,
+        )
+        resp.raise_for_status()
+        channel = ET.fromstring(resp.text).find("channel")
+    except Exception as exc:                     # noqa: BLE001 — a failed source is skipped
+        logger.warning("[%s] Yahoo RSS fetch failed: %s", ticker, exc)
+        return []
+    since_dt = _utc_now() - timedelta(days=days)
+    items: List[NewsItem] = []
+    for el in (channel.findall("item") if channel is not None else []):
+        title = (el.findtext("title") or "").strip()
+        if not title:
+            continue
+        pub = _parse_rfc822(el.findtext("pubDate") or "")
+        if pub and pub < since_dt:
+            continue
+        items.append(NewsItem(
+            source="yahoo_rss", ticker=ticker, title=title,
+            body=(el.findtext("description") or "").strip(),
+            url=(el.findtext("link") or "").strip(), published_at=pub,
+            source_weight=DEFAULT_SOURCE_WEIGHTS["yahoo_rss"],
+        ))
+    return items
+
+
+def ticker_news(ticker: str, days: int = 30, max_items: int = 60) -> List[NewsItem]:
+    """Alpaca + Yahoo RSS, de-duplicated by title, newest first. When there
+    are more than ``max_items``, items are taken round-robin across days
+    (newest of each day first) so a busy last week does not push the
+    event that started the drop out of the window."""
+    seen: Set[str] = set()
+    unique: List[NewsItem] = []
+    for item in fetch_alpaca_news(ticker, days=days) + fetch_yahoo_rss(ticker, days=days):
+        if item._slug in seen:
+            continue
+        seen.add(item._slug)
+        unique.append(item)
+    return spread_by_day(unique, max_items)
+
+
+def spread_by_day(items: List[NewsItem], max_items: int) -> List[NewsItem]:
+    """At most ``max_items``, round-robin over calendar days, newest first."""
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    items = sorted(items, key=lambda i: i.published_at or oldest, reverse=True)
+    if len(items) <= max_items:
+        return items
+    by_day: Dict[str, List[NewsItem]] = {}
+    for i in items:
+        by_day.setdefault(i.published_at.date().isoformat() if i.published_at else "", []).append(i)
+    picked: List[NewsItem] = []
+    while len(picked) < max_items:
+        took = False
+        for day in by_day.values():
+            if day and len(picked) < max_items:
+                picked.append(day.pop(0))
+                took = True
+        if not took:
+            break
+    return sorted(picked, key=lambda i: i.published_at or oldest, reverse=True)

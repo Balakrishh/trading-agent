@@ -214,7 +214,7 @@ Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's lau
 | `trading-agent-data-server.service` | Schwab quote server on `127.0.0.1:8765` for the MCP tools |
 | `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
 | `trading-agent-vol-surface.timer` | 15:50 ET on weekdays (before the close): per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
-| `trading-agent-quality-lows.timer` | 15:40 ET on weekdays: quality-at-lows shadow scan — 52-week-low stages, revenue growth, analyst revisions, priced LEAPS / call-spread / CSP choices → `trade_journal/quality_lows.jsonl`; places no orders (skill 67) |
+| `trading-agent-quality-lows.timer` | 15:40 ET on weekdays: quality-at-lows shadow scan — 52-week-low stages, revenue growth, analyst revisions, Claude's news-reading drop cause, priced LEAPS / call-spread / CSP choices → `trade_journal/quality_lows.jsonl`; places no orders (skill 67) |
 | `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET or `/health` fails; one page per outage plus "recovered" (skill 64) |
 | `trading-agent-dashboard.service` | Streamlit dashboard (optional, off by default) |
 
@@ -346,6 +346,7 @@ Finds strong companies near their 52-week low for a sentiment reason and records
 - **Quality:** the Wheel screen with P/E ≤ 120 and beta ≤ 3 (growth names at lows have both high).
 - **Growth intact:** Schwab revenue growth (`rev_change_ttm_pct`, new 2026-10-26) and net-margin direction, plus Yahoo analyst estimates (`analyst_estimates.py`: consensus EPS change over 30 / 90 days, up / down revisions, forward revenue growth, price targets, recommendation trend — no API key).
 - **Drop cause:** `fundamental` (growth not intact), `sector` (the sector ETF fell ≥ 60 % as far), `sentiment`, or `unclear`.
+- **Why did it drop (Claude):** for names near a low that pass quality, 30 days of news (Alpaca news API + Yahoo RSS) and the row's numbers go to Claude through the logged-in `claude` CLI, which labels the drop `sentiment` / `sector` / `fundamental` / `unclear` and cites the news items it used. Citations of items that were not sent are dropped, and a label with no valid citation becomes `unclear`. Journalled as `llm_cause` beside the rule-based cause; it does not change the stage.
 - **Structure** at a turn, priced from the data server's chains: LEAPS call (Δ ≈ 0.75, 9–18 months) by default; call debit spread up to the 52-week high when implied vol > 1.3 × realized; a budget-fitting spread; a cash-secured put at the base; nothing within 14 days of earnings. Sized to 2 % of equity in premium (CSP: 15 % in cash); `affordable` names the first that fits.
 
 Backtest of the price signal alone (6 years, 38 tickers, stock returns): median trade +1.7 % vs SPY over the same dates, win 51 % — no edge by itself; the quality / growth / revision filters are what the shadow rows test. Details and the quality-only subset: skill 67 §3.6.
@@ -353,6 +354,8 @@ Backtest of the price signal alone (6 years, 38 tickers, stock returns): median 
 ```bash
 python -m trading_agent.quality_lows --dry-run              # full scan, print, append nothing
 python -m trading_agent.quality_lows --report               # latest day's watch / basing / turn names
+python -m trading_agent.quality_lows --dry-run --no-llm     # same, without the Claude news label
+python -m trading_agent.drop_cause_llm NFLX                 # Claude's drop-cause label for one recorded name
 python -m trading_agent.analyst_estimates NFLX ORCL         # analyst summary for a few tickers
 python scripts/research/quality_lows_backtest.py --years 6  # price-signal backtest (~5 min)
 ```
@@ -576,6 +579,8 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 | `TRADING_AGENT_VOL_SURFACE` | `trade_journal/vol_surface.jsonl` | Where the daily skew / term-structure snapshot is appended (skill 66) |
 | `TRADING_AGENT_QUALITY_LOWS` | `trade_journal/quality_lows.jsonl` | Where the daily quality-at-lows shadow rows are appended (skill 67) |
 | `TRADING_AGENT_ANALYST_CACHE` | `trade_journal/analyst_estimates.json` | 20-hour cache of Yahoo analyst estimates / revisions (skill 67) |
+| `QUALITY_LOWS_LLM_CAUSE` | `true` | `false` skips the Claude news-reading drop-cause label in the quality-at-lows scan (skill 67 §3.6a) |
+| `TRADING_AGENT_DROP_CAUSE_MODEL` | `sonnet` | Model the `claude` CLI uses for the drop-cause label (empty = the CLI default) |
 | `QUALITY_LOWS_EXTRA_TICKERS` | `JNJ,LLY,PG,KO,WMT,COST,XOM,CAT,HD,UNH` | Non-watchlist names the quality-at-lows scan also screens (comma list; empty = watchlist only) |
 | `SCHWAB_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | _(empty)_ | Required when any surface is set to `schwab`. See setup walkthrough. |
 | `SCHWAB_TOKEN_PATH` | `~/.schwab_tokens.json` | Where the OAuth helper persists access + refresh tokens |
@@ -718,6 +723,7 @@ trading-agent/
 │   ├── vol_surface.py                # Daily per-ticker skew / term-structure snapshot (skill 66)
 │   ├── quality_lows.py               # Quality-at-lows sleeve, long-option shadow scan (skill 67)
 │   ├── analyst_estimates.py          # Analyst estimates / revisions from Yahoo, cached (skill 67)
+│   ├── drop_cause_llm.py             # "Why did it drop" label from 30 days of news via the claude CLI (skill 67)
 │   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk caps (skill 37)
 │   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
 │   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)
@@ -761,7 +767,7 @@ trading-agent/
 │   ├── sentiment_pipeline.py         # Tier-0/1/2 facade, cycle-scoped pool
 │   ├── earnings_calendar.py          # Tier-0 + cached next-earnings dates for expiry choice (skill 65)
 │   ├── sentiment_cache.py            # Tier-1
-│   ├── news_aggregator.py            # Tier-2 — NewsItem + NewsAggregator
+│   ├── news_aggregator.py            # Tier-2 — NewsItem + NewsAggregator; ticker_news (Alpaca + Yahoo RSS, 30 days) for skill 67
 │   ├── fingpt_analyser.py            # Tier-2 — FinGPT specialist
 │   ├── sentiment_verifier.py         # Tier-2 — Reasoning verifier
 │   │

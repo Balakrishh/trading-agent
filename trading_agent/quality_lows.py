@@ -22,7 +22,9 @@ Once a day, for every ticker in the watchlist plus ``EXTRA_TICKERS``:
    one-sided down, forward revenue growth positive.
 4. **Drop cause** — ``fundamental`` when growth is not intact;
    ``sector`` when the sector ETF fell nearly as far; ``sentiment``
-   otherwise; ``unclear`` when inputs are missing.
+   otherwise; ``unclear`` when inputs are missing. Names near a low that
+   pass quality also get ``llm_cause`` — Claude's reading of 30 days of
+   news (``drop_cause_llm``), journalled beside the rule, not used by it.
 5. **Stage** — ``not_near_low`` → ``watch`` → ``basing`` → ``turn`` →
    ``confirmed`` (or ``excluded``).
 6. **Structure** for ``turn`` / ``confirmed``, priced from the data
@@ -34,7 +36,7 @@ Once a day, for every ticker in the watchlist plus ``EXTRA_TICKERS``:
 
 Rows go to ``trade_journal/quality_lows.jsonl`` (one per ticker per day).
 
-    python -m trading_agent.quality_lows [--dry-run] [--tickers NFLX,ORCL] [--no-chains]
+    python -m trading_agent.quality_lows [--dry-run] [--tickers NFLX,ORCL] [--no-chains] [--no-llm]
     python -m trading_agent.quality_lows --report        # latest day's table
 """
 from __future__ import annotations
@@ -105,6 +107,8 @@ class QualityLowsConfig:
     max_premium_pct: float = 0.02         # premium per position, share of equity (= max loss)
     max_csp_cash_pct: float = 0.15        # cash secured by one put, share of equity
     max_per_sector: int = 2
+    # News-reading drop-cause label (drop_cause_llm, §2.4)
+    llm_max_names: int = 10               # claude CLI calls per run, most advanced stage first
 
 
 DEFAULT_CONFIG = QualityLowsConfig()
@@ -519,6 +523,7 @@ class Deps:
     days_to_earnings: Callable[[str, date], Optional[int]]
     get: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None   # data-server GET; None = skip chains
     equity: Optional[float] = None
+    classify: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None  # drop_cause_llm; None = skip
 
 
 def evaluate_ticker(ticker: str, today: date, deps: Deps,
@@ -598,6 +603,29 @@ def apply_sector_cap(rows: List[Dict[str, Any]], cfg: QualityLowsConfig = DEFAUL
         r["sector_capped"] = seen[s] > cfg.max_per_sector
 
 
+def wants_llm_label(row: Dict[str, Any]) -> bool:
+    """Near a low and passing quality — whatever the rule-based cause, so
+    a ``fundamental`` call by the numbers gets a second reading too."""
+    return row.get("stage") not in (None, "not_near_low") and bool(row.get("quality_ok"))
+
+
+def add_llm_labels(rows: List[Dict[str, Any]], classify: Callable[[Dict[str, Any]], Dict[str, Any]],
+                   cfg: QualityLowsConfig = DEFAULT_CONFIG) -> None:
+    """Set ``llm_cause`` on up to ``llm_max_names`` rows, most advanced
+    stage first. Journal-only: the stage stays rule-based."""
+    order = {s: i for i, s in enumerate(reversed(STAGES))}
+    todo = sorted((r for r in rows if wants_llm_label(r)),
+                  key=lambda r: (order.get(r.get("stage"), 9), r["ticker"]))
+    for r in todo[:cfg.llm_max_names]:
+        try:
+            r["llm_cause"] = classify(r)
+        except Exception as exc:                       # noqa: BLE001 — a label must not stop the scan
+            logger.warning("quality lows: drop-cause label for %s failed (%s)", r["ticker"], exc)
+            r["llm_cause"] = {"label": None, "error": str(exc)[:300]}
+    for r in todo[cfg.llm_max_names:]:
+        r["llm_cause"] = {"label": None, "error": "skipped: llm_max_names"}
+
+
 def recorded_today(path: Path, day: str) -> set:
     out = set()
     try:
@@ -639,6 +667,8 @@ def collect(tickers: Iterable[str], deps: Deps, today: Optional[date] = None,
         except Exception as exc:                       # noqa: BLE001 — one ticker must not stop the rest
             logger.warning("quality lows: %s failed (%s)", t, exc)
     apply_sector_cap(rows, cfg)
+    if deps.classify is not None:
+        add_llm_labels(rows, deps.classify, cfg)
     if not dry_run and rows:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
@@ -688,6 +718,12 @@ def report(path: Path = STORE_PATH) -> List[str]:
                 f"since_low={p.get('sessions_since_low')} rsi={p.get('rsi14')} "
                 f"rev_ttm={f.get('rev_change_ttm_pct')} eps_rev30={e.get('eps_next_year_rev_30d_pct')} "
                 f"revs={e.get('revisions_up_30d')}/{e.get('revisions_down_30d')}")
+        llm = r.get("llm_cause") or {}
+        if llm.get("label"):
+            conf = llm.get("confidence")
+            line += f" llm={llm['label']}" + (f"({conf:.2f})" if isinstance(conf, (int, float)) else "")
+        elif llm.get("error"):
+            line += " llm=error"
         if r.get("structure"):
             q = (r.get("quotes") or {}).get(r["structure"]) or {}
             line += (f" → {r['structure']} cost={q.get('cost_per_contract')} "
@@ -696,6 +732,8 @@ def report(path: Path = STORE_PATH) -> List[str]:
         if r.get("reasons"):
             line += "  [" + "; ".join(x for x in r["reasons"] if not x.startswith("missing:")) + "]"
         lines.append(line)
+        if llm.get("summary"):
+            lines.append(f"{'':6} why: {llm['summary']}")
     return lines
 
 
@@ -705,6 +743,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print, do not append")
     ap.add_argument("--no-chains", action="store_true", help="skip option-chain pricing")
     ap.add_argument("--report", action="store_true", help="print the latest day and exit")
+    ap.add_argument("--no-llm", action="store_true",
+                    help="skip the claude-CLI drop-cause label (also QUALITY_LOWS_LLM_CAUSE=false)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.report:
@@ -741,7 +781,11 @@ def main(argv=None) -> int:
                 estimates=lambda t, spot: get_estimates(t, spot=spot),
                 days_to_earnings=days_to_earnings,
                 get=None if args.no_chains else _data_server_get,
-                equity=_account_equity())
+                equity=_account_equity(), classify=None)
+    llm_on = os.environ.get("QUALITY_LOWS_LLM_CAUSE", "true").strip().lower() not in ("0", "false", "no", "off")
+    if llm_on and not args.no_llm:
+        from trading_agent.drop_cause_llm import classify
+        deps.classify = classify
     rows = collect(tickers, deps, today, dry_run=args.dry_run)
     counts: Dict[str, int] = {}
     for r in rows:

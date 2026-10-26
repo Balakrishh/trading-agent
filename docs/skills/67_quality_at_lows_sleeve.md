@@ -1,9 +1,9 @@
 # Quality-at-Lows Sleeve — Growth Data, Analyst Revisions, Long-Option Shadow Scan
 
 > **One-line summary:** Once a day, find strong companies trading near their 52-week low for a sentiment reason (revenue growing, analyst estimates not cut, sector not the cause), follow them through a base to a confirmed turn, and journal which long-option structure the sleeve *would* buy — LEAPS call, call debit spread, or cash-secured put — priced from real chains and sized to the account. Shadow only: no orders.
-> **Source of truth:** [`trading_agent/quality_lows.py`](../../trading_agent/quality_lows.py), [`trading_agent/analyst_estimates.py`](../../trading_agent/analyst_estimates.py), [`trading_agent/market_data_schwab.py:fetch_fundamentals`](../../trading_agent/market_data_schwab.py), [`scripts/research/quality_lows_backtest.py`](../../scripts/research/quality_lows_backtest.py), [`deploy/systemd/trading-agent-quality-lows.*`](../../deploy/systemd/).
+> **Source of truth:** [`trading_agent/quality_lows.py`](../../trading_agent/quality_lows.py), [`trading_agent/analyst_estimates.py`](../../trading_agent/analyst_estimates.py), [`trading_agent/drop_cause_llm.py`](../../trading_agent/drop_cause_llm.py), [`trading_agent/news_aggregator.py:ticker_news`](../../trading_agent/news_aggregator.py), [`trading_agent/market_data_schwab.py:fetch_fundamentals`](../../trading_agent/market_data_schwab.py), [`scripts/research/quality_lows_backtest.py`](../../scripts/research/quality_lows_backtest.py), [`deploy/systemd/trading-agent-quality-lows.*`](../../deploy/systemd/).
 > **Phase:** 2  •  **Group:** strategy / data_quality
-> **Depends on:** `47_schwab_data_api.md` (fundamentals + chains, one Schwab token holder), `16_market_data_provider_routing.md`, `52_watchlist_curation.md` (the universe), `65_earnings_expiry_and_trend_filters.md` (earnings dates), `66_calibrated_probability_model.md` (same daily-timer pattern as the vol surface).
+> **Depends on:** `47_schwab_data_api.md` (fundamentals + chains, one Schwab token holder), `16_market_data_provider_routing.md`, `52_watchlist_curation.md` (the universe), `65_earnings_expiry_and_trend_filters.md` (earnings dates), `66_calibrated_probability_model.md` (same daily-timer pattern as the vol surface), `56_daily_journal_reviewer.md` (the `claude` CLI pattern the drop-cause label reuses).
 > **Consumed by:** `trade_journal/quality_lows.jsonl` (shadow evidence for backlog §12.5–12.6) · `python -m trading_agent.quality_lows --report`.
 
 ---
@@ -15,6 +15,8 @@ Operator goal (2026-10-25): put idle cash to work by buying good companies the m
 Options make timing and price paid matter far more than with stock, so for every turn the scanner prices three structures from live chains and records which one fits the account: a deep ITM LEAPS call (stock replacement with little time decay), a call debit spread up to the 52-week high (cheaper; the short leg sells back some of the post-sell-off implied volatility), and a cash-secured put at the base (paid to wait). Nothing is traded: backlog §12.5 asks for 6–8 weeks of these rows before §12.6 paper trades.
 
 Data sources: Schwab fundamentals already held the trailing growth fields (verified on the raw payload 2026-10-25) but no forecasts. Yahoo Finance (via `yfinance`, already a dependency for daily bars) publishes consensus EPS now and 7–90 days ago, analyst up/down revision counts, revenue and EPS growth estimates, price targets and the recommendation trend, with no API key. Both are optional inputs: a missing table weakens the verdict to `unclear`, never crashes the scan.
+
+Numbers cannot tell a guidance cut from a panic over a customer, a layoff from a one-off. So every name near a low that passes quality also gets a **news-reading label** (backlog 12.3, added 2026-10-26): 30 days of headlines and summaries plus the row's numbers go to Claude through the operator's logged-in `claude` CLI, which answers `sentiment` / `sector` / `fundamental` / `unclear` and must cite the items it used. The label is journalled beside the rule-based cause and does not change the stage; the shadow weeks show which of the two calls the rebounds better.
 
 ## 2. Mathematical Formula
 
@@ -44,6 +46,15 @@ Drop cause:
   unclear      if growth intact is None or no drawdown
   sector       if sector-ETF drawdown ≤ 0.6 × stock drawdown   (both negative %)
   sentiment    otherwise
+
+News-reading label (llm_cause; journal only, stage unchanged):
+  eligible     stage ≠ not_near_low and quality passes (any rule-based cause)
+  order        most advanced stage first, at most llm_max_names = 10 per run
+  input        DATA = price, sector-ETF drawdown, fundamentals, estimates, rule label
+               N1…Nk = up to 60 news items, 30 days, round-robin across days
+  check        cited ids ∉ {N1…Nk, DATA} → unsupported_citations (dropped)
+               label ∉ {sentiment, sector, fundamental, unclear} → unclear
+               label ≠ unclear with no valid citation → unclear
 
 Stage:
   not_near_low  if base_range_pos > 0.10 or range_pos > 0.35
@@ -147,6 +158,38 @@ def stage(pf, quality_ok, cause, cfg=DEFAULT_CONFIG) -> str:
 
 `QualityLowsConfig` is a frozen dataclass in `quality_lows.py`, deliberately not in `PresetConfig`: the sleeve is outside the spread agent's decision path (the `WheelScreenConfig` / `EvaluatorConfig` precedent). Move it into the preset when §12.6 makes it trade.
 
+### 3.6a News-reading drop-cause label (backlog 12.3)
+
+```python
+# trading_agent/news_aggregator.py — added 2026-10-26
+def ticker_news(ticker, days=30, max_items=60):
+    # fetch_alpaca_news: Alpaca /v1beta1/news (Benzinga, fiscal.ai …; the paper keys),
+    #   up to 6 pages of 50, round-ups tagging > 3 symbols dropped
+    # fetch_yahoo_rss: feeds.finance.yahoo.com headline RSS (~20 newest)
+    # de-duplicated by title slug, then spread_by_day(): round-robin across
+    # calendar days so a busy last week does not crowd out the event that started the drop
+
+# trading_agent/drop_cause_llm.py
+def classify(row, news_items=None, news_fn=None, runner=subprocess.run, model=MODEL):
+    news = _news_payload(news_items)                       # N1…Nk, summaries ≤ 300 chars
+    proc = runner(build_cmd(build_prompt(row, news), model), cwd=WORKDIR, ...)
+    # claude -p … --tools "" --strict-mcp-config --setting-sources "" --no-session-persistence
+    #   --system-prompt SYSTEM_PROMPT --model sonnet
+    return {**verify(parsed, ids={N…} | {"DATA"}), "news_count": …, "news_from": …,
+            "model": …, "output_tokens": …, "cost_usd_equivalent": …}
+    # any failure → {"label": None, "error": "..."} (never raises)
+
+# trading_agent/quality_lows.py
+def add_llm_labels(rows, classify, cfg):                  # called in collect() after apply_sector_cap
+    todo = sorted(r for r in rows if wants_llm_label(r))  # most advanced stage first
+    for r in todo[:cfg.llm_max_names]:
+        r["llm_cause"] = classify(r)                       # exceptions → {"label": None, "error": …}
+```
+
+`main()` sets `deps.classify` unless `--no-llm` or `QUALITY_LOWS_LLM_CAUSE=false`; `--report` prints `llm=<label>(<confidence>)` and a `why:` line. One-off: `python -m trading_agent.drop_cause_llm NFLX` labels the latest recorded row and prints it (writes nothing). Model: `TRADING_AGENT_DROP_CAUSE_MODEL` (default `sonnet`; empty = the CLI default); the CLI runs in `~/.trading-agent-drop-cause`.
+
+First live dry run, 2026-10-26 (pre-market, 60 items each): **NFLX** rule `sentiment` → Claude `unclear` 0.55 ("results strong … but guidance was cut, engagement and share to YouTube look weak, and next-year EPS estimates are drifting down, so it is not a clean sentiment sell-off"; 13 citations, none invented). **ORCL** rule `sentiment` → Claude `sentiment` 0.60 (−56 % vs XLK −10 % on AI-debt / financing / OpenAI-dependence fears while revisions run 58 up / 11 down; risks: $76B financing need, gross margin 60 % MRQ vs 64 % TTM). About 1–2 minutes per name.
+
 ### 3.6 Backtest (backlog §12.4)
 
 `scripts/research/quality_lows_backtest.py` replays `price_features` + `stage` (quality and cause treated as passing) on adjusted daily bars, buys at the next open on the first `turn` / `confirmed`, exits on a close 8 % below the base low, within 3 % of the entry-time 52-week high, below SMA-50 after a +10 % gain, or after 126 sessions; compares with SPY over the same dates.
@@ -179,6 +222,13 @@ Quality-only subset (the 26 names that pass today's screen — itself look-ahead
 - **Wheel conflict (for §12.6)** — `wheel_lifecycle` reads shares on a ticker with a CSP as "assigned"; the sleeve must not hold or put-sell a ticker the Wheel trades.
 - **Duplicate tickers / reruns** — tickers de-duplicated; a ticker already recorded today is skipped unless `--dry-run`.
 - **One ticker failing** — logged and skipped; the rest of the run completes.
+- **Claude invents a source** — citations are checked against the ids actually sent; invented ones are kept only under `unsupported_citations`, and a label with no valid citation becomes `unclear` (`flags: no_valid_evidence_for:<label>`). This is a code check, not a second model (the `SentimentVerifier` route needs an LLM endpoint the Pi lacks).
+- **Claude CLI missing, logged out, rate-limited or slow** — `llm_cause: {"label": null, "error": …}` (timeout 180 s); the row is still written and the stage is unaffected. A Claude login expiry shows up here and in the reviewer at the same time.
+- **No news** — Alpaca keys missing or both sources down → `news_count: 0`; Claude labels from DATA alone and usually answers `unclear`.
+- **yfinance news is empty** — `yf.Ticker(t).news` returned [] for NFLX on 2026-10-26 (yfinance 1.7.0), which also starves the disabled FinGPT path's Yahoo source; the label uses Alpaca news + Yahoo RSS instead.
+- **Round-ups** — Alpaca items tagging more than 3 symbols ("5 stocks investors couldn't stop buzzing about") are dropped.
+- **Too many names near lows** — at most `llm_max_names` (10) calls per run, most advanced stage first; the rest get `error: skipped: llm_max_names`.
+- **Label vs rule disagree** — expected (NFLX on day one). Neither overrides the other until §12.6; compare them against the rows' later returns.
 
 ## 5. Cross-References
 
@@ -186,6 +236,7 @@ Quality-only subset (the 26 names that pass today's screen — itself look-ahead
 - `40_long_term_options_evaluator.md` — covered calls / CSPs on held stock; this skill is the entry side for names not held.
 - `42_portfolio_alert_scheduler.md` — the paused Telegram `long_term` digest; candidate channel for sleeve alerts once its dedup bug is fixed.
 - `59_*` / debit spreads — the agent's own call debit spread scoring (`debit_above_fair`) applies when §12.6 trades.
+- `56_daily_journal_reviewer.md` — the `claude` CLI call pattern (`claude_bin`, `parse_result_json`) reused here.
 - `docs/plans/agent_backlog.md` §12 — plan and status.
 
 ---
