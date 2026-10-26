@@ -2744,10 +2744,52 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 key="cust_ladder_winners",
                 help="A second position on a ticker only while the open one is at or above breakeven.")
             stop_cooldown = st.number_input(
-                "Stop cool-down (sessions)", 0, 5,
-                int(getattr(seed, "stop_cooldown_sessions", 1)), 1, key="cust_stop_cooldown",
+                "Stop cool-down (sessions)", 0, 20,
+                int(getattr(seed, "stop_cooldown_sessions", 5)), 1, key="cust_stop_cooldown",
                 help="After a stop on a ticker, no new entry in the same direction for the rest "
                      "of that session and this many more. 0 = off.")
+            stop_cooldown_repeat = st.number_input(
+                "Cool-down after a repeat stop (sessions)", 0, 40,
+                int(getattr(seed, "stop_cooldown_repeat_sessions", 10)), 1,
+                key="cust_stop_cooldown_repeat",
+                help="When the stop is the second same-direction stop on the ticker within "
+                     "the window below, block this long instead (TLT, 2026-10-15 and 10-22).")
+            stop_cooldown_window = st.number_input(
+                "Repeat-stop window (sessions)", 1, 60,
+                int(getattr(seed, "stop_cooldown_repeat_window", 20)), 1,
+                key="cust_stop_cooldown_window")
+
+        # ── Correlated-risk groups + book direction (E6 / E4, skill 37) ──
+        st.markdown("**Direction risk** *(skill 37)* — rates = TLT, IEF, TLH, XLU; "
+                    "gold = GLD, IAU, GDX, GDXJ, SLV; us_equity = SPY, QQQ, DIA, IWM, XLK, SMH")
+        dr1, dr2 = st.columns(2)
+        with dr1:
+            max_group_dir = st.slider(
+                "Max one-direction loss per group", 0.0, 0.10,
+                float(getattr(seed, "max_group_direction_risk_pct", 0.03)), 0.005,
+                key="cust_group_dir_risk",
+                help="Σ max loss of bullish (or bearish) positions in one correlated group, "
+                     "share of equity. New trades are sized into what is left. 0 = off.")
+            net_delta_mode = st.selectbox(
+                "Book net-delta budget", ["shadow", "off"],
+                index=0 if getattr(seed, "net_delta_mode", "shadow") == "shadow" else 1,
+                key="cust_net_delta_mode",
+                help="shadow: journal candidates a net-delta cap would block (net_delta_shadow); "
+                     "never blocks. live is not built.")
+        with dr2:
+            max_book_dir = st.slider(
+                "Max one-direction loss, whole book", 0.0, 0.20,
+                float(getattr(seed, "max_book_direction_risk_pct", 0.06)), 0.005,
+                key="cust_book_dir_risk", help="0 = off.")
+            max_net_delta = st.slider(
+                "Net-delta budget (SPY-equivalent, share of equity)", 0.0, 1.0,
+                float(getattr(seed, "max_net_beta_delta_pct", 0.30)), 0.05,
+                key="cust_net_delta_budget")
+        put_debit_excluded = st.text_input(
+            "No put-debit fallback on (comma list)",
+            ",".join(getattr(seed, "put_debit_excluded_tickers", ("XLY", "XLK", "XLI", "GDX"))),
+            key="cust_put_debit_excluded",
+            help="Tickers whose option legs quote too wide for put debits (backlog E7).")
 
         # ── Entry confirmation + trailing profit (skills 61, 30) ─────────
         st.markdown("**Drawdown governor** *(skill 62)* — pauses new entries; exits keep running; only you resume")
@@ -3039,6 +3081,14 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "ladder_min_gap_days":          int(ladder_gap),
         "ladder_requires_profit":       bool(ladder_winners),
         "stop_cooldown_sessions":       int(stop_cooldown),
+        "stop_cooldown_repeat_sessions": int(stop_cooldown_repeat),
+        "stop_cooldown_repeat_window":  int(stop_cooldown_window),
+        "max_group_direction_risk_pct": max_group_dir,
+        "max_book_direction_risk_pct":  max_book_dir,
+        "net_delta_mode":               net_delta_mode,
+        "max_net_beta_delta_pct":       max_net_delta,
+        "put_debit_excluded_tickers":   [t.strip().upper() for t in put_debit_excluded.split(",")
+                                         if t.strip()],
         "calendar_max_strike_drift_pct": cal_drift,
         "halt_daily_loss_pct":          halt_daily,
         "halt_weekly_loss_pct":         halt_weekly,

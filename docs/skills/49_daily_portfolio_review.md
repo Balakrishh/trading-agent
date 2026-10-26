@@ -36,7 +36,7 @@ market_state   = get_market_state()        # skill 58 — leads the Macro sectio
 
 The brief is rendered as prose sections in this order:
 
-1. **Positions.** From `positions["open_positions"]` (any open date) — one line per ticker + strategy + expiration + credit + width. Flag `status="expired_unrecorded"` rows prominently: their P&L is missing from the journal.
+1. **Positions.** From `positions["open_positions"]` (any open date) — one line per ticker + strategy + expiration + **contracts** + debit/credit + width + `total_max_loss` + `mid_pl`. `max_loss` is per contract — never sum it as the position's risk; use `total_max_loss` and close the section with `positions["book"]["totals"]` (total at risk and % of equity, by direction, by correlated group). Flag `status="expired_unrecorded"` rows (P&L missing from the journal) and `status="broker_only"` rows (the broker holds legs the journal does not) prominently.
 2. **Realized PnL today.** From `journal["realized_pl_today"]`.
 3. **Recent closes.** From `recent["closes"]` (the `days` window) — closed trades with reason + PnL; total from `recent["realized_pl_window"]`.
 4. **Expiring this week.** Filter `positions` by expiration ≤ 7 days out.
@@ -50,6 +50,7 @@ The brief is rendered as prose sections in this order:
 - **Data server unreachable.** `get_quote`/`get_chain` may return `{"source": "unavailable"}`. Playbook skips those sections rather than failing the whole brief.
 - **Market risk state (2026-10-05).** `get_market_state()` leads the Macro section: state, top reasons, size multiplier, CSP pause, and any `hedge_suggestion` (an idea for `/propose`, never an order). `source: unavailable` → say the agent has not written a snapshot yet.
 - **Alerts noise floor.** `get_recent_alerts(hours=24)` includes silenced dedups; render only rows the operator hasn't already seen (compare against yesterday's brief if the state file exists).
+- **Risk was understated before 2026-10-26** — briefs that summed per-contract `max_loss` showed $1,769 at risk when the book held $2,974 (F6). If `book` is missing (older MCP server), multiply `max_loss` by `contracts` yourself.
 - **No writes.** This skill NEVER invokes `promote.py`, writes to `pending_orders/`, or calls a slash command that does. Read-only end-to-end.
 - **`morning` skill interop.** The desktop-app `morning` skill renders a styled HTML brief; this playbook renders prose in the Claude Code terminal. They share the same tool calls but different output surfaces — do not conflate.
 - **Wheel assignments (2026-09-29).** When `list_recent_trades` shows an `exit_signal` of `assigned`, call `wheel_screen(watchlist=[ticker])` — the shares now appear in Alpaca holdings, so the tool returns covered-call recommendations (never below cost basis, skill 40 §2.1). `called_away` / `expired_worthless` need no follow-up.
@@ -63,4 +64,4 @@ The brief is rendered as prose sections in this order:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-26.*

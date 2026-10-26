@@ -28,6 +28,20 @@ logger = logging.getLogger(__name__)
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 1
+# 2026-10-23: the GLD close went unfilled at 10:30 ET at both the improved
+# and the natural price, and filled better than natural at 11:00. Paper
+# fills come from Alpaca's own quote, and first-hour quotes are wide.
+EARLY_FILL_BEFORE_ET = (10, 30)
+
+
+def early_session_note(now_et) -> Optional[str]:
+    """A warning (never a refusal) before ``EARLY_FILL_BEFORE_ET``."""
+    h, m = EARLY_FILL_BEFORE_ET
+    if (now_et.hour, now_et.minute) < (h, m) and (now_et.hour, now_et.minute) >= (9, 30):
+        return (f"Note: before {h}:{m:02d} ET option quotes are wide and paper closes "
+                "often go unfilled (GLD 2026-10-23: no fill at 10:30, filled at 11:00). "
+                "Consider waiting.")
+    return None
 EXIT_REFUSED = 2
 EXIT_NOT_FILLED = 3
 
@@ -209,6 +223,11 @@ def main(argv=None) -> int:
     spread.legs = remark_positions_at_mid(spread.legs, quotes)
     _print_preview(preview(spread, quotes))
     print(f"  account: {cfg.alpaca.base_url}")
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    note = early_session_note(datetime.now(ZoneInfo("America/New_York")))
+    if note:
+        print(note)
     if not a.submit:
         print("Preview only — re-run with --submit to send the close order.")
         return EXIT_OK

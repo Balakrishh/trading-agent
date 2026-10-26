@@ -20,6 +20,9 @@ idle   if not in the NYSE session (holidays, weekends, after hours)
 down   if (now − newest signals_live.jsonl timestamp) > STALE_MIN (10 min)
        or there is no journal row at all
        or GET http://127.0.0.1:8765/health is not 200 within 5 s
+       or (A8, 2026-10-26) the server answers but GET /ready is 503 —
+          Schwab returned no data (token revoked / refresh failing / upstream);
+          /ready unreachable counts as ok here (the /health line covers it)
 ok     otherwise
 
 alert  = "down"       when status = down and no page is outstanding
@@ -34,7 +37,8 @@ The agent writes rows every ~75 s in session (a `vix_observation` row each cycle
 ```python
 # trading_agent/liveness.py:66-86
 def assess(now: datetime, last: Optional[datetime], in_session: bool,
-           server_ok: bool) -> Tuple[str, str]:
+           server_ok: bool, schwab_ok: bool = True, schwab_detail: str = ""
+           ) -> Tuple[str, str]:
     """("idle" | "ok" | "down", reason). Pure — no I/O."""
     tz = US_MARKET_PROFILE.timezone
     now_et = now.astimezone(tz)
@@ -53,7 +57,16 @@ def assess(now: datetime, last: Optional[datetime], in_session: bool,
                             f"(last row {last.astimezone(tz):%H:%M} ET)")
     if not server_ok:
         problems.append(f"data server not answering {HEALTH_URL}")
+    elif not schwab_ok:
+        problems.append("Schwab not returning data (data server /ready: "
+                        f"{schwab_detail or 'not ready'}) — re-login may be needed")
     return ("down", "; ".join(problems)) if problems else ("ok", "")
+
+# liveness.schwab_ready(url=READY_URL) -> (ok, detail): 200 → ok; 503 → the
+# server's detail; unreachable → ok (reported by server_healthy). main() calls
+# it only in session (it makes one Schwab call through the data server).
+# Data server /ready (skill 47) calls provider.auth_probe(): a token must be
+# obtainable AND /markets must return a body.
 ```
 
 ```python
@@ -78,15 +91,16 @@ Install (runbook 08 §7): `systemctl --user enable --now trading-agent-liveness.
 - **One page per outage** — `liveness_state.json` (atomic temp+rename) holds `alerted`/`since`/`reason`; repeated `down` checks send nothing more.
 - **Telegram unreachable** — the state is saved only after a successful send, so an unsent page is retried on the next run. With Telegram not configured the state still advances (nothing to retry).
 - **Corrupt or missing state / journal** — corrupt state reads as "no outstanding page"; a missing journal is `down` ("no journal rows at all").
-- **Agent alive but degraded** (e.g. Schwab token expired) — rows keep coming, so this is `ok`; skill 16 §4 (login reminder) and skill 34 (silenced exceptions) cover that.
+- **Agent alive but Schwab dead (A8, 2026-10-26)** — on 2026-10-20 the data server's refresh token was invalid from 10:15 to 20:22 ET while `/health` stayed 200 and the agent kept writing rows, so no page went out. `/ready` used to probe `is_market_open()`, which swallows the auth failure (`_get` returns None) and falls back to Alpaca's clock — it reported "ready" throughout. Now `/ready` uses `auth_probe()` and the watchdog pages on a 503 during the session ("Schwab not returning data … re-login may be needed"); "recovered" follows once it answers again. Outside the session nothing is checked — the Sunday-night re-login reminder (skill 16 §4) covers weekends.
+- **Server down** — only the `/health` problem is reported, not a second Schwab line.
 - **Read-only** — never touches the agent, orders or `pending_orders/`; writes only its own state file and the log `/tmp/trading-agent.liveness.log`.
 
 ## 5. Cross-References
 
 - `32_telegram_operator_alerts.md` — `notify_agent_down` / `notify_agent_recovered` (error channel).
-- `47_schwab_data_api.md` — the `/health` route checked here.
+- `47_schwab_data_api.md` — the `/health` and `/ready` routes checked here.
 - `62_kill_switch_drawdown_governor.md` — the other operator lever for an unattended agent.
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-26.*

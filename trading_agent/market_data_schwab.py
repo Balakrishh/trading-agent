@@ -741,16 +741,45 @@ class SchwabMarketDataProvider(MarketDataProvider):
                 mid = round((bid + ask) / 2, 4) if (bid > 0 or ask > 0) else 0.0
             else:
                 mid = float(mid)
+            # Append-only (2026-10-26, backlog E4): the leg's delta when
+            # Schwab's QuoteOption carries one; None otherwise (sentinel —
+            # never 0.0, which would read as "no exposure").
+            try:
+                delta = float(q["delta"]) if q.get("delta") is not None else None
+            except (TypeError, ValueError):
+                delta = None
             out[compact] = {
                 "bid": bid,
                 "ask": ask,
                 "mid": round(float(mid), 4),
+                "delta": delta,
             }
         return out
 
     # ------------------------------------------------------------------
     # Market-hours helper — used by AccountPort.is_market_open
     # ------------------------------------------------------------------
+    def auth_probe(self) -> Tuple[bool, str]:
+        """(ok, detail) — is Schwab answering *with data* right now?
+
+        Backlog A8 (2026-10-26). ``_get`` swallows auth failures and
+        returns None, and ``is_market_open`` then falls back to Alpaca's
+        clock, so the data server's ``/ready`` stayed 200 from 10:15 to
+        20:22 ET on 2026-10-20 while every Schwab call failed. This asks
+        for a token (raises on a revoked / missing refresh token) and then
+        requires ``/markets`` to return a body."""
+        try:
+            self.oauth.get_access_token()
+        except RuntimeError as exc:
+            return False, f"Schwab token unavailable: {str(exc)[:160]}"
+        body = self._get("/markets", params={
+            "markets": "equity",
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        }, timeout=ALPACA_TIMEOUT)
+        if not isinstance(body, dict):
+            return False, "Schwab /markets returned no data (auth or upstream failure)"
+        return True, ""
+
     def is_market_open(self) -> bool:   # type: ignore[override]
         """
         Equity market open/closed flag via /markets?markets=equity.

@@ -166,5 +166,5 @@ def test_agent_gate_uses_preset(monkeypatch):
 
 
 def test_preset_default_and_summary():
-    assert PresetConfig.__dataclass_fields__["stop_cooldown_sessions"].default == 1
-    assert "Stop cool-down 1 sess" in PRESETS["balanced"].to_summary_line()
+    assert PresetConfig.__dataclass_fields__["stop_cooldown_sessions"].default == 5
+    assert "Stop cool-down 5 sess (10 after a repeat)" in PRESETS["balanced"].to_summary_line()

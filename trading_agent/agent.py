@@ -975,6 +975,10 @@ class TradingAgent:
         from trading_agent.position_caps import open_expirations, open_pls
         self._open_expirations = open_expirations(monitor_results)
         self._open_pls = open_pls(monitor_results)
+        # E6 direction budgets and the E4 book-delta reading (2026-10-26).
+        from trading_agent.position_caps import direction_exposure
+        self._direction_exposure = direction_exposure(monitor_results)
+        self._book_delta_update(account_balance)
         self._opened_today = self._tickers_opened_today()
 
         new_trade_results = []
@@ -1036,6 +1040,9 @@ class TradingAgent:
                 new_trade_results.append(result)
                 if ((result or {}).get("execution") or {}).get("status") in ("submitted", "dry_run"):
                     risk_used += self._submitted_risk(result)
+                    from trading_agent.position_caps import add_exposure
+                    add_exposure(self._direction_exposure, ticker,
+                                 str(result.get("strategy") or ""), self._submitted_risk(result))
                     self._count_entry(ticker)
                     self._consume_entry(ticker, result)
                     self._open_expirations.setdefault(ticker, []).append(
@@ -1188,10 +1195,14 @@ class TradingAgent:
         # Skill 44 §4 — value legs at quote mid, not Alpaca's last-trade
         # mark, so bid/ask noise doesn't trip stops. Legs without a usable
         # quote keep the broker mark.
+        self._share_deltas = {}
         try:
             quotes = self.data_provider.fetch_option_quotes(
                 [p.symbol for p in positions])
             positions = remark_positions_at_mid(positions, quotes or {})
+            # E4: leg deltas from the same quotes (no extra call).
+            from trading_agent.book_delta import share_deltas
+            self._share_deltas = share_deltas(positions, quotes or {})
         except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — re-mark is best-effort; broker marks remain valid
             logger.warning("Mid re-mark failed (%s) — using broker marks", exc)
 
@@ -2438,11 +2449,12 @@ class TradingAgent:
 
     @staticmethod
     def _stops_from(reader) -> List[Tuple[str, str, date]]:
-        """(ticker, strategy, ET date) of stop-type closes in the last week."""
+        """(ticker, strategy, ET date) of stop-type closes in the last five
+        weeks — long enough for the repeat-stop window (20 sessions)."""
         from zoneinfo import ZoneInfo
         from trading_agent.position_caps import STOP_EXIT_SIGNALS
         out = []
-        for c in reader.closes_since(7):
+        for c in reader.closes_since(35):
             if c.exit_signal not in STOP_EXIT_SIGNALS:
                 continue
             try:
@@ -2461,13 +2473,90 @@ class TradingAgent:
             ticker, plan.strategy_name,
             datetime.now(ZoneInfo("America/New_York")).date(),
             getattr(self, "_recent_stops", []) or [],
-            int(getattr(self.preset, "stop_cooldown_sessions", 0)))
+            int(getattr(self.preset, "stop_cooldown_sessions", 0)),
+            repeat_sessions=int(getattr(self.preset, "stop_cooldown_repeat_sessions", 0)),
+            repeat_window=int(getattr(self.preset, "stop_cooldown_repeat_window", 20)))
+
+    def _direction_risk_block(self, ticker: str, plan, balance: float) -> Optional[str]:
+        """E6: block when the trade's group / book direction has less room
+        than one contract's max loss; otherwise size the trade into the
+        room (never up). None when allowed."""
+        from trading_agent.position_caps import direction_risk_failure
+        reason, room = direction_risk_failure(
+            ticker, plan.strategy_name, float(plan.max_loss or 0.0), float(balance or 0.0),
+            getattr(self, "_direction_exposure", {}) or {},
+            float(getattr(self.preset, "max_group_direction_risk_pct", 0.0)),
+            float(getattr(self.preset, "max_book_direction_risk_pct", 0.0)))
+        if reason is None and room is not None and balance > 0:
+            current = float(getattr(self.executor, "max_risk_pct",
+                                    getattr(self.risk_manager, "max_risk_pct", 1.0)))
+            if room / balance < current:
+                logger.info("[%s] direction room $%.0f — trade risk %.2f%% → %.2f%%",
+                            ticker, room, 100 * current, 100 * room / balance)
+                self._set_trade_risk_pct(room / balance)
+        return reason
+
+    def _book_delta_update(self, account_balance: float) -> None:
+        """E4: SPY-equivalent net delta of the book from this cycle's leg
+        deltas, betas from cached daily history; stored for the shadow
+        verdicts and read-only tools. Best-effort."""
+        self._book_delta_pct = None
+        if str(getattr(self.preset, "net_delta_mode", "off")) == "off":
+            return
+        try:
+            from zoneinfo import ZoneInfo
+            from trading_agent import book_delta as bd
+            deltas = getattr(self, "_share_deltas", {}) or {}
+            spy = self.data_provider.fetch_historical_prices("SPY", period_days=200)
+            spy_c = [float(x) for x in spy["Close"]] if spy is not None and len(spy) else []
+            spots, betas = {}, {}
+            for u in deltas:
+                h = self.data_provider.fetch_historical_prices(u, period_days=200)
+                c = [float(x) for x in h["Close"]] if h is not None and len(h) else []
+                spots[u] = self._cached_price(u) or (c[-1] if c else None)
+                betas[u] = bd.beta_from_closes(c, spy_c)
+            reading = bd.book_reading(deltas, spots, betas, float(account_balance or 0.0))
+            day = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+            bd.record_reading(reading, day)
+            self._book_delta_pct = reading["pct_of_equity"]
+            logger.info("Book net delta: SPY-equivalent $%.0f (%s of equity)%s",
+                        reading["spy_equiv_dollars"],
+                        "n/a" if reading["pct_of_equity"] is None else f"{reading['pct_of_equity']:+.1%}",
+                        f"; no delta for {reading['unknown']}" if reading["unknown"] else "")
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — shadow measurement only
+            logger.warning("Book net delta unavailable (%s)", exc)
+
+    def _net_delta_shadow(self, ticker: str, plan) -> None:
+        """E4 shadow: journal (once per ticker + strategy a day) a candidate
+        that a live net-delta cap would block. Never blocks."""
+        if str(getattr(self.preset, "net_delta_mode", "off")) != "shadow":
+            return
+        try:
+            from zoneinfo import ZoneInfo
+            from trading_agent import book_delta as bd
+            cand = bd.plan_share_delta(plan)
+            reason = bd.shadow_verdict(getattr(self, "_book_delta_pct", None), cand,
+                                       float(getattr(self.preset, "max_net_beta_delta_pct", 0.0)))
+            day = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+            if reason and bd.first_shadow_today(f"{ticker}|{plan.strategy_name}", day):
+                logger.info("[%s] net-delta shadow: %s", ticker, reason)
+                self.journal_kb.log_signal(
+                    ticker=ticker, action="net_delta_shadow", price=self._cached_price(ticker),
+                    raw_signal={"strategy": plan.strategy_name, "reason": reason,
+                                "book_pct": self._book_delta_pct, "candidate_share_delta": cand,
+                                "budget_pct": float(getattr(self.preset, "max_net_beta_delta_pct", 0.0))})
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — shadow measurement only
+            logger.warning("[%s] net-delta shadow failed (%s)", ticker, exc)
 
     def _entry_scope_key(self, ticker: str) -> str:
         """Bucket for the hourly entry limit: the ticker's sector, or one
         global bucket (``entry_rate_scope``)."""
         if str(getattr(self.preset, "entry_rate_scope", "global")) == "sector":
-            return sector_for(ticker)
+            # E6: a correlated-risk group (rates = TLT + XLU …) shares one
+            # bucket, so XLU waits an hour after a TLT entry.
+            from trading_agent.position_caps import risk_group_for
+            group = risk_group_for(ticker)
+            return f"group:{group}" if group else sector_for(ticker)
         return "__all__"
 
     def _count_entry(self, ticker: str) -> None:
@@ -2843,8 +2932,11 @@ class TradingAgent:
                          [l.option_type for l in plan.legs if l.action == "sell"])
                      or self._ladder_block(ticker, plan.expiration)
                      or self._stop_cooldown_block(ticker, plan)
+                     or self._direction_risk_block(ticker, plan, balance)
                      or self._trend_filter_block(ticker, plan, analysis)
                      or self._entry_confirmation_block(ticker, plan))
+            if not block:
+                self._net_delta_shadow(ticker, plan)
             if block:
                 logger.info("[%s] %s", ticker, block)
                 verdict = dataclasses.replace(
