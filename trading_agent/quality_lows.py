@@ -31,8 +31,11 @@ Once a day, for every ticker in the watchlist plus ``EXTRA_TICKERS``:
    server's chains: deep ITM LEAPS call by default; a call debit spread
    up to the 52-week high when implied volatility is rich vs realized;
    a cash-secured put at the base as the patient alternative; nothing
-   in the two weeks before earnings. Contracts sized to
-   ``max_premium_pct`` of account equity.
+   in the two weeks before earnings. Also priced: a fixed-width call
+   spread (≈ 10 % of spot wide, for blue chips) and fractional shares
+   sized to equity and to the loss at the stop. Contracts sized to
+   ``max_premium_pct`` of account equity, and again to ``alt_premium_pct``
+   (``*_alt`` fields, ``affordable_alt``).
 
 Rows go to ``trade_journal/quality_lows.jsonl`` (one per ticker per day).
 
@@ -103,8 +106,17 @@ class QualityLowsConfig:
     spread_dte: Tuple[int, int] = (120, 270)
     spread_long_delta: float = 0.60
     csp_dte: Tuple[int, int] = (30, 60)
+    # Fixed-width call spread (blue chips: a 10 % recovery, not a run to the high)
+    fixed_long_delta: float = 0.55
+    fixed_width_pct: float = 0.10         # short strike ≈ long strike + 10 % of spot
+    # Exits shared by the shares structure and the backtest
+    stop_below_base: float = 0.08         # stop on a close 8 % below the base low
+    target_below_high: float = 0.03       # take profit within 3 % of the 52-week high
     # Sizing
     max_premium_pct: float = 0.02         # premium per position, share of equity (= max loss)
+    alt_premium_pct: float = 0.05         # second cap recorded beside it (``*_alt`` fields)
+    shares_pct: float = 0.075             # shares structure: notional, share of equity
+    shares_max_risk_pct: float = 0.015    # …cut so the loss at the stop is ≤ this share of equity
     max_csp_cash_pct: float = 0.15        # cash secured by one put, share of equity
     max_per_sector: int = 2
     # News-reading drop-cause label (drop_cause_llm, §2.4)
@@ -422,14 +434,77 @@ def price_csp(puts: List[Dict[str, Any]], base_low: float) -> Optional[Dict[str,
             "effective_entry": round(leg["strike"] - leg["bid"], 2)}
 
 
+def price_fixed_width_spread(calls: List[Dict[str, Any]], spot: float,
+                             cfg: QualityLowsConfig = DEFAULT_CONFIG) -> Optional[Dict[str, Any]]:
+    """Long call nearest ``fixed_long_delta``; short at the listed strike
+    nearest long strike + ``fixed_width_pct`` × spot. Built for blue chips:
+    near their highs the spread "up to the 52-week high" has no room, and
+    for $700–1,000 stocks it is wider than the account can pay
+    (CAT $10,150, COST $5,690 on 2026-10-23)."""
+    long_c = _nearest_delta(calls, cfg.fixed_long_delta)
+    if long_c is None or not spot:
+        return None
+    lg = _leg(long_c)
+    target = lg["strike"] + cfg.fixed_width_pct * spot
+    shorts = [c for c in calls if _quote(c) is not None and float(c.get("strike") or 0) > lg["strike"]]
+    if not shorts:
+        return None
+    sh = _leg(min(shorts, key=lambda c: abs(float(c["strike"]) - target)))
+    debit, width = lg["ask"] - sh["bid"], sh["strike"] - lg["strike"]
+    if debit <= 0 or width <= 0:
+        return None
+    return {"legs": [lg, sh], "cost_per_contract": round(debit * 100, 2),
+            "width": round(width, 2), "max_value": round(width * 100, 2),
+            "reward_risk": round((width - debit) / debit, 2),
+            "breakeven": round(lg["strike"] + debit, 2),
+            "move_to_max_pct": round((sh["strike"] / spot - 1) * 100, 2)}
+
+
+def price_shares(pf: Dict[str, Any], equity: Optional[float],
+                 cfg: QualityLowsConfig = DEFAULT_CONFIG) -> Optional[Dict[str, Any]]:
+    """Fractional shares worth ``shares_pct`` of equity, cut so a close at
+    the stop (``stop_below_base`` under the base low) loses at most
+    ``shares_max_risk_pct`` of equity. Target: ``target_below_high`` under
+    the 52-week high. No chain needed; no time decay."""
+    spot = pf.get("close")
+    if not equity or not spot or spot <= 0:
+        return None
+    stop = pf["base_low"] * (1 - cfg.stop_below_base)
+    target = pf["high_52w"] * (1 - cfg.target_below_high)
+    if stop >= spot:
+        return None
+    by_notional = equity * cfg.shares_pct / spot
+    by_risk = equity * cfg.shares_max_risk_pct / (spot - stop)
+    qty = math.floor(min(by_notional, by_risk) * 10000) / 10000
+    loss, gain = qty * (spot - stop), qty * (target - spot)
+    return {"shares": qty, "notional": round(qty * spot, 2),
+            "pct_of_equity": round(qty * spot / equity * 100, 2),
+            "sized_by": "notional" if by_notional <= by_risk else "stop_risk",
+            "stop": round(stop, 2), "loss_at_stop": round(loss, 2),
+            "loss_at_stop_pct": round(loss / equity * 100, 2),
+            "target": round(target, 2), "gain_at_target": round(gain, 2),
+            "reward_risk": round(gain / loss, 2) if loss > 0 else None,
+            "fits": qty > 0}
+
+
 def size_contracts(cost_per_contract: Optional[float], equity: Optional[float],
-                   cfg: QualityLowsConfig = DEFAULT_CONFIG) -> Dict[str, Any]:
-    """Contracts that fit ``max_premium_pct`` of equity (premium = max loss)."""
+                   cfg: QualityLowsConfig = DEFAULT_CONFIG, pct: Optional[float] = None
+                   ) -> Dict[str, Any]:
+    """Contracts that fit ``pct`` (default ``max_premium_pct``) of equity
+    (premium = max loss)."""
     if not cost_per_contract or not equity or cost_per_contract <= 0:
         return {"budget": None, "contracts": 0, "fits": False}
-    budget = equity * cfg.max_premium_pct
+    budget = equity * (cfg.max_premium_pct if pct is None else pct)
     n = int(budget // cost_per_contract)
     return {"budget": round(budget, 2), "contracts": n, "fits": n >= 1}
+
+
+def _sized(cost: Optional[float], equity: Optional[float], cfg: QualityLowsConfig) -> Dict[str, Any]:
+    """Sizing at ``max_premium_pct`` plus the same at ``alt_premium_pct``
+    as ``budget_alt`` / ``contracts_alt`` / ``fits_alt``."""
+    alt = size_contracts(cost, equity, cfg, cfg.alt_premium_pct)
+    return {**size_contracts(cost, equity, cfg),
+            **{f"{k}_alt": v for k, v in alt.items()}}
 
 
 def _chain(get, ticker: str, exp: date, kind: str, pause_s: float) -> List[Dict[str, Any]]:
@@ -460,19 +535,30 @@ def structure_quotes(ticker: str, pf: Dict[str, Any], choice: str, today: date, 
             q = price_leaps(calls, spot, (exp - today).days, cfg)
             if q:
                 out["leaps_call"] = {"expiration": exp.isoformat(), "dte": (exp - today).days, **q,
-                                     **size_contracts(q["cost_per_contract"], equity, cfg)}
+                                     **_sized(q["cost_per_contract"], equity, cfg)}
         exp, calls = _first_chain(get, ticker, today, cfg.spread_dte, "call", pause_s)
         if exp:
             q = price_debit_spread(calls, pf["high_52w"], cfg)
             if q:
                 out["call_debit_spread"] = {"expiration": exp.isoformat(), "dte": (exp - today).days,
-                                            **q, **size_contracts(q["cost_per_contract"], equity, cfg)}
+                                            **q, **_sized(q["cost_per_contract"], equity, cfg)}
             budget = size_contracts(1.0, equity, cfg)["budget"]
             q = price_fitting_spread(calls, budget, cfg)
             if q:
                 out["call_debit_spread_fit"] = {"expiration": exp.isoformat(),
                                                 "dte": (exp - today).days, **q,
-                                                **size_contracts(q["cost_per_contract"], equity, cfg)}
+                                                **_sized(q["cost_per_contract"], equity, cfg)}
+            budget_alt = size_contracts(1.0, equity, cfg, cfg.alt_premium_pct)["budget"]
+            q = price_fitting_spread(calls, budget_alt, cfg)
+            if q:
+                out["call_debit_spread_fit_alt"] = {"expiration": exp.isoformat(),
+                                                    "dte": (exp - today).days, **q,
+                                                    **_sized(q["cost_per_contract"], equity, cfg)}
+            q = price_fixed_width_spread(calls, spot, cfg)
+            if q:
+                out["fixed_width_spread"] = {"expiration": exp.isoformat(),
+                                             "dte": (exp - today).days, **q,
+                                             **_sized(q["cost_per_contract"], equity, cfg)}
     exp, puts = _first_chain(get, ticker, today, cfg.csp_dte, "put", pause_s)
     if exp:
         q = price_csp(puts, pf["base_low"])
@@ -570,20 +656,34 @@ def evaluate_ticker(ticker: str, today: date, deps: Deps,
             long_iv = (sp.get("legs") or [{}])[0].get("iv") if sp else None
             iv = long_iv
         choice = choose_structure(iv, pf["rv30"], dte_e, cfg)
+        shares = price_shares(pf, deps.equity, cfg)
+        if shares:
+            quotes["shares"] = shares
         row.update({"days_to_earnings": dte_e, "iv": iv, "iv_rv": (round(iv / pf["rv30"], 2)
                     if iv and pf["rv30"] else None), "structure": choice, "quotes": quotes,
-                    "affordable": affordable_structure(choice, quotes)})
+                    "affordable": affordable_structure(choice, quotes),
+                    "affordable_alt": affordable_structure(choice, quotes, "fits_alt")})
     return row
 
 
-def affordable_structure(choice: str, quotes: Dict[str, Any]) -> Optional[str]:
-    """The first priced structure that fits its size cap, preferring the
-    chosen one, then the budget-fitting spread, then the cash-secured put.
-    None when nothing fits (or for ``wait_earnings``)."""
+# Spread to the high, then the widest spread that fits with reward/risk ≥ 1
+# (at the 2 % budget, then at the alt budget), then the fixed-width spread
+# (no reward/risk floor), then the CSP.
+AFFORDABLE_ORDER = ("call_debit_spread", "call_debit_spread_fit", "call_debit_spread_fit_alt",
+                    "fixed_width_spread", "cash_secured_put")
+
+
+def affordable_structure(choice: str, quotes: Dict[str, Any], key: str = "fits") -> Optional[str]:
+    """The first priced option structure that fits its size cap, preferring
+    the chosen one, then ``AFFORDABLE_ORDER``. ``key="fits_alt"`` asks the
+    same at ``alt_premium_pct`` (the CSP's cash cap has no alt; its ``fits``
+    is used). Shares are not options and are not in the list. None when
+    nothing fits (or for ``wait_earnings``)."""
     if choice == "wait_earnings":
         return None
-    for k in (choice, "call_debit_spread_fit", "cash_secured_put"):
-        if (quotes.get(k) or {}).get("fits"):
+    for k in (choice,) + AFFORDABLE_ORDER:
+        q = quotes.get(k) or {}
+        if q.get(key, q.get("fits")):
             return k
     return None
 
@@ -728,7 +828,14 @@ def report(path: Path = STORE_PATH) -> List[str]:
             q = (r.get("quotes") or {}).get(r["structure"]) or {}
             line += (f" → {r['structure']} cost={q.get('cost_per_contract')} "
                      f"contracts={q.get('contracts')} affordable={r.get('affordable')}"
+                     f" affordable_alt={r.get('affordable_alt')}"
                      f"{' CAPPED' if r.get('sector_capped') else ''}")
+            fw = (r.get("quotes") or {}).get("fixed_width_spread") or {}
+            if fw:
+                line += f" fixed={fw.get('cost_per_contract')}x{fw.get('contracts_alt')}"
+            sh = (r.get("quotes") or {}).get("shares") or {}
+            if sh:
+                line += f" shares={sh.get('shares')} (${sh.get('notional')}, stop -{sh.get('loss_at_stop_pct')}%)"
         if r.get("reasons"):
             line += "  [" + "; ".join(x for x in r["reasons"] if not x.startswith("missing:")) + "]"
         lines.append(line)

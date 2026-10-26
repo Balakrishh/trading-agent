@@ -193,6 +193,56 @@ def test_size_contracts():
     assert ql.size_contracts(500.0, None)["fits"] is False
 
 
+# Blue-chip-like chain: spot 320, strikes every $5.
+BLUE = [_c(k, b, a, d) for k, b, a, d in [
+    (300, 34.0, 35.0, 0.70), (315, 25.0, 26.0, 0.58), (320, 22.0, 23.0, 0.54),
+    (330, 17.0, 17.8, 0.46), (350, 9.0, 9.6, 0.30), (355, 7.6, 8.1, 0.27), (380, 3.0, 3.4, 0.12)]]
+
+
+def test_fixed_width_spread_targets_ten_percent_of_spot():
+    q = ql.price_fixed_width_spread(BLUE, 320.0)
+    # long Δ≈0.55 → 320; short nearest 320 + 32 = 352 → 350
+    assert [l["strike"] for l in q["legs"]] == [320, 350]
+    assert q["cost_per_contract"] == 1400.0 and q["width"] == 30
+    assert q["reward_risk"] == round((30 - 14) / 14, 2)
+    assert q["move_to_max_pct"] == round((350 / 320 - 1) * 100, 2)
+    assert ql.price_fixed_width_spread([], 320.0) is None
+    assert ql.price_fixed_width_spread(BLUE[-1:], 320.0) is None        # no strike above the long
+
+
+def test_price_shares_sized_by_notional_or_stop_risk():
+    pf = {"close": 320.0, "base_low": 300.0, "high_52w": 400.0}
+    q = ql.price_shares(pf, 28918.0)
+    # stop 276, target 388; notional 7.5 % → 6.7777 sh; risk 1.5 % / 44 → 9.858 sh
+    assert q["sized_by"] == "notional" and q["shares"] == 6.7776
+    assert q["stop"] == 276.0 and q["target"] == 388.0
+    assert q["pct_of_equity"] <= 7.5 and q["loss_at_stop_pct"] <= 1.5 and q["fits"] is True
+    wide = ql.price_shares({"close": 320.0, "base_low": 200.0, "high_52w": 400.0}, 28918.0)
+    assert wide["sized_by"] == "stop_risk" and wide["loss_at_stop_pct"] <= 1.5
+    assert ql.price_shares(pf, None) is None
+    assert ql.price_shares({"close": 250.0, "base_low": 300.0, "high_52w": 400.0}, 28918.0) is None
+
+
+def test_size_contracts_alt_pct():
+    assert ql.size_contracts(1400.0, 28918.0, pct=0.05) == {"budget": 1445.9, "contracts": 1, "fits": True}
+    s = ql._sized(1400.0, 28918.0, CFG)
+    assert s["fits"] is False and s["fits_alt"] is True and s["contracts_alt"] == 1
+
+
+def test_affordable_structure_alt_and_order():
+    quotes = {"leaps_call": {"fits": False, "fits_alt": False},
+              "call_debit_spread": {"fits": False, "fits_alt": True},
+              "fixed_width_spread": {"fits": False, "fits_alt": True},
+              "call_debit_spread_fit": {"fits": True, "fits_alt": True},
+              "cash_secured_put": {"fits": False}, "shares": {"fits": True}}
+    assert ql.affordable_structure("leaps_call", quotes) == "call_debit_spread_fit"
+    assert ql.affordable_structure("leaps_call", quotes, "fits_alt") == "call_debit_spread"
+    only_shares = {"shares": {"fits": True}, "cash_secured_put": {"fits": False}}
+    assert ql.affordable_structure("leaps_call", only_shares) is None        # shares are not options
+    assert ql.affordable_structure("leaps_call", {"cash_secured_put": {"fits": True}}, "fits_alt") \
+        == "cash_secured_put"
+
+
 def test_affordable_structure_order():
     quotes = {"leaps_call": {"fits": False}, "call_debit_spread_fit": {"fits": True},
               "cash_secured_put": {"fits": True}}
@@ -209,9 +259,17 @@ def test_structure_quotes_prices_all_and_caps_csp():
         return {"contracts": puts if "option_type=put" in path else CALLS}
     pf = {"close": 65.85, "high_52w": 116.7, "base_low": 64.1}
     out = ql.structure_quotes("NFLX", pf, "leaps_call", date(2026, 10, 26), get, 28918.0, pause_s=0)
-    assert set(out) == {"leaps_call", "call_debit_spread", "call_debit_spread_fit", "cash_secured_put"}
+    assert set(out) == {"leaps_call", "call_debit_spread", "call_debit_spread_fit",
+                        "call_debit_spread_fit_alt", "fixed_width_spread", "cash_secured_put"}
+    # Widest spread under $1,446 with reward/risk ≥ 1: 65/115 at $717.
+    assert [l["strike"] for l in out["call_debit_spread_fit_alt"]["legs"]] == [65, 115]
     assert out["cash_secured_put"]["fits"] is False          # $6,400 > 15 % of $28,918
     assert out["call_debit_spread_fit"]["fits"] is True
+    # Both caps on every option structure: $1,840 LEAPS fails 2 % ($578) and 5 % ($1,446).
+    leaps = out["leaps_call"]
+    assert leaps["fits"] is False and leaps["fits_alt"] is False and leaps["budget_alt"] == 1445.9
+    spread = out["call_debit_spread"]                         # $717 to the high
+    assert spread["fits"] is False and spread["fits_alt"] is True and spread["contracts_alt"] == 2
 
 
 def test_structure_quotes_tolerates_empty_chains():
@@ -253,6 +311,15 @@ def test_turn_row_has_structure_and_quotes():
     assert row["iv_rv"] > CFG.iv_rich_ratio
     assert row["structure"] == "call_debit_spread" and "leaps_call" in row["quotes"]
     assert row["sector_etf"] == "XLC" and row["affordable"] == "call_debit_spread_fit"
+    assert "fixed_width_spread" in row["quotes"] and row["quotes"]["shares"]["fits"] is True
+    assert row["affordable_alt"] is not None
+
+
+def test_turn_row_prices_shares_without_chains():
+    d, _ = _deps(get=None)
+    row = ql.evaluate_ticker("NFLX", date(2026, 10, 26), d, {})
+    assert row["stage"] in ("turn", "confirmed")
+    assert set(row["quotes"]) == {"shares"} and row["affordable"] is None
 
 
 def test_turn_inside_earnings_blackout_waits():

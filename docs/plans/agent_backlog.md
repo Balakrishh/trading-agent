@@ -64,7 +64,7 @@ All open items below, grouped by theme and ordered. Older sections keep the hist
 - [x] *(Done 2026-10-26, skill 67.)* **I5 Analyst forecasts and revisions** (12.3a) — `analyst_estimates.py`: Yahoo consensus EPS now vs 7–90 days ago, up / down revisions, revenue / EPS growth estimates, price targets, recommendation trend; no key, cached 20 h.
 - [ ] **I2 EDGAR quarterly fundamentals history** (12.2).
 - [x] *(Done 2026-10-26, skill 67 §3.6a.)* **I3 "Why did it drop" classifier** (12.3) — replaces the disabled 24 h FinGPT path for this use.
-- [ ] **I4 Quality-at-lows sleeve** (12.4–12.6) — *12.4 backtest and 12.5 shadow scan done 2026-10-26 (skill 67, timer 15:40 ET).* Next: 6–8 weeks of shadow rows, then the 12.6 paper decision.
+- [ ] **I4 Quality-at-lows sleeve** (12.4–12.6) — *12.4 backtest and 12.5 shadow scan done 2026-10-26 (skill 67, timer 15:40 ET).* Next: 6–8 weeks of shadow rows, then the 12.6 paper decision. *2026-10-26:* rows also price a fixed-width spread and fractional shares and record fits at both 2 % and 5 % (`affordable_alt`) — the 12.6 decision includes the premium cap (2 % vs 5 %) and a total sleeve cap (~15 % of equity, needs hypothetical-position tracking, not built).
 
 **Order:** this week A + D1/D2/C2/E5 + B1/B2 (no trading change) → next week C1, E1 → from 10/26 B3/B4 if the evidence supports them, then E2/E3 → later D3/D4, A6/A7, D5, F.
 
