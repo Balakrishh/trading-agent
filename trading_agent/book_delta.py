@@ -122,21 +122,22 @@ def shadow_verdict(book_pct: Optional[float], candidate_delta: Optional[float],
     return None
 
 
-def load_state(path: Path = STATE_PATH) -> Dict[str, Any]:
+def load_state(path: Optional[Path] = None) -> Dict[str, Any]:
     try:
-        return json.loads(path.read_text())
+        return json.loads((path or STATE_PATH).read_text())
     except (OSError, ValueError):
         return {}
 
 
-def save_state(state: Dict[str, Any], path: Path = STATE_PATH) -> None:
+def save_state(state: Dict[str, Any], path: Optional[Path] = None) -> None:
+    path = path or STATE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, default=str))
     tmp.replace(path)
 
 
-def record_reading(reading: Dict[str, Any], day: str, path: Path = STATE_PATH) -> Dict[str, Any]:
+def record_reading(reading: Dict[str, Any], day: str, path: Optional[Path] = None) -> Dict[str, Any]:
     """Store the latest reading; today's shadow keys survive, older ones reset."""
     state = load_state(path)
     keys = state.get("shadow_keys") if state.get("day") == day else []
@@ -146,7 +147,7 @@ def record_reading(reading: Dict[str, Any], day: str, path: Path = STATE_PATH) -
     return state
 
 
-def first_shadow_today(key: str, day: str, path: Path = STATE_PATH) -> bool:
+def first_shadow_today(key: str, day: str, path: Optional[Path] = None) -> bool:
     """True (and remembered) the first time ``key`` is seen on ``day``."""
     state = load_state(path)
     if state.get("day") != day:

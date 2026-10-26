@@ -206,6 +206,13 @@ def _isolate_entry_and_trail_state(tmp_path, monkeypatch):
     monkeypatch.setattr(profit_trail, "STATE_PATH", tmp_path / "profit_trail.json")
     from trading_agent import trading_halt
     monkeypatch.setattr(trading_halt, "STATE_PATH", tmp_path / "trading_halt.json")
+    # 2026-10-26: a suite run in the live checkout read the agent's real
+    # position snapshot (list_positions merges it) and wrote the debit
+    # ladder and book-delta state files under trade_journal/.
+    from trading_agent import book_delta, debit_ladder, position_snapshot
+    monkeypatch.setattr(position_snapshot, "SNAPSHOT_PATH", tmp_path / "position_valuations.json")
+    monkeypatch.setattr(book_delta, "STATE_PATH", tmp_path / "book_delta.json")
+    monkeypatch.setattr(debit_ladder, "STATE_PATH", tmp_path / "debit_ladder_shadow.json")
 
 
 _REPO_ENV = (Path(__file__).resolve().parent.parent / ".env").resolve()

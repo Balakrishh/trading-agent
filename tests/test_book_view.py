@@ -173,7 +173,6 @@ def test_agent_net_delta_shadow_journals_once(tmp_path, monkeypatch):
     from trading_agent.agent import TradingAgent
     from trading_agent.strategy_presets import PRESETS
     monkeypatch.setattr(bd, "STATE_PATH", tmp_path / "bd.json")
-    monkeypatch.setattr(bd.first_shadow_today, "__defaults__", (tmp_path / "bd.json",))
     a = TradingAgent.__new__(TradingAgent)
     a.preset = PRESETS["balanced"]
     a._book_delta_pct = -0.45
