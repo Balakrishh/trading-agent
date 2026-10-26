@@ -36,8 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from trading_agent import quality_lows as ql  # noqa: E402
 
 WINDOW = 300            # bars handed to price_features each day (≥ 252)
-STOP_BELOW_BASE = 0.08
-TARGET_NEAR_HIGH = 0.03
+STOP_BELOW_BASE = ql.DEFAULT_CONFIG.stop_below_base      # shared with the shares structure
+TARGET_NEAR_HIGH = ql.DEFAULT_CONFIG.target_below_high
 TRAIL_AFTER_GAIN = 0.10
 MAX_HOLD = 126
 
