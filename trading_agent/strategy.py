@@ -466,6 +466,14 @@ class StrategyPlanner:
         credit_plan = self._plan_credit_by_regime(ticker, analysis)
         if credit_plan.valid:
             return credit_plan
+        # E7 (backlog 11.4): no put-debit fallback on tickers whose legs
+        # always quote too wide — it only ever ended in leg_spread_wide.
+        if playbook == "put_debit" and ticker in tuple(
+                getattr(self.preset, "put_debit_excluded_tickers", ()) or ()):
+            credit_plan.rejection_reason = (
+                f"{credit_plan.rejection_reason}; put debit skipped "
+                f"(put_debit_excluded_tickers: legs too wide)")
+            return credit_plan
         fallback = self._plan_playbook(ticker, analysis, playbook)
         if fallback is None:
             return credit_plan

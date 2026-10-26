@@ -66,6 +66,7 @@ def test_main_pages_once_and_keeps_state_when_send_fails(monkeypatch, tmp_path):
     (tmp_path / "trade_journal").mkdir()
     monkeypatch.setattr(lv, "assess", lambda *a: ("down", "no agent cycle for 30 min"))
     monkeypatch.setattr(lv, "server_healthy", lambda: True)
+    monkeypatch.setattr(lv, "schwab_ready", lambda: (True, ""))
     monkeypatch.setattr(lv, "is_within_market_hours", lambda now: True)
     sent = []
     from trading_agent import telegram_notifier as tn

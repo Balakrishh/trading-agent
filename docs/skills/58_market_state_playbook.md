@@ -268,6 +268,8 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 - **VIX3M source** — yfinance `^VIX3M` daily bar (the backlog suggested Schwab `$VIX3M.X`; the data server has no index-quote route yet). Unavailable → term-structure rules skipped.
 - **Daily vs intraday inputs** — SPY averages use daily closes through the prior session (cached 4 h); VIX/VIX3M use the latest daily bar, which is live during the session. The CAUTION hysteresis absorbs intraday VIX noise around 20.
 
+- **Six CAUTION sessions, breadth input checked (2026-10-26, backlog E1).** CAUTION held Oct 16–23 with reasons that changed almost daily (SPY < SMA-50, VIX/VIX3M ≥ 0.95, breadth < 50 %). Breadth comes from the 14 equity tickers of `TICKERS` (`breadth_universe`). Over the same sessions the 11 Select Sector SPDRs read 36–64 % above their 50-day (45 % on 10-23 vs the watchlist's 43 %), and SPY below its 50-day and the VIX term ratio were independent CAUTION reasons — so switching breadth to the SPDRs would not have changed the state. No change made; E1 stays open only if a future CAUTION run rests on breadth alone.
+
 ## 5. Cross-References
 
 - `11_six_regime_classifier.md` — per-ticker regime and `iv_rank` feed `playbook_for`.
@@ -279,4 +281,4 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 
 ---
 
-*Last verified against repo HEAD on 2026-10-14.*
+*Last verified against repo HEAD on 2026-10-26.*

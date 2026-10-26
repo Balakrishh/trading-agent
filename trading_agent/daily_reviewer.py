@@ -72,6 +72,11 @@ class ReviewContext:
     # a watchlist_proposal edits — and the shadow trend-filter tally.
     trading_universe: List[str] = field(default_factory=list)
     trend_filters:   Dict[str, Any] = field(default_factory=dict)
+    # Append-only (2026-10-26, F6 / backlog 11.3): the whole open book —
+    # contracts, total max loss, broker legs, mid P&L, totals by direction
+    # and risk group. Before this the reviewer saw only the day's opens and
+    # closes and said the GLD Nov 6 spread "never appeared" (opened 10-05).
+    open_book:       Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -237,7 +242,22 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
         cold_start=cold_start,
         trading_universe=_load_trading_universe(),
         trend_filters=_safe_trend_tally(reader),
+        open_book=_safe_open_book(reader),
     )
+
+
+def _safe_open_book(reader) -> Dict[str, Any]:
+    """``book_view.open_book`` over the journal's open trades and the
+    agent's last valuation snapshot; {} on any failure."""
+    try:
+        from trading_agent.book_delta import load_state as load_book_delta  # noqa: PLC0415
+        from trading_agent.book_view import journal_row, open_book          # noqa: PLC0415
+        from trading_agent.position_snapshot import read_snapshot          # noqa: PLC0415
+        return open_book([journal_row(o) for o in reader.open_trades()], read_snapshot(),
+                         book_delta=load_book_delta() or None)
+    except Exception as exc:                                       # noqa: BLE001
+        log.warning("Could not build the open book (%s).", exc)
+        return {}
 
 
 def _safe_trend_tally(reader) -> Dict[str, Any]:
@@ -266,7 +286,12 @@ _SYSTEM_PROMPT = (
     "Watchlist tab, which is what a watchlist_proposal edits — a ticker "
     "in trading_universe but not in watchlist is expected. macro is the "
     "agent's last whole-market risk snapshot. trend_filters counts the "
-    "shadow relative-strength / pullback verdicts. When you propose a preset change, use "
+    "shadow relative-strength / pullback verdicts. open_book is every "
+    "open position, not only today's: max_loss_per_contract × contracts = "
+    "total_max_loss; judge risk on total_max_loss and the totals (by "
+    "direction and by correlated-risk group), and debit cost per dollar of "
+    "width, not in dollars. A position with in_broker_snapshot=false was "
+    "not in the agent's last broker valuation. When you propose a preset change, use "
     "one of these fields only: profit_target_pct, edge_buffer, min_pop, "
     "max_leg_spread_cents, defensive_roll_enabled. Never propose changes "
     "to max_risk_pct, max_delta, or dte_* fields."
@@ -287,6 +312,7 @@ def _build_user_prompt(ctx: ReviewContext) -> str:
         "macro":          ctx.macro,
         "trend_filters":  ctx.trend_filters,
         "recent_alerts":  ctx.recent_alerts,
+        "open_book":      ctx.open_book,
     }
     return (
         "Review this day's activity and return the JSON structure "

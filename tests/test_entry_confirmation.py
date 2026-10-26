@@ -108,10 +108,10 @@ def test_agent_gates(tmp_path, monkeypatch):
     a._begin_entry_gates()
     assert a._entry_confirmation_block("IWM", plan()) == "entry_confirming (1/2)"
     assert a._entry_rate_gate("IWM") is None
-    a._count_entry("IWM")                                            # Broad Market used
-    skip = a._entry_rate_gate("QQQ")                                 # same sector → held
+    a._count_entry("IWM")                                            # us_equity group used
+    skip = a._entry_rate_gate("QQQ")                                 # same risk group → held
     assert skip["reason"] == "Entry rate limit" and rows[-1]["action"] == "skipped_entry_rate"
-    assert rows[-1]["raw_signal"]["scope"] == "Broad Market"
+    assert rows[-1]["raw_signal"]["scope"] == "group:us_equity"     # E6, 2026-10-26
     assert a._entry_rate_gate("XLF") is None                         # other sector → free
     a._entry_confirm.save()
     a._begin_entry_gates()

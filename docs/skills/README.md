@@ -50,7 +50,7 @@ Skills 32–35 ship alongside the live-deployment hardening pass. Phase 1 covers
 | 34 | [Exception monitor — operator visibility for silenced failures](34_exception_monitor.md) | ops | `exception_monitor.py:ExceptionMonitor`, `agent.py` + `executor.py` + `strategy.py` + `market_data_schwab.py` call sites, `telegram_notifier.py:notify_silenced_exception`, `journal_reader.py:silenced_exceptions_today` |
 | 35 | [Close-event collaborators (extracted from `_journal_close_event`)](35_close_event_collaborators.md) | architecture | `close_event_collaborators.py`, `agent.py` construction + delegation |
 | 36 | [Ticker filters — early-return pipeline](36_ticker_filters.md) | architecture | `ticker_filters.py`, `agent.py` construction + delegation |
-| 37 | [Position-cap dedup (per-ticker + per-sector)](37_position_caps.md) | risk | `position_caps.py`, `agent.py` Stage 2 call site |
+| 37 | [Position caps and book-level risk (per-ticker, per-sector, direction / risk groups, stop cool-down, net delta)](37_position_caps.md) | risk | `position_caps.py`, `book_delta.py`, `agent.py` Stage 2 call site |
 | 38 | [Backtester slippage + commissions](38_backtest_slippage.md) | backtest | `backtest/runner.py`, `backtest/account.py`, `backtest/cycle.py` |
 | 39 | [Backtester volatility skew](39_skew_model.md) | backtest | `backtest/skew_model.py`, `backtest/synthetic_chain.py` |
 

@@ -4,7 +4,9 @@ The agent cannot report its own death, so this runs as a separate
 one-shot (systemd timer every 5 min on weekdays, runbook 08). During the
 NYSE session, once ``GRACE_AFTER_OPEN_MIN`` has passed since the open, the
 newest row in ``signals_live.jsonl`` must be younger than ``STALE_MIN``
-and the data server's ``/health`` must answer. Otherwise one error-channel
+and the data server's ``/health`` must answer, and its ``/ready`` must
+confirm Schwab returns data (A8, 2026-10-26 — on 10-20 the token was dead
+for 10 hours while ``/health`` stayed 200). Otherwise one error-channel
 Telegram alert goes out per outage; a "recovered" note follows when both
 are healthy again. State lives in ``trade_journal/liveness_state.json``.
 
@@ -34,6 +36,7 @@ TAIL_BYTES = 65536          # enough for the last several journal rows
 JOURNAL = Path("trade_journal/signals_live.jsonl")
 STATE_FILE = Path("trade_journal/liveness_state.json")
 HEALTH_URL = "http://127.0.0.1:8765/health"
+READY_URL = "http://127.0.0.1:8765/ready"
 
 
 @dataclass
@@ -64,7 +67,8 @@ def last_activity(path: Path = JOURNAL) -> Optional[datetime]:
 
 
 def assess(now: datetime, last: Optional[datetime], in_session: bool,
-           server_ok: bool) -> Tuple[str, str]:
+           server_ok: bool, schwab_ok: bool = True, schwab_detail: str = ""
+           ) -> Tuple[str, str]:
     """("idle" | "ok" | "down", reason). Pure — no I/O."""
     tz = US_MARKET_PROFILE.timezone
     now_et = now.astimezone(tz)
@@ -83,6 +87,9 @@ def assess(now: datetime, last: Optional[datetime], in_session: bool,
                             f"(last row {last.astimezone(tz):%H:%M} ET)")
     if not server_ok:
         problems.append(f"data server not answering {HEALTH_URL}")
+    elif not schwab_ok:
+        problems.append("Schwab not returning data (data server /ready: "
+                        f"{schwab_detail or 'not ready'}) — re-login may be needed")
     return ("down", "; ".join(problems)) if problems else ("ok", "")
 
 
@@ -92,6 +99,23 @@ def server_healthy(url: str = HEALTH_URL) -> bool:
             return resp.status == 200
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
+
+
+def schwab_ready(url: str = READY_URL) -> Tuple[bool, str]:
+    """(ok, detail) from the data server's ``/ready`` (Schwab auth probe).
+    Unreachable counts as ok here: ``server_healthy`` reports that."""
+    try:
+        with urllib.request.urlopen(url, timeout=20) as resp:
+            return resp.status == 200, ""
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8", errors="replace"))
+            detail = str((body.get("detail") or {}).get("detail") or body)[:200]
+        except (ValueError, AttributeError):
+            detail = f"HTTP {exc.code}"
+        return False, detail
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return True, ""
 
 
 def load_state(path: Path = STATE_FILE) -> LivenessState:
@@ -129,8 +153,10 @@ def main(argv=None) -> int:
         pass
 
     now = datetime.now(timezone.utc)
-    status, reason = assess(now, last_activity(),
-                            is_within_market_hours(now), server_healthy())
+    in_session = is_within_market_hours(now)
+    schwab_ok, schwab_detail = schwab_ready() if in_session else (True, "")
+    status, reason = assess(now, last_activity(), in_session, server_healthy(),
+                            schwab_ok, schwab_detail)
     state = load_state()
     new_state, alert = step(state, status, reason, now)
     print(f"liveness {now:%Y-%m-%dT%H:%MZ}: {status}"

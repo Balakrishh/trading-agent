@@ -28,7 +28,7 @@ def assemble_context(review_date: Optional[str] = None) -> ReviewContext:
     """Gather every field the LLM needs. No LLM call yet."""
 ```
 
-Reads: today's opens/closes/rejects/PnL (from `JournalReader`), the currently-loaded `PresetConfig`, the agent's scan list (`trading_universe`, from `TICKERS`), the dashboard Watchlist tab (`watchlist` — what a `watchlist_proposal` edits), a best-effort macro snapshot, today's shadow trend-filter tally (`trend_filters`), and today's `ExceptionMonitor` silenced-exception list. All fields are pure data; `ReviewContext` is a frozen dataclass so tests can pin an exact input.
+Reads: today's opens/closes/rejects/PnL (from `JournalReader`), the currently-loaded `PresetConfig`, the agent's scan list (`trading_universe`, from `TICKERS`), the dashboard Watchlist tab (`watchlist` — what a `watchlist_proposal` edits), a best-effort macro snapshot, today's shadow trend-filter tally (`trend_filters`), today's `ExceptionMonitor` silenced-exception list, and (2026-10-26, F6) the whole open book (`open_book` — `book_view.open_book`: every open position with contracts, `total_max_loss`, broker legs, mid P&L, plus totals by direction and correlated group and the E4 net-delta reading). Before, the reviewer saw only the day's opens and closes, so on 10-23 it said the GLD Nov 6 spread "never appeared" (opened 10-05) and asked about a TLT count it could not see. The system prompt tells it `max_loss_per_contract × contracts = total_max_loss` and to judge debit cost per dollar of width. All fields are pure data; `ReviewContext` is a frozen dataclass so tests can pin an exact input.
 
 ### 3.2 LLM prompt allowlist
 
@@ -137,6 +137,7 @@ LLM and checks the parsed output.
 
 - **Claude CLI failures (§3.5.1).** CLI missing or crashing → empty review with `<error: …>` in `raw_llm_text`, no state change. A resume that fails (session deleted) starts one fresh session in the same run. An answer that is not JSON → empty review, the text kept in `raw_llm_text`. The allowlist filter (§3.2) applies to the CLI's answer exactly as to `LLMClient`'s.
 - **Session growth.** A resumed session re-reads its history every day (24 h apart, so no prompt-cache hits); rotation caps the daily read at ~60k tokens.
+- **Open book unavailable** — any failure building it (journal unreadable, snapshot missing) gives `open_book: {}` and a warning; the review still runs. A stale snapshot is visible as `snapshot_age_seconds`; rows not in it have `in_broker_snapshot: false`.
 - **Read-only invariant.** `daily_reviewer.py`, `daily_reviewer_main.py`, `apply_preset_update.py`, and `pending_preset_updates_writer.py` must never import `trading_agent.executor`, `submit_order`, `place_order`, or `OrderExecutor`. AST-verified.
 - **LLM output validation.** Anything outside the JSON schema — missing keys, wrong types, hallucinated fields — is filtered to `None`/`[]` at parse time. The reviewer never crashes on bad LLM output.
 - **Field allowlist enforced at parse time.** `_parse_llm_output` only accepts `preset_proposal.field` from `_ALLOWED_PROPOSAL_FIELDS`. This is belt (system prompt) + suspenders (code check).
@@ -161,4 +162,4 @@ LLM and checks the parsed output.
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-10-26.*

@@ -198,7 +198,9 @@ def open_defined_risk(monitor_results: Dict) -> float:
 
 __all__ = ["compute_position_cap_dedup_set", "register_open",
            "open_defined_risk", "TOTAL_RISK_EXCLUDED", "ladder_failure",
-           "open_expirations", "open_pls"]
+           "open_expirations", "open_pls", "stop_cooldown_failure", "trade_direction",
+           "RISK_GROUPS", "risk_group_for", "add_exposure", "direction_exposure",
+           "direction_room", "direction_risk_failure"]
 
 
 # ── Cool-down after a stop (added 2026-10-16) ───────────────────────────
@@ -238,19 +240,117 @@ def sessions_between(start: date, end: date) -> int:
 
 def stop_cooldown_failure(ticker: str, strategy: str, today: date,
                           recent_stops: Iterable[Tuple[str, str, date]],
-                          sessions: int) -> Optional[str]:
+                          sessions: int, repeat_sessions: int = 0,
+                          repeat_window: int = 20) -> Optional[str]:
     """Reason a new entry on ``ticker`` is blocked because a position on
     it in the same direction was stopped out within the cool-down, else
     None. ``recent_stops`` holds (ticker, strategy, ET close date) of
     stop-type closes. The stop's own session and the next ``sessions``
-    sessions are blocked; ``sessions`` ≤ 0 disables the check."""
+    sessions are blocked; ``sessions`` ≤ 0 disables the check.
+
+    Repeat stops (2026-10-26): when the latest same-direction stop is the
+    second within ``repeat_window`` sessions, the block after it lasts
+    ``repeat_sessions`` (if longer). TLT was stopped on 10-15, re-entered
+    on 10-19 when the 1-session cool-down ended and stopped again 10-22."""
     if sessions <= 0:
         return None
     want = trade_direction(strategy)
-    for tk, strat, closed_on in recent_stops:
-        if tk != ticker or trade_direction(strat) != want:
-            continue
-        if sessions_between(closed_on, today) <= sessions:
-            return (f"stop_cooldown ({strat} stopped {closed_on.isoformat()}; "
-                    f"no new {want} entry for {sessions} session(s) after)")
+    same = sorted((closed_on, strat) for tk, strat, closed_on in recent_stops
+                  if tk == ticker and trade_direction(strat) == want)
+    if not same:
+        return None
+    last_on, last_strat = same[-1]
+    block = sessions
+    earlier = [d for d, _ in same[:-1] if sessions_between(d, last_on) <= repeat_window]
+    if earlier and repeat_sessions > block:
+        block = repeat_sessions
+    if sessions_between(last_on, today) <= block:
+        tag = f"; repeat stop since {earlier[-1].isoformat()}" if block != sessions else ""
+        return (f"stop_cooldown ({last_strat} stopped {last_on.isoformat()}{tag}; "
+                f"no new {want} entry for {block} session(s) after)")
     return None
+
+
+# ── Correlated-risk groups and direction budgets (E6, backlog 11.2) ────
+# 2026-10-19: TLT ×2 + XLU put debits (≈ $839) were one bet on higher
+# yields, and every entry since 10-14 was bearish; sector caps saw
+# "Treasuries" and "Utilities" as unrelated. A group's same-direction
+# max loss, and the book's, are capped as a share of equity.
+
+RISK_GROUPS: Dict[str, frozenset] = {
+    "rates": frozenset({"TLT", "IEF", "TLH", "XLU"}),
+    "gold": frozenset({"GLD", "IAU", "GDX", "GDXJ", "SLV"}),
+    "us_equity": frozenset({"SPY", "QQQ", "DIA", "IWM", "XLK", "SMH"}),
+}
+
+
+def risk_group_for(ticker: str) -> Optional[str]:
+    """The ticker's correlated-risk group, or None when it has none."""
+    for name, members in RISK_GROUPS.items():
+        if ticker in members:
+            return name
+    return None
+
+
+def _exposure_keys(ticker: str, strategy: str) -> List[str]:
+    """Exposure buckets a position counts toward: ``book:<dir>`` and, for
+    grouped tickers, ``group:<name>:<dir>``. Neutral structures and Wheel
+    legs (collateral-based, TOTAL_RISK_EXCLUDED) count toward none."""
+    d = trade_direction(strategy)
+    if d not in ("bull", "bear") or strategy in TOTAL_RISK_EXCLUDED:
+        return []
+    keys = [f"book:{d}"]
+    g = risk_group_for(ticker)
+    if g:
+        keys.append(f"group:{g}:{d}")
+    return keys
+
+
+def add_exposure(exposure: Dict[str, float], ticker: str, strategy: str,
+                 dollars: float) -> None:
+    """Add ``dollars`` of max loss to every bucket the position counts toward."""
+    for k in _exposure_keys(ticker, strategy):
+        exposure[k] = round(exposure.get(k, 0.0) + float(dollars), 2)
+
+
+def direction_exposure(monitor_results: Dict) -> Dict[str, float]:
+    """Max loss ($, all contracts) of open positions per direction bucket."""
+    out: Dict[str, float] = {}
+    for sr in monitor_results.get("positions", []) or []:
+        add_exposure(out, sr.get("underlying", ""), sr.get("strategy", ""),
+                     float(sr.get("max_loss") or 0.0) * max(1, int(sr.get("contracts") or 1)))
+    return out
+
+
+def direction_room(ticker: str, strategy: str, equity: float,
+                   exposure: Dict[str, float], group_pct: float,
+                   book_pct: float) -> Tuple[Optional[float], str]:
+    """(dollars of max loss still allowed in this trade's direction, the
+    bucket that limits it). (None, "") when no cap applies (neutral
+    structure, caps off, or no equity)."""
+    if equity <= 0:
+        return None, ""
+    room, label = None, ""
+    for k in _exposure_keys(ticker, strategy):
+        pct = group_pct if k.startswith("group:") else book_pct
+        if pct <= 0:
+            continue
+        left = pct * equity - exposure.get(k, 0.0)
+        if room is None or left < room:
+            room, label = left, f"{k} ${exposure.get(k, 0.0):.0f} of ${pct * equity:.0f}"
+    return room, label
+
+
+def direction_risk_failure(ticker: str, strategy: str, per_contract: float,
+                           equity: float, exposure: Dict[str, float],
+                           group_pct: float, book_pct: float
+                           ) -> Tuple[Optional[str], Optional[float]]:
+    """(block reason, dollars allowed). Blocked when the room left in the
+    trade's group / book direction is below one contract's max loss;
+    otherwise the room caps the trade's size."""
+    room, label = direction_room(ticker, strategy, equity, exposure, group_pct, book_pct)
+    if room is None:
+        return None, None
+    if room < max(per_contract, 0.01):
+        return f"direction_risk_cap ({label}; one contract ${per_contract:.0f})", room
+    return None, room

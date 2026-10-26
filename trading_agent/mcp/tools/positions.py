@@ -26,18 +26,10 @@ def _short_strikes(ticker: str, run_id: str) -> Optional[List[float]]:
 
 
 def _open_row(o: Any) -> Dict[str, Any]:
-    return {
-        "ticker": o.ticker,
-        "strategy": o.strategy,
-        "opened_at": o.timestamp_utc or None,
-        "credit": o.credit,
-        "width": o.spread_width or None,
-        "max_loss": o.max_loss or None,
-        "short_strikes": _short_strikes(o.ticker, o.run_id),
-        "expiration": o.expiration,
-        "order_id": o.order_id or None,
-        "status": o.status,
-    }
+    from trading_agent.book_view import journal_row
+    return {**journal_row(o),
+            "short_strikes": _short_strikes(o.ticker, o.run_id),
+            "order_id": o.order_id or None}
 
 
 def list_positions() -> Dict[str, Any]:
@@ -52,14 +44,28 @@ def list_positions() -> Dict[str, Any]:
     expired or closed while the agent wasn't journaling — their P&L is
     missing and must be reconciled against the broker. ``opens_today``
     is kept for back-compat (skill 49 §3).
+
+    F6 (2026-10-26): ``max_loss`` stays per contract; each row also has
+    ``contracts`` (broker count when the agent's last valuation snapshot
+    has the position), ``total_max_loss``, ``mid_pl`` and ``broker_legs``;
+    positions the broker holds without a journal row are added with
+    ``status="broker_only"``. ``book`` carries the totals (max loss by
+    direction and by correlated-risk group, mid P&L) and the E4 net-delta
+    reading — ``book_view.open_book``.
     """
+    from trading_agent.book_delta import load_state as load_book_delta
+    from trading_agent.book_view import open_book
     from trading_agent.journal_reader import JournalReader
     from trading_agent.holdings_store import load_holdings
+    from trading_agent.position_snapshot import read_snapshot
 
     reader = JournalReader()
     holdings = load_holdings()
+    book = open_book([_open_row(o) for o in reader.open_trades()], read_snapshot(),
+                     book_delta=load_book_delta() or None)
     return {
-        "open_positions": [_open_row(o) for o in reader.open_trades()],
+        "open_positions": book["rows"],
+        "book": {k: v for k, v in book.items() if k != "rows"},
         "opens_today": [_open_row(o) for o in reader.opens_today()],
         "holdings_paste_saved_at": holdings.saved_at,
         "holdings_parsed_count": holdings.parsed_count,

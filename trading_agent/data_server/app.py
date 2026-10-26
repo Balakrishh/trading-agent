@@ -141,6 +141,15 @@ def build_app(
         caller learns whether Schwab OAuth is currently working. Returns
         503 if the underlying call fails."""
         try:
+            # A8 (2026-10-26): providers with ``auth_probe`` (Schwab) must
+            # return data — is_market_open alone falls back to Alpaca's
+            # clock and hid a dead Schwab token for 10 hours on 10-20.
+            auth = getattr(provider, "auth_probe", None)
+            if callable(auth):
+                ok, detail = auth()
+                if not ok:
+                    raise RuntimeError(detail)
+                return {"status": "ready"}
             # Cheap probe — many providers expose is_market_open().
             probe = getattr(provider, "is_market_open", None)
             if callable(probe):

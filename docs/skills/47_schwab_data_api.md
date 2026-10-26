@@ -28,7 +28,7 @@ Seven routes. Every route is a thin passthrough to `SchwabMarketDataProvider` �
 
 ```text
 GET  /health                                     — liveness, no auth
-GET  /ready                                      — readiness (Schwab token refresh works)
+GET  /ready                                      — readiness: Schwab returns data (auth_probe, A8)
 GET  /price/{ticker}                             — current price
 GET  /chain/{underlying}?expiration=&option_type=
                                                  — option chain (call|put)
@@ -154,6 +154,8 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 - **Empty batch body → 400, not 200 with empty response.** POST /quotes with `{"symbols": []}` is a client bug (no work asked for). Reject at request-validation time with 400. Same for /snapshots.
 - **Ticker parameter validation.** The ticker is stripped and **uppercased first** (so `spy` is served as `SPY`), then must match `^[A-Z][A-Z0-9.-]{0,9}$` — alphanumeric plus `.` (BRK.B) and `-` (rare). Reject anything else at 400. Prevents `../` path traversal and shell-injection footguns even though we never shell out.
 - **Access log never contains the API key.** The `Authorization` header is redacted before logging. Failed auth attempts log `<AUTH_FAILED>` in the auth field, not the attempted value.
+- **/ready probes real data (A8, 2026-10-26).** With a provider that has `auth_probe()` (Schwab), `/ready` is 200 only when a token can be obtained *and* `/markets` returns a body; otherwise 503 with the probe's detail ("Schwab token unavailable: …" / "Schwab /markets returned no data"). Before, it called `is_market_open()`, which swallows auth failures and falls back to Alpaca's clock — `/ready` said "ready" through the 2026-10-20 10-hour token outage. The liveness watchdog (skill 64) pages on the 503 in session. Providers without `auth_probe` keep the old `is_market_open()` probe.
+- **Option quotes carry `delta` (2026-10-26).** `fetch_option_quotes` (and so `POST /quotes`) returns `{"bid", "ask", "mid", "delta"}`; `delta` is Schwab's `QuoteOption.delta`, None when absent — never 0.0. The agent's book net-delta reading (skill 37, E4) uses it from the monitor's re-mark quotes.
 - **/health has no auth.** Liveness probes from launchd or an external uptime service must work without a key. `/ready` also has no auth — it reveals only Schwab-token validity (a boolean), not any market data.
 - **CORS is off by default.** No `Access-Control-Allow-Origin` header. If a browser-side consumer ever appears, add it explicitly then. Curl and Python `requests` don't care about CORS.
 - **The trading agent process does NOT depend on this server.** If the server is down, the trading agent's cycle proceeds normally with its own in-process `SchwabMarketDataProvider`. Vice versa: if the trading agent is down, the API server keeps serving. Full crash isolation.

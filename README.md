@@ -172,9 +172,12 @@ Every trade must pass **all eight checks** before execution:
 
 **Portfolio caps (skill 37).**
 * **Per ticker:** up to `max_positions_per_ticker` (2) — a second position only on a later day, with an expiration ≥ `ladder_min_gap_days` (7) from the open one, and only while the open one is at or above breakeven (add to winners only). Pending orders block the ticker.
-* **Stop cool-down (2026-10-16):** after a stop on a ticker, no new entry in the same direction (bull / bear, or the same neutral structure) for the rest of that session and `stop_cooldown_sessions` (1) more.
+* **Stop cool-down:** after a stop on a ticker, no new entry in the same direction (bull / bear, or the same neutral structure) for the rest of that session and `stop_cooldown_sessions` (5) more; after a second same-direction stop within 20 sessions, `stop_cooldown_repeat_sessions` (10). Raised from 1 on 2026-10-26: TLT was stopped, re-entered two sessions later and stopped again.
 * **Per sector:** 2 (`sector_map.py`); counts pending orders and every submission earlier in the same cycle.
 * **Total open risk:** Σ max loss of open defined-risk positions ≤ `max_total_risk_pct` (10 %) of equity; each trade is sized into what remains; Wheel legs excluded (their collateral has its own 40 %-of-equity rule).
+* **One-direction risk (2026-10-26):** Σ max loss of bullish (or bearish) positions ≤ `max_group_direction_risk_pct` (3 %) of equity within a correlated group — rates (TLT, IEF, TLH, XLU), gold (GLD, IAU, GDX, GDXJ, SLV), US equity (SPY, QQQ, DIA, IWM, XLK, SMH) — and ≤ `max_book_direction_risk_pct` (6 %) across the book. Trades are sized into the room left and blocked below one contract (`direction_risk_cap`). Grouped tickers share one hourly entry slot. Last week every entry was a bearish put debit and TLT + XLU were one bet on yields.
+* **Net delta (shadow):** each cycle the book's beta-weighted, SPY-equivalent delta is measured from the legs' deltas (`trade_journal/book_delta.json`); candidates that a cap of `max_net_beta_delta_pct` (30 %) would block are journalled as `net_delta_shadow`. Nothing is blocked yet.
+* **No put-debit fallback** on `put_debit_excluded_tickers` (XLY, XLK, XLI, GDX) — their option legs quote 30–90¢ wide, so the attempt always ended in `leg_spread_wide`.
 * **Market state:** size multiplier and allowed families (above).
 
 **Kill switch & drawdown governor (skill 62).** `python -m trading_agent.trading_halt pause --reason "…"` pauses new entries; exits, stops and profit-taking keep running. The governor pauses automatically when equity is 2 % below the day's first reading or 5 % below the week's; only `… resume` lifts it.
@@ -215,7 +218,7 @@ Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's lau
 | `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
 | `trading-agent-vol-surface.timer` | 15:50 ET on weekdays (before the close): per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
 | `trading-agent-quality-lows.timer` | 15:40 ET on weekdays: quality-at-lows shadow scan — 52-week-low stages, revenue growth, analyst revisions, Claude's news-reading drop cause, priced LEAPS / call-spread / CSP choices → `trade_journal/quality_lows.jsonl`; places no orders (skill 67) |
-| `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET or `/health` fails; one page per outage plus "recovered" (skill 64) |
+| `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET, `/health` fails, or `/ready` says Schwab is not returning data (dead token, 2026-10-26); one page per outage plus "recovered" (skill 64) |
 | `trading-agent-dashboard.service` | Streamlit dashboard (optional, off by default) |
 
 After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer trading-agent-quality-lows.timer`.
@@ -223,8 +226,8 @@ After a reboot: `systemctl --user is-active trading-agent trading-agent-data-ser
 **Alerts (skill 32).** Telegram: trade opens / closes and the end-of-day summary on the main bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), errors and liveness pages on the error bot (`TELEGRAM_ERROR_*`). Messages are HTML-escaped; a message Telegram still rejects is resent once as plain text.
 
 **Operator controls.**
-* **Claude Code + MCP (skill 48).** `.mcp.json` starts the `trading-agent` MCP server from `myenv`: read-only tools (`list_positions`, `get_market_state`, `get_quote`, `run_scan`, `get_playbook_scorecard`, …) and slash commands `/portfolio`, `/triage`, `/propose` (stages to `pending_orders/`, never submits), `/review`, `/incident`, `/taxreview`.
-* **Manual close (skill 63).** `python -m trading_agent.manual_close --ticker X` previews; `--submit` closes one spread with the atomic close and journals it as `closed` with `exit_signal="manual"`.
+* **Claude Code + MCP (skill 48).** `.mcp.json` starts the `trading-agent` MCP server from `myenv`: read-only tools (`list_positions` — with contracts, total max loss, mid P&L and book totals by direction and risk group; `get_market_state`, `get_quote`, `run_scan`, `get_playbook_scorecard`, …) and slash commands `/portfolio`, `/triage`, `/propose` (stages to `pending_orders/`, never submits), `/review`, `/incident`, `/taxreview`.
+* **Manual close (skill 63).** `python -m trading_agent.manual_close --ticker X` previews; `--submit` closes one spread with the atomic close and journals it as `closed` with `exit_signal="manual"`. `--strategy` / `--expiration YYYY-MM-DD` pick between positions on the same ticker. Before 10:30 ET the preview suggests waiting — first-hour paper closes often go unfilled.
 * **Kill switch (skill 62).** `python -m trading_agent.trading_halt pause --reason "…"` / `resume`.
 * **Holdings + watchlist digest (skill 42).** Paused since 2026-10-16 with `PORTFOLIO_ALERTS_ENABLED=false` in `.env`. To turn it back on, remove the line and restart the agent outside market hours. Fix its journal dedup write first (`log_signal() got an unexpected keyword argument 'payload'`), or it can resend within its hourly window.
 
@@ -725,7 +728,9 @@ trading-agent/
 │   ├── quality_lows.py               # Quality-at-lows sleeve, long-option shadow scan (skill 67)
 │   ├── analyst_estimates.py          # Analyst estimates / revisions from Yahoo, cached (skill 67)
 │   ├── drop_cause_llm.py             # "Why did it drop" label from 30 days of news via the claude CLI (skill 67)
-│   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk caps (skill 37)
+│   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk, direction-risk caps, stop cool-down (skill 37)
+│   ├── book_delta.py                 # Book beta-weighted net delta, shadow budget (skill 37, E4)
+│   ├── book_view.py                  # Open book with contracts / total risk for list_positions + reviewer (F6)
 │   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
 │   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)
 │   ├── trading_halt.py               # Kill switch + drawdown governor (skill 62)

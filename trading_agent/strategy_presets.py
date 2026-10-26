@@ -314,6 +314,11 @@ class PresetConfig:
     debit_ladder_mode:                 str   = "shadow"
     debit_ladder_steps:                int   = 4
     debit_ladder_step_cycles:          int   = 1
+    # Put-debit fallback skipped for these tickers (E7, backlog 11.4,
+    # 2026-10-26): their legs quoted 30–90¢ wide on 2026-10-21 (limit 15¢ /
+    # 5 % of mid), so every bearish cycle ended in leg_spread_wide — about
+    # 940 rejections that day. Re-measure quarterly.
+    put_debit_excluded_tickers:        Tuple[str, ...] = ("XLY", "XLK", "XLI", "GDX")
 
     # ------------------------------------------------------------------
     # Total open-risk cap (added 2026-10-05). Σ max loss of all open
@@ -359,7 +364,27 @@ class PresetConfig:
     # ticker in the same direction for the rest of the stop's session and
     # the next N sessions. 0 = off. TLT on 2026-10-15 was stopped at 09:46
     # ET and re-bought on the same bearish view at 09:50.
-    stop_cooldown_sessions:            int   = 1
+    # 2026-10-26: 1 → 5 sessions. TLT was stopped 10-15, re-entered 10-19
+    # (2 sessions later, allowed by the 1-session rule) and stopped again
+    # 10-22. A second same-direction stop within
+    # stop_cooldown_repeat_window sessions blocks for
+    # stop_cooldown_repeat_sessions instead.
+    stop_cooldown_sessions:            int   = 5
+    stop_cooldown_repeat_sessions:     int   = 10
+    stop_cooldown_repeat_window:       int   = 20
+    # Correlated-risk groups (E6, backlog 11.2, 2026-10-26; groups in
+    # position_caps.RISK_GROUPS: rates, gold, us_equity). Max loss of open
+    # + new positions in one direction may not exceed these shares of
+    # equity per group and across the book; a trade is sized into the
+    # room left and blocked below one contract. 0 = off.
+    max_group_direction_risk_pct:      float = 0.03
+    max_book_direction_risk_pct:       float = 0.06
+    # Book net delta (E4, backlog 11.1): beta-weighted SPY-equivalent
+    # dollar delta of the book as a share of equity. "shadow" journals
+    # what a cap at max_net_beta_delta_pct would block (net_delta_shadow
+    # rows); "off" skips it. "live" is not built.
+    net_delta_mode:                    str   = "shadow"
+    max_net_beta_delta_pct:            float = 0.30
 
     # ------------------------------------------------------------------
     # Entry confirmation (added 2026-10-05). An approved plan is submitted
@@ -493,6 +518,19 @@ class PresetConfig:
         return (max(1, self.dte_mean_reversion - self.dte_window_days),
                 self.dte_mean_reversion + self.dte_window_days)
 
+    def _stop_cooldown_tag(self) -> str:
+        if not self.stop_cooldown_sessions:
+            return "Stop cool-down off"
+        return (f"Stop cool-down {self.stop_cooldown_sessions} sess"
+                f" ({self.stop_cooldown_repeat_sessions} after a repeat)")
+
+    def _direction_risk_tag(self) -> str:
+        excl = ",".join(self.put_debit_excluded_tickers) or "none"
+        return (f"Dir risk ≤{self.max_group_direction_risk_pct:.0%}/group "
+                f"≤{self.max_book_direction_risk_pct:.0%}/book • "
+                f"NetΔ {self.net_delta_mode} ≤{self.max_net_beta_delta_pct:.0%} • "
+                f"No put debit: {excl}")
+
     def to_summary_line(self) -> str:
         """Detailed one-liner for the agent log + dashboard expander body."""
         wstr = (f"{self.width_value*100:.1f}%spot"
@@ -516,7 +554,8 @@ class PresetConfig:
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
                 f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
-                f"Stop cool-down {f'{self.stop_cooldown_sessions} sess' if self.stop_cooldown_sessions else 'off'} • "
+                f"{self._stop_cooldown_tag()} • "
+                f"{self._direction_risk_tag()} • "
                 f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
                 f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Exits from {self.no_exit_before_et or 'open'} • "
@@ -538,7 +577,8 @@ class PresetConfig:
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
             f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
-                f"Stop cool-down {f'{self.stop_cooldown_sessions} sess' if self.stop_cooldown_sessions else 'off'} • "
+                f"{self._stop_cooldown_tag()} • "
+                f"{self._direction_risk_tag()} • "
             f"Halt −{self.halt_daily_loss_pct:.0%}/d −{self.halt_weekly_loss_pct:.0%}/wk • "
             f"Confirm {self.entry_confirm_cycles}× from {self.no_entry_before_et} ≤{self.max_new_entries_per_hour}/h{'/sector' if self.entry_rate_scope == 'sector' else ''} • "
                 f"Exits from {self.no_exit_before_et or 'open'} • "
@@ -712,7 +752,7 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 # Persistence
 # ---------------------------------------------------------------------------
 
-_TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct",
+_TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct", "put_debit_excluded_tickers",
                  "iron_butterfly_dte_grid", "iron_butterfly_wing_width_pct",
                  "cc_dte_band", "csp_dte_band", "csp_strike_band"}
 
@@ -732,6 +772,10 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("profit_trail_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid profit_trail_mode %r — using the default",
                        out.pop("profit_trail_mode"))
+    if out.get("net_delta_mode") not in (None, "off", "shadow"):
+        # "live" is not built yet (backlog E4) — fall back to shadow.
+        logger.warning("Invalid net_delta_mode %r — using the default",
+                       out.pop("net_delta_mode"))
     if out.get("debit_ladder_mode") not in (None, "off", "shadow"):
         # "live" is not built yet (backlog C1) — fall back to shadow.
         logger.warning("Invalid debit_ladder_mode %r — using the default",

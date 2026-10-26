@@ -98,6 +98,7 @@ Exit codes: `0` closed / preview shown, `1` no such position, `2` refused (or br
 - **Realized P&L** comes from the fill and the broker entry prices (`realized_pl_from_close`); when an entry price is missing the row keeps the mark (`pl_source="signal_mark"`).
 - **Quotes from Alpaca, never Schwab.** The live agent holds the Schwab token, whose refresh token rotates on every use; a second process refreshing it can strand the agent.
 - **Live agent running.** The close is one broker order; the agent's next cycle sees the position gone. No journal action is new (`closed` / `close_failed`); only the `exit_signal` value `manual` is new (`ExitSignal.MANUAL`, never set by `evaluate()`).
+- **Before 10:30 ET (2026-10-26).** The preview prints a note (`early_session_note`, never a refusal) between 09:30 and 10:30 ET: first-hour option quotes are wide and paper closes fill against Alpaca's own quote. 2026-10-23: the GLD Nov 6 close went unfilled at 10:30 at both the improved ($5.64) and the natural ($5.08) price, then filled at $5.20 — better than natural — at 11:00 (+$190). The agent's own debounced exits keep `no_exit_before_et` (09:45); stops are never delayed.
 - **Price moves between preview and submit.** The order is priced from fresh quotes at submit time, not the preview (2026-10-08: preview +$404, fill +$288 a minute later).
 
 ## 5. Cross-References
