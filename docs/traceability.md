@@ -67,7 +67,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 64 | liveness watchdog | liveness.py | test_liveness.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
 | 65 | earnings expiry and trend filters | strategy.py, chain_scanner.py, earnings_calendar.py, entry_filters.py, agent.py, calendar_utils.py | test_after_hours_shutdown.py, test_agent_integration.py, test_backtest/test_synthetic_chain.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_debit_ladder.py, test_debit_strategies.py, test_earnings_and_trend_filters.py, test_earnings_calendar.py, test_entry_confirmation.py, test_executor.py, test_exit_opening_window.py, test_fill_model.py, test_journal_derived_cooldown.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_production_readiness.py, test_profit_trail.py, test_risk_manager.py, test_schwab_reauth_warning.py, test_shadow_pop.py, test_stop_hygiene.py, test_strategy.py, test_trading_halt.py | ❌ MISSING | — |
 | 66 | calibrated probability model | prob_model.py, vol_surface.py, scripts/research/calibrate_prob_model.py | test_prob_model.py, test_vol_surface.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
-| 67 | quality at lows sleeve | quality_lows.py, analyst_estimates.py, market_data_schwab.py, scripts/research/quality_lows_backtest.py | test_analyst_estimates.py, test_market_data_factory.py, test_market_data_schwab.py, test_quality_lows.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
+| 67 | quality at lows sleeve | quality_lows.py, analyst_estimates.py, drop_cause_llm.py, news_aggregator.py, market_data_schwab.py, scripts/research/quality_lows_backtest.py | test_analyst_estimates.py, test_drop_cause_llm.py, test_market_data_factory.py, test_market_data_schwab.py, test_quality_lows.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
 
 **Skills with conformance tests:** 43 / 59 (72%)
 
@@ -92,7 +92,6 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/market_hours.py` (last modified 2026-04-19)
 - `trading_agent/market_profile.py` (last modified 2026-04-24)
 - `trading_agent/mcp/__main__.py` (last modified 2026-09-29)
-- `trading_agent/news_aggregator.py` (last modified 2026-04-19)
 - `trading_agent/order_tracker.py` (last modified 2026-05-01)
 - `trading_agent/ports.py` (last modified 2026-05-06)
 - `trading_agent/position_snapshot.py` (last modified 2026-10-05)
@@ -116,7 +115,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/wheel_lifecycle.py` (last modified 2026-09-29)
 - `trading_agent/wheel_policy.py` (last modified 2026-10-05)
 
-**Orphan source coverage:** 40 / 118 files (33% uncovered)
+**Orphan source coverage:** 39 / 119 files (32% uncovered)
 
 ## Orphan skills (no conformance test)
 
