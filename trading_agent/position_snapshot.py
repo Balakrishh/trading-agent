@@ -48,15 +48,17 @@ def build_snapshot(spreads: Iterable[Any],
     return {"as_of_utc": datetime.now(timezone.utc).isoformat(), "positions": rows}
 
 
-def write_snapshot(snapshot: Dict[str, Any], path: Path = SNAPSHOT_PATH) -> None:
+def write_snapshot(snapshot: Dict[str, Any], path: Optional[Path] = None) -> None:
+    path = path or SNAPSHOT_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(snapshot, indent=2, default=str))
     tmp.replace(path)
 
 
-def read_snapshot(path: Path = SNAPSHOT_PATH) -> Optional[Dict[str, Any]]:
+def read_snapshot(path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Snapshot plus ``age_seconds``; None if missing or unreadable."""
+    path = path or SNAPSHOT_PATH
     try:
         snap = json.loads(path.read_text())
         as_of = datetime.fromisoformat(snap["as_of_utc"])
