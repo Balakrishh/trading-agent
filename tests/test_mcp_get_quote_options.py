@@ -9,7 +9,7 @@ OPT = "GLD261106P00379000"
 def _route(monkeypatch, responses):
     calls = []
 
-    def fake(path, body=None):
+    def fake(path, body=None, timeout=5):
         calls.append((path, body))
         return responses.get(path)
     monkeypatch.setattr(market, "_data_server_request", fake)

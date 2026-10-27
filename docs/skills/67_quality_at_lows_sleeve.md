@@ -270,7 +270,7 @@ Quality-only subset (the 26 names that pass today's screen — itself look-ahead
 
 ## 5. Cross-References
 
-- `47_schwab_data_api.md` — `/fundamentals`, `/chain`; the scanner never opens its own Schwab session.
+- `47_schwab_data_api.md` — `/fundamentals`, `/chain`; the scanner never opens its own Schwab session. Since 2026-10-26 the data server also serves this skill's inputs to other clients: `/news/{ticker}` (`ticker_news`), `/research/{ticker}` (`get_estimates` + the latest `quality_lows.jsonl` row) and `/sentiment/{ticker}` (stored `llm_cause` + analyst stance + news flow), skill 47 §3.5. The scan itself still calls the modules in process.
 - `40_long_term_options_evaluator.md` — covered calls / CSPs on held stock; this skill is the entry side for names not held.
 - `42_portfolio_alert_scheduler.md` — the paused Telegram `long_term` digest; candidate channel for sleeve alerts once its dedup bug is fixed.
 - `59_*` / debit spreads — the agent's own call debit spread scoring (`debit_above_fair`) applies when §12.6 trades.

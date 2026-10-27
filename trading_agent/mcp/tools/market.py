@@ -21,8 +21,8 @@ def _data_server_url() -> Optional[str]:
     return base or None
 
 
-def _data_server_request(path: str, body: Optional[Dict[str, Any]] = None
-                         ) -> Optional[Dict[str, Any]]:
+def _data_server_request(path: str, body: Optional[Dict[str, Any]] = None,
+                         timeout: float = 5) -> Optional[Dict[str, Any]]:
     """GET ``path`` (or POST ``body`` as JSON — still a read, e.g.
     ``/quotes``) on the data server. None when unconfigured, unreachable
     or the server rejects the request."""
@@ -38,14 +38,14 @@ def _data_server_request(path: str, body: Optional[Dict[str, Any]] = None
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return None
 
 
-def _data_server_get(path: str) -> Optional[Dict[str, Any]]:
-    return _data_server_request(path)
+def _data_server_get(path: str, timeout: float = 5) -> Optional[Dict[str, Any]]:
+    return _data_server_request(path, timeout=timeout)
 
 
 # Compact OCC option symbol: root, YYMMDD, C/P, strike × 1000 (8 digits).
@@ -198,6 +198,56 @@ def get_fundamentals(ticker: str) -> Dict[str, Any]:
             "fundamentals": {},
             "source": "unavailable",
             "note": "data server unreachable"}
+
+
+# Research routes fetch Alpaca + Yahoo on a cache miss (several seconds).
+RESEARCH_TIMEOUT_S = 45
+
+
+def _research_get(route: str, ticker: str, query: str = "") -> Dict[str, Any]:
+    if not ticker:
+        raise ValueError("ticker is required")
+    t = ticker.upper()
+    remote = _data_server_get(f"{route}/{t}{query}", timeout=RESEARCH_TIMEOUT_S)
+    if remote is not None:
+        return remote
+    return {"ticker": t, "source": "unavailable", "note": "data server unreachable"}
+
+
+def get_news(ticker: str, days: Any = 30, limit: Any = 60) -> Dict[str, Any]:
+    """Recent news for a ticker (Alpaca + Yahoo RSS) from the data server.
+
+    Skill-47 ``/news/{ticker}`` passthrough: items newest first with
+    ``published_at``, ``source``, ``publisher``, ``title``, ``summary``,
+    ``url``; at most ``limit`` items spread across the last ``days`` days
+    so one busy week does not hide the event that started a move.
+    """
+    return _research_get("news", ticker, f"?days={int(days)}&limit={int(limit)}")
+
+
+def get_research(ticker: str) -> Dict[str, Any]:
+    """Analyst estimates + the latest quality-at-lows row for a ticker.
+
+    Skill-47 ``/research/{ticker}`` passthrough. ``analyst_estimates``:
+    consensus EPS and 30/90-day revisions, revenue/EPS growth, analyst
+    up/down revision counts, mean price target and upside, recommendation
+    score now vs 3 months ago (1 strong buy … 5 strong sell),
+    ``revision_trend``. ``quality_lows``: the scan's newest row (stage,
+    price features, drop cause, Claude ``llm_cause``) or None.
+    """
+    return _research_get("research", ticker)
+
+
+def get_sentiment(ticker: str) -> Dict[str, Any]:
+    """Sentiment roll-up for a ticker from the data server.
+
+    Skill-47 ``/sentiment/{ticker}`` passthrough: Claude's stored
+    drop-cause label (from the 15:40 ET quality-at-lows scan, names at
+    watch or later only), the rule-based cause, analyst stance
+    (revision trend, recommendation drift, target upside) and news flow
+    (items in the last 7 days vs the 23 before). No LLM runs per call.
+    """
+    return _research_get("sentiment", ticker)
 
 
 def get_recent_alerts(hours: Any = 24) -> Dict[str, Any]:

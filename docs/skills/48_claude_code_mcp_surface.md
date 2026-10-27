@@ -38,6 +38,9 @@ get_market_state()                              — market risk state + gate + h
 get_playbook_scorecard(days=365, min_trades=20) — per-playbook track record, advisory size (skill 60)
 get_trading_halt()                              — kill switch / drawdown governor state (skill 62)
 get_fundamentals(ticker)                        — P/E, EPS, mcap, dividend, beta, 52w, ROE/ROA (skill-47 passthrough)
+get_news(ticker, days=30, limit=60)             — Alpaca + Yahoo RSS headlines (skill-47 /news, 45 s timeout)
+get_research(ticker)                            — analyst estimates + latest quality-at-lows row (skill-47 /research)
+get_sentiment(ticker)                           — stored Claude drop-cause label, analyst stance, news flow (skill-47 /sentiment)
 get_recent_alerts(hours=24)                     — ExceptionMonitor tail
 ```
 
@@ -74,6 +77,9 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_trading_halt",
     "get_playbook_scorecard",
     "get_fundamentals",
+    "get_news",
+    "get_research",
+    "get_sentiment",
     "get_recent_alerts",
 )
 ```
@@ -95,6 +101,9 @@ _HANDLERS: Dict[str, Callable[..., Any]] = {
     "get_quote":          _market.get_quote,
     "get_market_status":  _market.get_market_status,
     "get_fundamentals":   _market.get_fundamentals,
+    "get_news":           _market.get_news,
+    "get_research":       _market.get_research,
+    "get_sentiment":      _market.get_sentiment,
     "get_recent_alerts":  _market.get_recent_alerts,
 }
 ```

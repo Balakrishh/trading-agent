@@ -24,7 +24,7 @@ The server is **read-only by design and by construction**. Order placement lives
 
 ## 2. Endpoint surface
 
-Seven routes. Every route is a thin passthrough to `SchwabMarketDataProvider` — no new schemas, no new logic beyond auth + caching + rate limiting.
+Eleven routes. The first eight are thin passthroughs to `SchwabMarketDataProvider` — no new schemas, no new logic beyond auth + caching + rate limiting. The three research routes (§3.5, 2026-10-26) put news, analyst research and sentiment behind the same server and key, so every data point comes from one place.
 
 ```text
 GET  /health                                     — liveness, no auth
@@ -36,13 +36,16 @@ POST /quotes           body {"symbols": [...]}   — batch option/stock quote lo
 POST /snapshots        body {"tickers": [...]}   — batch stock snapshots with indicators
 GET  /market-status                              — is_within_market_hours() + next open/close
 GET  /fundamentals/{ticker}                      — P/E, EPS, market cap, dividend, beta, 52w range, ROE/ROA, revenue growth, MRQ margins, debt ratios
+GET  /news/{ticker}?days=30&limit=60             — Alpaca news + Yahoo RSS, de-duplicated, spread across days (§3.5)
+GET  /research/{ticker}                          — analyst estimates/revisions/targets (Yahoo) + latest quality-at-lows row
+GET  /sentiment/{ticker}                         — Claude drop-cause label (stored) + analyst stance + news flow
 ```
 
 **Explicitly NOT exposed** — CI-verified via `test_readonly_no_forbidden_imports`:
 
 - Order placement (any side, any strategy)
 - Account state (positions, balances, orders, buying power)
-- Journal reads / writes
+- Journal writes, and journal reads other than the quality-at-lows shadow rows that `/research` and `/sentiment` serve (no trades, positions or P&L)
 - Preset config mutations
 - Anything that touches `trading_agent.executor` or Alpaca's trading APIs
 
@@ -143,6 +146,35 @@ When on:
 cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 ```
 
+### 3.5 Research routes (2026-10-26)
+
+```python
+# trading_agent/data_server/research.py — pure helpers + injectable sources
+@dataclass
+class ResearchSources:
+    fetch_news: Callable[[str, int, int], List[NewsItem]]      # news_aggregator.ticker_news
+    fetch_estimates: Callable[[str], Optional[Dict]]           # analyst_estimates.get_estimates
+    quality_row: Callable[[str], Optional[Dict]]               # latest quality_lows.jsonl row
+    now: Callable[[], datetime]
+
+def research(ticker, src) -> Dict          # {"analyst_estimates", "quality_lows", "notes", "as_of"}
+def sentiment(ticker, news_rows, src, notes) -> Dict
+    # {"drop_cause_llm": {label, confidence, summary, model, news_from, scan_date} | None,
+    #  "drop_cause_rule", "quality_lows_stage",
+    #  "analyst": {revision_trend, revisions_up/down_30d, rec_score_now/3m_ago,
+    #              recommendation_drift: upgrading|downgrading|steady, target_upside_pct},
+    #  "news_flow": {items_last_7d, items_prior_23d, rate_ratio, capped},
+    #  "latest_headlines": [...5], "notes": [...], "as_of"}
+
+# app.py — build_app(provider=..., config=..., research_sources=None)
+news_cache = TTLCache(NEWS_TTL_SEC)        # 600 s, on regardless of SCHWAB_API_CACHE_ENABLED
+
+@app.get("/news/{ticker}")                 # plain def → FastAPI thread pool
+def news(ticker, days=30, limit=60): ...   # 400 outside days 1-90 / limit 1-200
+```
+
+The logic stays in `news_aggregator.py`, `analyst_estimates.py` and `quality_lows.py` (skill 67); the server only exposes it. MCP tools `get_news`, `get_research`, `get_sentiment` (skill 48) read these routes with a 45 s timeout.
+
 ## 4. Edge Cases / Guardrails
 
 - **Read-only invariant enforced by conformance test.** `test_readonly_no_forbidden_imports` greps `data_server/*.py` for imports of `executor`, `journal_kb`, `submit_order`, `place_order`, `TradingClient`. Any hit fails CI. Belt for the "one bad refactor and we're now placing orders" scenario; suspenders for the "compromised bearer token" scenario.
@@ -166,11 +198,18 @@ cache=ENABLED (price_ttl=60s snapshot_ttl=90s)
 
 - **Growth fields in `/fundamentals` (2026-10-26, skill 67).** `rev_change_ttm_pct`, `rev_change_year_pct`, `gross_margin_mrq`, `net_profit_margin_mrq`, `return_on_investment`, `current_ratio`, `interest_coverage`, `lt_debt_to_equity`, `total_debt_to_capital`, `short_int_days_to_cover` — mapped from the raw Schwab block checked with `SCHWAB_API_FUNDAMENTALS_INCLUDE_RAW=true` on 2026-10-25. Revenue growth and days-to-cover read exact 0.0 → None (Schwab's "not provided"; `revChangeIn` and `epsChangeYear` were 0.0 on every ticker and are not mapped). New fields reach clients only after the data server restarts. No analyst forecasts here — those come from `analyst_estimates.py` (Yahoo).
 
+- **Research routes are not Schwab data (2026-10-26).** `/news`, `/research` and `/sentiment` call Alpaca's news API (the paper keys in `.env`), Yahoo's RSS and Yahoo's analyst tables — never Schwab, so they work when the token is dead and never count toward Schwab's rate limit. Each source is optional: a failed analyst lookup or quality-lows read becomes `null` plus a `notes` entry, not an error for the whole response; only `/news` itself returns 502 (`news_upstream`) when the fetch raises. Note that `ticker_news` swallows per-source failures and returns `[]`, which is cached for 10 minutes like any result.
+- **No LLM per request.** `/sentiment` serves the Claude label the 15:40 ET quality-at-lows scan stored (`llm_cause`, names at `watch` or later); other names get `drop_cause_llm: null` with a note. A live Claude call takes about a minute and spends usage, so it stays in the scan.
+- **News flow is approximate when capped.** Past `limit` items, `ticker_news` takes items round-robin across days, so `items_last_7d` vs `items_prior_23d` undercounts busy days; `news_flow.capped` is true in that case.
+- **Analyst cache file.** `/research` and `/sentiment` go through `get_estimates`, which refetches from Yahoo after 20 h and rewrites `trade_journal/analyst_estimates.json` (temp + rename) — the only file the server writes. Relative to the service's working directory (the repo).
+
 ## 5. Cross-References
 
 - `16_market_data_provider_routing.md` — the underlying provider this server wraps. When the surface routing picks Schwab, we're calling the same code path this server exposes.
 - `18_order_submission_idempotency.md` — the executor whose contract we deliberately don't re-implement here. The `SERVER_READ_ONLY = True` invariant is symmetric to "the executor is the ONLY place that submits orders."
 - `34_exception_monitor.md` — Schwab auth failures inside the server still bubble up to `ExceptionMonitor.record(...)` so the operator's Telegram error channel pages once per failure mode per day.
+- `67_quality_at_lows_sleeve.md` — owner of the news, analyst-estimate and drop-cause logic the research routes expose.
+- `48_claude_code_mcp_surface.md` — `get_news` / `get_research` / `get_sentiment` passthroughs.
 - `42_portfolio_alert_scheduler.md` — a current in-process consumer of `SchwabMarketDataProvider` that could optionally refactor to use this API (Phase 4 in `docs/plans/schwab_data_api_plan.md`).
 
 ---

@@ -37,5 +37,8 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_trading_halt",
     "get_playbook_scorecard",
     "get_fundamentals",
+    "get_news",
+    "get_research",
+    "get_sentiment",
     "get_recent_alerts",
 )
