@@ -1,0 +1,15 @@
+# Daily dealer-gamma estimate for SPY / QQQ / IWM — one shot, started by
+# trading-agent-gamma.timer (skill 68). Reads chains (with open interest)
+# from the local data server (/chain), never opens its own Schwab session.
+# Also refreshes the FOMC / CPI / NFP calendar once a week.
+[Unit]
+Description=Trading agent daily dealer-gamma snapshot
+After=trading-agent-data-server.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.gamma_exposure
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/tmp/trading-agent.gamma.out.log
+StandardError=append:/tmp/trading-agent.gamma.err.log

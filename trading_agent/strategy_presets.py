@@ -450,6 +450,19 @@ class PresetConfig:
     earnings_min_dte:                  int   = 7
 
     # ------------------------------------------------------------------
+    # Macro events + implied vs realized (skill 68, added 2026-10-27,
+    # live). Short-premium structures only (credit verticals, condors,
+    # butterflies, mean reversion, bounce bull put): no new equity-ETF
+    # trade of ≤ macro_event_max_dte days whose life holds a pending
+    # macro_event_kinds release; and none when the ticker's 30-day ATM IV
+    # is under vrp_min_ratio × its 20-day realized vol (0 = off).
+    # ------------------------------------------------------------------
+    macro_event_guard_enabled:         bool  = True
+    macro_event_kinds:                 Tuple[str, ...] = ("NFP",)
+    macro_event_max_dte:               int   = 14
+    vrp_min_ratio:                     float = 1.0
+
+    # ------------------------------------------------------------------
     # Trend entry filters (skill 65, added 2026-10-15) for directional
     # trades. Relative strength: the ticker's 20/60-day return minus
     # SPY's, ranked across the watchlist — bullish trades need a
@@ -500,7 +513,11 @@ class PresetConfig:
         """Summary-line token for the skill-65 earnings guard + filters."""
         earn = (f"Earnings exp ≤ report−{self.earnings_buffer_days}d (≥{self.earnings_min_dte}d)"
                 if self.earnings_guard_enabled else "Earnings guard OFF")
-        return (f"{earn} • RS {self.rs_filter_mode} ≥p{self.rs_min_percentile:.0%} • "
+        macro = (f"Macro guard {'/'.join(self.macro_event_kinds) or 'none'} ≤{self.macro_event_max_dte}d"
+                 if self.macro_event_guard_enabled else "Macro guard OFF")
+        vrp = f"IV/RV ≥{self.vrp_min_ratio:g}" if self.vrp_min_ratio > 0 else "IV/RV off"
+        return (f"{earn} • {macro} • {vrp} • "
+                f"RS {self.rs_filter_mode} ≥p{self.rs_min_percentile:.0%} • "
                 f"Pullback {self.pullback_filter_mode} ≤{self.pullback_max_atr:g}ATR")
 
     @property
@@ -753,6 +770,7 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 # ---------------------------------------------------------------------------
 
 _TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct", "put_debit_excluded_tickers",
+                 "macro_event_kinds",
                  "iron_butterfly_dte_grid", "iron_butterfly_wing_width_pct",
                  "cc_dte_band", "csp_dte_band", "csp_strike_band"}
 
@@ -786,6 +804,13 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     for k in _TUPLE_FIELDS:
         if k in out and isinstance(out[k], list):
             out[k] = tuple(out[k])
+    if "macro_event_kinds" in out:
+        from trading_agent.macro_calendar import KINDS
+        kinds = tuple(str(k).upper() for k in out["macro_event_kinds"] if str(k).upper() in KINDS)
+        if len(kinds) != len(out["macro_event_kinds"]):
+            logger.warning("macro_event_kinds %r: unknown kinds dropped (known: %s)",
+                           out["macro_event_kinds"], ",".join(KINDS))
+        out["macro_event_kinds"] = kinds
     return out
 
 

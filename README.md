@@ -178,7 +178,12 @@ Every trade must pass **all eight checks** before execution:
 * **One-direction risk (2026-10-26):** Σ max loss of bullish (or bearish) positions ≤ `max_group_direction_risk_pct` (3 %) of equity within a correlated group — rates (TLT, IEF, TLH, XLU), gold (GLD, IAU, GDX, GDXJ, SLV), US equity (SPY, QQQ, DIA, IWM, XLK, SMH) — and ≤ `max_book_direction_risk_pct` (6 %) across the book. Trades are sized into the room left and blocked below one contract (`direction_risk_cap`). Grouped tickers share one hourly entry slot. Last week every entry was a bearish put debit and TLT + XLU were one bet on yields.
 * **Net delta (shadow):** each cycle the book's beta-weighted, SPY-equivalent delta is measured from the legs' deltas (`trade_journal/book_delta.json`); candidates that a cap of `max_net_beta_delta_pct` (30 %) would block are journalled as `net_delta_shadow`. Nothing is blocked yet.
 * **No put-debit fallback** on `put_debit_excluded_tickers` (XLY, XLK, XLI, GDX) — their option legs quote 30–90¢ wide, so the attempt always ended in `leg_spread_wide`.
-* **Market state:** size multiplier and allowed families (above).
+* **Market state:** size multiplier and allowed families (above). Credit stress is one of its CAUTION reasons since 2026-10-27: HYG/IEF (dividend-adjusted) ≥ 2 % under its 50-day average; CAUTION is held until it is back under 1 % (skill 68).
+
+**Macro events & implied vs realized (skill 68, live 2026-10-27).** Short-premium structures only (credit verticals, condors, butterflies, mean reversion, bounce bull put — never debits or calendars):
+* *Macro event guard:* no new trade of ≤ `macro_event_max_dte` (14) days on an equity ETF whose life holds a pending `macro_event_kinds` release (`NFP`; CPI / FOMC can be added). FOMC 2015 → 2027 and CPI / NFP from the Fed and FRED calendars (`macro_calendar.py`, refreshed weekly). Backtest: jobs-report days moved SPY / QQQ / IWM / XLK / SMH 1.4–1.9× a normal day; CPI barely, FOMC not at all close-to-close; bonds / gold / utilities exempt.
+* *Implied vs realized floor:* the ticker's 30-day ATM IV (yesterday's vol-surface row) must be ≥ `vrp_min_ratio` (1.0) × its 20-day realized vol. SPY 2007–2026: under 1.0 the priced ±1σ range held 77–82 % of the time, over 1.5 it held 87–88 %. Missing IV or RV never blocks.
+* Every journalled plan carries `macro_next_event`, `macro_events_in_trade`, `iv_atm_30d` and `iv_rv_ratio` so the rules can be re-tested on outcomes. Tables: `docs/plans/research_macro_vrp_credit.md`.
 
 **Kill switch & drawdown governor (skill 62).** `python -m trading_agent.trading_halt pause --reason "…"` pauses new entries; exits, stops and profit-taking keep running. The governor pauses automatically when equity is 2 % below the day's first reading or 5 % below the week's; only `… resume` lifts it.
 
@@ -214,14 +219,15 @@ Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's lau
 | Unit | What it does |
 |---|---|
 | `trading-agent.service` | The supervisor (skill 57): one agent cycle ≈ every 75 s in NYSE hours, sleeps outside them |
-| `trading-agent-data-server.service` | Data server on `127.0.0.1:8765` for the MCP tools: Schwab prices, chains, quotes, fundamentals, plus `/news`, `/research` (analyst estimates + quality-at-lows row) and `/sentiment` (skill 47 §3.5) |
+| `trading-agent-data-server.service` | Data server on `127.0.0.1:8765` for the MCP tools: Schwab prices, chains (with open interest), quotes, fundamentals, plus `/news`, `/research` (analyst estimates + quality-at-lows row), `/sentiment`, and the market inputs `/macro-events`, `/credit-stress`, `/vol/{ticker}`, `/gamma/{ticker}`, `/market-context` (skill 47 §3.5–3.6) |
 | `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
 | `trading-agent-vol-surface.timer` | 15:50 ET on weekdays (before the close): per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
+| `trading-agent-gamma.timer` | 16:05 ET on weekdays (agent idle, SPY / QQQ / IWM options still trading): dealer-gamma estimate — net GEX, flip level, call / put walls — from the data server's chains with open interest → `trade_journal/gamma_exposure.jsonl`; record only. Also refreshes the FOMC / CPI / NFP calendar weekly (skill 68) |
 | `trading-agent-quality-lows.timer` | 15:40 ET on weekdays: quality-at-lows shadow scan — 52-week-low stages, revenue growth, analyst revisions, Claude's news-reading drop cause, priced LEAPS / call-spread / CSP choices → `trade_journal/quality_lows.jsonl`; places no orders (skill 67) |
 | `trading-agent-liveness.timer` | Every 5 min in session: pages if no journal row for 10 min after 09:40 ET, `/health` fails, or `/ready` says Schwab is not returning data (dead token, 2026-10-26); one page per outage plus "recovered" (skill 64) |
 | `trading-agent-dashboard.service` | Streamlit dashboard (optional, off by default) |
 
-After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer trading-agent-quality-lows.timer`.
+After a reboot: `systemctl --user is-active trading-agent trading-agent-data-server trading-agent-reviewer.timer trading-agent-liveness.timer trading-agent-vol-surface.timer trading-agent-quality-lows.timer trading-agent-gamma.timer`.
 
 **Alerts (skill 32).** Telegram: trade opens / closes and the end-of-day summary on the main bot (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), errors and liveness pages on the error bot (`TELEGRAM_ERROR_*`). Messages are HTML-escaped; a message Telegram still rejects is resent once as plain text.
 
@@ -581,6 +587,8 @@ A minimal `.env` is shown in [Quickstart](#quickstart). The full reference follo
 | `MARKET_DATA_PROVIDER_BACKTEST` | _(inherits)_ | Reserved — backtester currently uses its own historical port |
 | `PORTFOLIO_ALERTS_ENABLED` | `true` | Hourly holdings + watchlist Telegram digest (skill 42). **`false` on the Pi since 2026-10-16** (paused at the operator's request) |
 | `TRADING_AGENT_VOL_SURFACE` | `trade_journal/vol_surface.jsonl` | Where the daily skew / term-structure snapshot is appended (skill 66) |
+| `TRADING_AGENT_GAMMA` | `trade_journal/gamma_exposure.jsonl` | Where the daily dealer-gamma rows are appended (skill 68) |
+| `TRADING_AGENT_MACRO_EVENTS` | `trade_journal/macro_events.json` | Refreshed FOMC / CPI / NFP dates, merged over the built-in table (skill 68) |
 | `TRADING_AGENT_QUALITY_LOWS` | `trade_journal/quality_lows.jsonl` | Where the daily quality-at-lows shadow rows are appended (skill 67) |
 | `TRADING_AGENT_ANALYST_CACHE` | `trade_journal/analyst_estimates.json` | 20-hour cache of Yahoo analyst estimates / revisions (skill 67) |
 | `QUALITY_LOWS_LLM_CAUSE` | `true` | `false` skips the Claude news-reading drop-cause label in the quality-at-lows scan (skill 67 §3.6a) |
@@ -726,6 +734,8 @@ trading-agent/
 │   ├── prob_model.py                 # Calibrated probability model, walk-forward (skill 66)
 │   ├── vol_surface.py                # Daily per-ticker skew / term-structure snapshot (skill 66)
 │   ├── quality_lows.py               # Quality-at-lows sleeve, long-option shadow scan (skill 67)
+│   ├── macro_calendar.py / macro_vol_gates.py  # FOMC/CPI/NFP dates, macro-event + IV/RV entry gates (skill 68)
+│   ├── gamma_exposure.py             # Daily dealer-gamma record, SPY/QQQ/IWM (skill 68)
 │   ├── analyst_estimates.py          # Analyst estimates / revisions from Yahoo, cached (skill 67)
 │   ├── drop_cause_llm.py             # "Why did it drop" label from 30 days of news via the claude CLI (skill 67)
 │   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk, direction-risk caps, stop cool-down (skill 37)

@@ -250,6 +250,65 @@ def get_sentiment(ticker: str) -> Dict[str, Any]:
     return _research_get("sentiment", ticker)
 
 
+def _context_get(path: str) -> Dict[str, Any]:
+    remote = _data_server_get(path, timeout=RESEARCH_TIMEOUT_S)
+    if remote is not None:
+        return remote
+    return {"source": "unavailable", "note": "data server unreachable"}
+
+
+def get_macro_events(days: Any = 45) -> Dict[str, Any]:
+    """FOMC / CPI / NFP releases in the next ``days`` days (skill 68).
+
+    Skill-47 ``/macro-events`` passthrough: kind, date, release time ET,
+    days away, the next release, and coverage warnings when the calendar
+    needs a refresh. The agent blocks short-premium equity-ETF trades of
+    ≤ 14 DTE across a pending jobs report.
+    """
+    return _context_get(f"macro-events?days={int(days)}")
+
+
+def get_credit_stress() -> Dict[str, Any]:
+    """Credit stress: % HYG/IEF sits under its 50-day average (skill 68).
+
+    Skill-47 ``/credit-stress`` passthrough, with the CAUTION threshold
+    (≥ 2 %), the exit level (< 1 %) and the last 20 sessions' readings.
+    """
+    return _context_get("credit-stress")
+
+
+def get_vol(ticker: str) -> Dict[str, Any]:
+    """30-day ATM IV vs 20-day realized vol for a ticker (skill 68).
+
+    Skill-47 ``/vol/{ticker}`` passthrough: ``iv_atm_30d``, ``rv_20d``,
+    ``iv_rv_ratio`` and whether a short-premium trade clears the active
+    preset's ``vrp_min_ratio``.
+    """
+    if not ticker:
+        raise ValueError("ticker is required")
+    return _context_get(f"vol/{ticker.upper()}")
+
+
+def get_gamma(ticker: str = "SPY") -> Dict[str, Any]:
+    """Latest recorded dealer-gamma estimate for SPY / QQQ / IWM (skill 68).
+
+    Skill-47 ``/gamma/{ticker}`` passthrough: net / call / put GEX ($ per
+    1 % move), the flip level and its distance from spot, call and put
+    walls, and ``long_gamma`` / ``short_gamma``. Record-only — not a
+    trading input yet.
+    """
+    return _context_get(f"gamma/{(ticker or 'SPY').upper()}")
+
+
+def get_market_context() -> Dict[str, Any]:
+    """Market state + macro releases + credit stress + SPY IV/RV + gamma.
+
+    Skill-47 ``/market-context`` passthrough: one call for the whole
+    market picture the agent trades on (skills 58, 68).
+    """
+    return _context_get("market-context")
+
+
 def get_recent_alerts(hours: Any = 24) -> Dict[str, Any]:
     """Read the ExceptionMonitor's recent-events log (skill 34).
 

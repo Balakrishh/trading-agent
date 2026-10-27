@@ -682,6 +682,10 @@ class SchwabMarketDataProvider(MarketDataProvider):
             "strike":     _f("strikePrice"),
             "expiration": (c.get("expirationDate") or expiration)[:10],
             "type":       option_type.lower(),
+            # Skill 68 (2026-10-27): dealer-gamma estimate needs open
+            # interest; None (not 0) when Schwab omits it.
+            "open_interest": (int(c["openInterest"]) if isinstance(c.get("openInterest"), (int, float))
+                              else None),
         }
 
     # ------------------------------------------------------------------

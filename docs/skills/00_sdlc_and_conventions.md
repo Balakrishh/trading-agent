@@ -265,6 +265,7 @@ Read this list as "if you're about to touch X, you must understand Y first."
 | Earnings-aware expiries, trend entry filters | [65 Earnings expiry & trend filters](65_earnings_expiry_and_trend_filters.md) |
 | Calibrated odds, the daily vol-surface snapshot | [66 Calibrated probability model](66_calibrated_probability_model.md) |
 | Revenue growth / analyst revisions, the quality-at-lows long-option shadow scan, the Claude "why did it drop" label | [67 Quality-at-lows sleeve](67_quality_at_lows_sleeve.md) |
+| FOMC / CPI / jobs-report guard, implied-vs-realized floor, credit stress, dealer gamma | [68 Macro events, VRP, credit, gamma](68_macro_events_vrp_credit_gamma.md) |
 | Trailing profit-taking | [30 Profit-target management](30_profit_target_management.md) §3.1b |
 
 ## 8. Edge Cases / Guardrails

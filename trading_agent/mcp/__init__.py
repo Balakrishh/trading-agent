@@ -40,5 +40,10 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_news",
     "get_research",
     "get_sentiment",
+    "get_macro_events",
+    "get_credit_stress",
+    "get_vol",
+    "get_gamma",
+    "get_market_context",
     "get_recent_alerts",
 )

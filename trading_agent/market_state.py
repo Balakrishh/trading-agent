@@ -94,6 +94,13 @@ class MarketStateConfig:
     caution_exit_vix_margin: float = 1.0
     caution_exit_term_ratio: float = 0.93
     caution_exit_breadth: float = 0.55
+    # Credit stress (skill 68, 2026-10-27): HYG/IEF ≥ 2 % under its 50-day
+    # average. SPY 2007–2026: P(21-session drawdown ≥ 5 %) 37 % vs 14 %
+    # without stress; 43 % (n=56) even when SPY was above its SMA-50 —
+    # information the trend rules do not already carry. Leaves CAUTION
+    # only once the gap is back under 1 %.
+    caution_credit_stress: float = 2.0
+    caution_exit_credit_stress: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -153,6 +160,7 @@ class MarketInputs:
     vix3m: Optional[float] = None
     breadth: Optional[float] = None            # fraction of tickers above SMA-50
     breadth_n: int = 0
+    credit_stress: Optional[float] = None      # % HYG/IEF sits under its 50-day (skill 68)
 
     @property
     def term_ratio(self) -> Optional[float]:
@@ -230,6 +238,10 @@ def classify_market_state(inp: MarketInputs, prior_state: Optional[str] = None,
         caution.append(f"VIX/VIX3M {tr:.2f} ≥ {cfg.caution_term_ratio:g}")
     if br is not None and br < cfg.caution_breadth:
         caution.append(f"breadth {br:.0%} < {cfg.caution_breadth:.0%}")
+    cs = inp.credit_stress
+    if cs is not None and cs >= cfg.caution_credit_stress:
+        caution.append(f"credit stress: HYG/IEF {cs:.1f}% under its 50-day "
+                       f"(≥ {cfg.caution_credit_stress:g}%)")
     if caution:
         return result(CAUTION, caution)
     if prior_state == CAUTION:
@@ -242,6 +254,8 @@ def classify_market_state(inp: MarketInputs, prior_state: Optional[str] = None,
             hold.append(f"VIX/VIX3M {tr:.2f} not yet ≤ {cfg.caution_exit_term_ratio:g}")
         if br is not None and br < cfg.caution_exit_breadth:
             hold.append(f"breadth {br:.0%} not yet ≥ {cfg.caution_exit_breadth:.0%}")
+        if cs is not None and cs >= cfg.caution_exit_credit_stress:
+            hold.append(f"credit stress {cs:.1f}% not yet < {cfg.caution_exit_credit_stress:g}%")
         if hold:
             return result(CAUTION, ["hysteresis: " + "; ".join(hold)])
     return result(NORMAL, ["no risk condition met"])
@@ -322,10 +336,13 @@ def _closes(df: Any) -> List[float]:
 
 
 def compute_inputs(fetch_history: Callable[[str], Any], tickers: Iterable[str],
-                   fetch_level: Callable[[str], Optional[float]]) -> MarketInputs:
+                   fetch_level: Callable[[str], Optional[float]],
+                   fetch_adjusted: Optional[Callable[[str], Any]] = None) -> MarketInputs:
     """Each input fetched in its own try/except (one failed RPC must not
     blank the others). ``fetch_history(ticker)`` returns a daily OHLCV
-    frame; ``fetch_level(symbol)`` returns the latest index level."""
+    frame; ``fetch_level(symbol)`` returns the latest index level;
+    ``fetch_adjusted(ticker)`` a dividend-adjusted frame for the credit
+    pair (defaults to ``fetch_history``)."""
     spy: List[float] = []
     try:
         spy = _closes(fetch_history("SPY"))
@@ -350,11 +367,50 @@ def compute_inputs(fetch_history: Callable[[str], Any], tickers: Iterable[str],
                 above += c[-1] > s
         except Exception as exc:                                # noqa: BLE001
             logger.debug("market_state: breadth skip %s (%s)", t, exc)
+    credit = None
+    try:
+        adj = fetch_adjusted or fetch_history
+        credit = credit_stress_pct(_aligned_ratio(adj(CREDIT_PAIR[0]), adj(CREDIT_PAIR[1])))
+    except Exception as exc:                                    # noqa: BLE001
+        logger.warning("market_state: credit stress unavailable (%s)", exc)
     return MarketInputs(
         spy_price=spy[-1] if spy else None, spy_sma20=_sma(spy, 20),
         spy_sma50=_sma(spy, 50), spy_sma200=_sma(spy, 200), spy_rsi=_rsi(spy),
         vix=vix, vix3m=vix3m, breadth=(above / n) if n else None, breadth_n=n,
+        credit_stress=credit,
     )
+
+
+# Credit stress (skill 68, 2026-10-27): HYG / IEF — high-yield bonds vs
+# 7–10-year Treasuries — is a daily credit-spread proxy with history since
+# 2007 (FRED's ICE HY OAS series only serves the last 3 years).
+CREDIT_PAIR = ("HYG", "IEF")
+CREDIT_SMA = 50
+
+
+def _aligned_ratio(num: Any, den: Any) -> List[float]:
+    """num / den close ratio over the dates both daily frames share."""
+    col = lambda df: df["Close" if "Close" in df.columns else "close"].dropna()
+    a, b = col(num), col(den)
+    common = set(b.index)
+    return [float(a[d]) / float(b[d]) for d in a.index if d in common and float(b[d]) > 0]
+
+
+def yfinance_adjusted_history(symbol: str) -> Any:
+    """Dividend-adjusted daily closes (1 year) for the credit pair. HYG
+    pays monthly: unadjusted closes drop ~0.4 % on every ex-date, which
+    reads as credit stress (1.42 % vs 0.78 % on 2026-10-27)."""
+    import yfinance as yf  # type: ignore
+    return yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True)
+
+
+def credit_stress_pct(ratio: List[float], n: int = CREDIT_SMA) -> Optional[float]:
+    """How far (in %) the latest HYG/IEF ratio sits *under* its ``n``-day
+    average; negative when above. None with fewer than ``n`` points."""
+    if len(ratio) < n or not ratio[-1]:
+        return None
+    avg = sum(ratio[-n:]) / n
+    return round((1 - ratio[-1] / avg) * 100, 3) if avg > 0 else None
 
 
 def yfinance_level(symbol: str) -> Optional[float]:

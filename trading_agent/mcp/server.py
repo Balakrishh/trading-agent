@@ -45,6 +45,11 @@ _HANDLERS: Dict[str, Callable[..., Any]] = {
     "get_news":           _market.get_news,
     "get_research":       _market.get_research,
     "get_sentiment":      _market.get_sentiment,
+    "get_macro_events":  _market.get_macro_events,
+    "get_credit_stress":  _market.get_credit_stress,
+    "get_vol":           _market.get_vol,
+    "get_gamma":         _market.get_gamma,
+    "get_market_context":  _market.get_market_context,
     "get_recent_alerts":  _market.get_recent_alerts,
 }
 

@@ -25,8 +25,10 @@ DEFENSIVE     P < S200  and  (V ≥ 22  or  T ≥ 1.00  or  B < 0.40)
 (prior ∈ DEFENSIVE/CAPITULATION/RECOVERY)
   NORMAL      P > S50 and V < 20
   RECOVERY    P > S20
-CAUTION       P < S50  or  V ≥ 20  or  T ≥ 0.95  or  B < 0.50
-(prior = CAUTION, hysteresis) stay CAUTION unless P ≥ 1.01·S50, V < 19, T ≤ 0.93, B ≥ 0.55
+CAUTION       P < S50  or  V ≥ 20  or  T ≥ 0.95  or  B < 0.50  or  C ≥ 2.0
+(prior = CAUTION, hysteresis) stay CAUTION unless P ≥ 1.01·S50, V < 19, T ≤ 0.93, B ≥ 0.55, C < 1.0
+
+C = credit stress: % HYG/IEF (dividend-adjusted) sits under its 50-day average (skill 68, 2026-10-27)
 NORMAL        otherwise
 
 gate:  state         size×  allowed new spreads                    new CSPs
@@ -256,6 +258,7 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 - **SPY history unavailable** — `compute_inputs` returns `spy_price=None`; the classifier fails safe to CAUTION (`spy_data_unavailable`). An exception anywhere in the overlay is recorded by the ExceptionMonitor and also yields CAUTION; it never aborts the cycle.
 - **VIX / VIX3M / breadth missing** — each input is fetched in its own try/except; a missing input is `None` (sentinel) and its rules are skipped, never read as zero. `term_ratio` is `None` unless both VIX and VIX3M are present.
 - **Non-equity tickers in breadth** — TLT, GLD, GDX, etc. often rise in an equity sell-off; `breadth_universe` drops them (and SPY) so breadth is not flattered exactly when it matters.
+- **Credit stress (2026-10-27, skill 68).** `MarketInputs.credit_stress` = % the HYG/IEF ratio sits under its 50-day average, from **dividend-adjusted** closes (`compute_inputs(..., fetch_adjusted=yfinance_adjusted_history)`; unadjusted, HYG's monthly ex-date reads as ~0.4 % of stress). ≥ 2 % is a CAUTION reason; CAUTION is held while it is ≥ 1 %. SPY 2007–2026: P(21-session drawdown ≥ 5 %) 37 % with stress vs 14 % without (`docs/plans/research_macro_vrp_credit.md`). Missing → None, rule skipped. The state's own SPY rules were not re-run through `validate_market_state.py` with the new input.
 - **Process restarts every cycle** — the prior state (for RECOVERY and the CAUTION hysteresis) is read back from `trade_journal/market_state.json`, written atomically (temp + rename) each cycle.
 - **NORMAL↔CAUTION churn** — without hysteresis the 2019–2026 replay flipped 159 times (median CAUTION run 2 days); the exit margins cut total state changes from 34 to 26 per year.
 - **CAPITULATION** — Stage 2 returns early with `skipped_reason=market_state_CAPITULATION`; Stage 1 exits already ran. `get_market_state` adds a note rather than a hedge (puts are dearest then).
@@ -281,4 +284,4 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 
 ---
 
-*Last verified against repo HEAD on 2026-10-26.*
+*Last verified against repo HEAD on 2026-10-27.*

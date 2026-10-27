@@ -87,6 +87,7 @@ Skills 40–65: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 65 | [Earnings-Aware Expiries and Trend Entry Filters](65_earnings_expiry_and_trend_filters.md) | risk / strategy | `trading_agent/entry_filters.py`, `trading_agent/earnings_calendar.py`, `trading_agent/strategy.py` |
 | 66 | [Calibrated Probability Model and Daily Vol Surface](66_calibrated_probability_model.md) | strategy / data_quality | `trading_agent/prob_model.py`, `trading_agent/vol_surface.py`, `scripts/research/calibrate_prob_model.py`, `deploy/systemd/trading-agent-vol-surface.*` |
 | 67 | [Quality-at-Lows Sleeve](67_quality_at_lows_sleeve.md) | strategy / data_quality | `trading_agent/quality_lows.py`, `trading_agent/analyst_estimates.py`, `trading_agent/drop_cause_llm.py`, `trading_agent/news_aggregator.py`, `trading_agent/market_data_schwab.py`, `scripts/research/quality_lows_backtest.py`, `deploy/systemd/trading-agent-quality-lows.*` |
+| 68 | [Macro Events, Implied vs Realized, Credit Stress, Dealer Gamma](68_macro_events_vrp_credit_gamma.md) | risk / data_quality | `trading_agent/macro_vol_gates.py`, `trading_agent/macro_calendar.py`, `trading_agent/market_state.py`, `trading_agent/gamma_exposure.py`, `trading_agent/data_server/market_context.py`, `scripts/research/macro_vrp_credit_study.py`, `deploy/systemd/trading-agent-gamma.*` |
 
 ## Phase 2 (planned, not yet written)
 
