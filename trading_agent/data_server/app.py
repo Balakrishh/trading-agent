@@ -12,7 +12,11 @@ Route summary (skill 47 §2):
     GET  /chain/{underlying}?expiration=&option_type=
     POST /quotes                  {"symbols": [...]}
     POST /snapshots               {"tickers": [...]}
+    GET  /fundamentals/{ticker}
     GET  /market-status
+    GET  /news/{ticker}?days=&limit=   Alpaca + Yahoo RSS (§3.5)
+    GET  /research/{ticker}            analyst estimates + quality-at-lows row
+    GET  /sentiment/{ticker}           Claude label + analyst stance + news flow
 
 Read-only invariant: this file imports nothing from ``trading_agent.executor``,
 ``trading_agent.journal_kb``, or anything named ``submit_order`` /
@@ -31,6 +35,8 @@ from pydantic import BaseModel, Field
 from trading_agent.data_server.auth import build_fastapi_dependency
 from trading_agent.data_server.cache import TTLCache
 from trading_agent.data_server.config import CacheTTLs, ServerConfig
+from trading_agent.data_server import research as _research
+from trading_agent.data_server.research import ResearchSources
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +80,14 @@ def build_app(
     *,
     provider: Any,
     config: Optional[ServerConfig] = None,
+    research_sources: Optional[ResearchSources] = None,
 ) -> "Any":
     """Construct the FastAPI application.
 
     ``provider`` must satisfy ``MarketDataPort``. ``config`` defaults
     to ``ServerConfig()`` (auth disabled, default TTLs) for the
-    hermetic-test path.
+    hermetic-test path. ``research_sources`` defaults to the live news /
+    analyst / quality-at-lows readers (skill 47 §3.5).
     """
     from fastapi import Body, Depends, FastAPI, HTTPException
 
@@ -87,6 +95,10 @@ def build_app(
     ttls: CacheTTLs = cfg.ttls
     price_cache = TTLCache(ttls.price_sec)
     snapshot_cache = TTLCache(ttls.snapshot_sec)
+    # News is cached whatever the Schwab cache switch says: it is not
+    # Schwab data, and Alpaca + Yahoo take seconds per ticker.
+    news_cache = TTLCache(_research.NEWS_TTL_SEC)
+    src = research_sources or _research.default_sources()
     auth_dep = build_fastapi_dependency(cfg.api_key)
 
     app = FastAPI(
@@ -273,8 +285,53 @@ def build_app(
             )
         return {"open": is_open, "as_of": now.isoformat()}
 
+    # ── Research (skill 47 §3.5) ─────────────────────────────────────
+    # Plain ``def`` routes: the fetchers block for seconds (HTTP to
+    # Alpaca / Yahoo), so FastAPI runs them in its thread pool instead
+    # of stalling the event loop that serves /price and /quotes.
+
+    def _news_rows(t: str, days: int, limit: int) -> List[Dict[str, Any]]:
+        return news_cache.get_or_set(
+            f"{t}|{days}|{limit}",
+            lambda: _research.news_rows(src.fetch_news(t, days, limit)),
+        )
+
+    @app.get("/news/{ticker}", tags=["research"], dependencies=[Depends(auth_dep)])
+    def news(ticker: str, days: int = _research.NEWS_DAYS,
+             limit: int = _research.NEWS_MAX_ITEMS) -> Dict[str, Any]:
+        t = _validate_ticker(ticker)
+        if not (1 <= days <= 90) or not (1 <= limit <= 200):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid_range", "days": days, "limit": limit,
+                        "allowed": "days 1-90, limit 1-200"},
+            )
+        try:
+            rows = _news_rows(t, days, limit)
+        except Exception as exc:                                # noqa: BLE001
+            raise _upstream_error(exc, kind="news_upstream")
+        return {"ticker": t, "days": days, "count": len(rows), "items": rows,
+                "sources": ["alpaca_news", "yahoo_rss"]}
+
+    @app.get("/research/{ticker}", tags=["research"], dependencies=[Depends(auth_dep)])
+    def research(ticker: str) -> Dict[str, Any]:
+        return _research.research(_validate_ticker(ticker), src)
+
+    @app.get("/sentiment/{ticker}", tags=["research"], dependencies=[Depends(auth_dep)])
+    def sentiment(ticker: str) -> Dict[str, Any]:
+        t = _validate_ticker(ticker)
+        notes: List[str] = []
+        try:
+            rows = _news_rows(t, _research.NEWS_DAYS, _research.NEWS_MAX_ITEMS)
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning("[%s] news for sentiment failed: %s", t, exc)
+            notes.append(f"news unavailable: {str(exc)[:120]}")
+            rows = None
+        return _research.sentiment(t, rows, src, notes)
+
     # Attach caches to app.state so tests can invalidate them.
     app.state.price_cache = price_cache
+    app.state.news_cache = news_cache
     app.state.snapshot_cache = snapshot_cache
     app.state.config = cfg
     return app

@@ -214,7 +214,7 @@ Since 2026-10-07 the live agent runs on an always-on Raspberry Pi; the Mac's lau
 | Unit | What it does |
 |---|---|
 | `trading-agent.service` | The supervisor (skill 57): one agent cycle ≈ every 75 s in NYSE hours, sleeps outside them |
-| `trading-agent-data-server.service` | Schwab quote server on `127.0.0.1:8765` for the MCP tools |
+| `trading-agent-data-server.service` | Data server on `127.0.0.1:8765` for the MCP tools: Schwab prices, chains, quotes, fundamentals, plus `/news`, `/research` (analyst estimates + quality-at-lows row) and `/sentiment` (skill 47 §3.5) |
 | `trading-agent-reviewer.timer` | Daily journal review at 16:15 ET on weekdays (skill 56) |
 | `trading-agent-vol-surface.timer` | 15:50 ET on weekdays (before the close): per-ticker ATM / 25-delta IV and 7/30/60-day term structure from the data server → `trade_journal/vol_surface.jsonl` (skill 66) |
 | `trading-agent-quality-lows.timer` | 15:40 ET on weekdays: quality-at-lows shadow scan — 52-week-low stages, revenue growth, analyst revisions, Claude's news-reading drop cause, priced LEAPS / call-spread / CSP choices → `trade_journal/quality_lows.jsonl`; places no orders (skill 67) |
@@ -748,7 +748,7 @@ trading-agent/
 │   ├── daily_reviewer.py / daily_reviewer_main.py / claude_reviewer.py   # EOD review (skill 56)
 │   ├── schwab_oauth.py / market_data_schwab.py / market_data_factory.py  # Data providers (skill 16)
 │   ├── mcp/                          # MCP server for Claude Code (skill 48)
-│   ├── data_server/                  # Read-only Schwab quote server, localhost:8765
+│   ├── data_server/                  # Read-only data server, localhost:8765 (Schwab + news/research)
 │   │
 │   │   # ── Backtesting ──
 │   ├── backtest/
