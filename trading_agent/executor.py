@@ -74,6 +74,11 @@ CLOSE_POLL_INTERVAL_S = 1.0
 # of the cycle that finishes it only within this window; older entries
 # (the rest was closed by hand) are ignored.
 PARTIAL_LEDGER_MAX_AGE_DAYS = 3
+# ── Mid-first debit entry ladder, live (backlog C1, skill 59 §3) ─────────
+# Each probe below natural waits this long for a fill before it is
+# cancelled and the next (higher) price is tried; whatever is left goes
+# out at natural as before. 3 probes ≈ 30 s inside the 270 s cycle guard.
+ENTRY_LADDER_WAIT_S = 10.0
 _ORDER_TERMINAL_FAIL = {"canceled", "cancelled", "rejected", "expired",
                         "done_for_day", "stopped", "suspended"}
 
@@ -325,6 +330,10 @@ class OrderExecutor:
         # plan never gets rejected at exec time by a stale static floor.
         self.delta_aware_floor = delta_aware_floor
         self.edge_buffer = edge_buffer
+        # Live debit ladder (skill 59 §3): set by the agent from the preset
+        # (``debit_ladder_mode == "live"`` / ``debit_ladder_steps``).
+        self.debit_ladder_live = False
+        self.debit_ladder_steps = 4
         os.makedirs(self.trade_plan_dir, exist_ok=True)
 
     def _headers(self) -> Dict[str, str]:
@@ -643,6 +652,20 @@ class OrderExecutor:
             "(max_risk_pct=%.0f%%, equity=$%.2f)",
             plan.ticker, qty, self.max_risk_pct * 100, account_balance)
 
+        # Live mid-first ladder for debit verticals (skill 59 §3, C1).
+        ladder = None
+        if submit_credit < 0 and self.debit_ladder_live:
+            from trading_agent.debit_ladder import LADDER_STRATEGIES
+            if plan.strategy_name in LADDER_STRATEGIES:
+                ladder = self._debit_ladder_probes(plan, plan_path, run_id, legs_payload,
+                                                   qty, natural=-submit_credit)
+                if ladder.get("final") is not None:
+                    return ladder["final"]
+                if ladder["remaining"] < qty:
+                    logger.info("[%s] Ladder filled %d of %d — rest at natural",
+                                plan.ticker, qty - ladder["remaining"], qty)
+                qty = ladder["remaining"]
+
         # ── Idempotency key ───────────────────────────────────────────────
         # Generate ONCE per plan.  Re-used across every retry of THIS POST
         # so that if Alpaca accepted the first request but the response
@@ -667,13 +690,122 @@ class OrderExecutor:
                      plan.ticker, plan.strategy_name, client_order_id,
                      json.dumps(order_payload, indent=2))
 
-        return self._submit_order_with_idempotency(
+        result = self._submit_order_with_idempotency(
             plan=plan,
             plan_path=plan_path,
             run_id=run_id,
             order_payload=order_payload,
             client_order_id=client_order_id,
         )
+        if ladder is not None:
+            filled = ladder["summary"]["filled_qty"]
+            if result.get("status") != "submitted" and filled:
+                # The probes filled part of the order but natural failed:
+                # report what is really open so the journal matches the broker.
+                last = ladder["summary"]["probes"][-1]
+                result = {**result, "status": "submitted", "order_id": last["order_id"],
+                          "natural_error": result.get("error")}
+                ladder["qty"] = filled
+            result = {**result, "qty": ladder["qty"], "ladder": ladder["summary"]}
+        return result
+
+    # ------------------------------------------------------------------
+    # Live mid-first debit ladder (backlog C1, skill 59 §3)
+    # ------------------------------------------------------------------
+
+    def _mid_debit(self, plan: SpreadPlan) -> Optional[float]:
+        """Net mid debit per share from fresh leg quotes, else None."""
+        try:
+            quotes = self.data_provider.fetch_option_quotes([l.symbol for l in plan.legs]) or {}
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — no mid → no ladder, natural as before
+            logger.warning("[%s] Ladder quote fetch failed (%s)", plan.ticker, exc)
+            return None
+        mid = 0.0
+        for leg in plan.legs:
+            q = quotes.get(leg.symbol) or {}
+            bid, ask = q.get("bid"), q.get("ask")
+            if bid is None or ask is None or ask <= 0:
+                return None
+            m = (float(bid) + float(ask)) / 2
+            mid += m if leg.action == "buy" else -m
+        return round(mid, 4) if mid > 0 else None
+
+    def _order_fill(self, order_id: str) -> Tuple[str, int, Optional[float]]:
+        """(status, filled qty, average fill price) of an order."""
+        try:
+            resp = requests.get(f"{self.base_url}/orders/{order_id}",
+                                headers=self._headers(), timeout=ALPACA_TIMEOUT_LONG)
+            resp.raise_for_status()
+            body = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("Order %s status check failed: %s", order_id, exc)
+            return "unknown", 0, None
+        filled = int(float(body.get("filled_qty") or 0))
+        avg = body.get("filled_avg_price")
+        return str(body.get("status", "unknown")), filled, (abs(float(avg)) if avg else None)
+
+    def _debit_ladder_probes(self, plan: SpreadPlan, plan_path: str, run_id: str,
+                             legs_payload: List[Dict], qty: int, natural: float) -> Dict:
+        """Offer the debit at mid and at evenly spaced steps up to (not
+        including) natural, ``ENTRY_LADDER_WAIT_S`` each; cancel an unfilled
+        probe before trying the next. Returns ``{"remaining", "qty",
+        "summary", "final"}``: ``final`` is the result to return when the
+        ladder filled everything, or when a cancel could not be confirmed
+        (that probe may still fill — nothing more is sent, so the position
+        can never double). Otherwise the caller sends ``remaining`` at
+        natural as before."""
+        from trading_agent.debit_ladder import ladder_prices
+        out = {"remaining": qty, "qty": qty, "final": None,
+               "summary": {"natural": round(natural, 2), "mid": None, "probes": [],
+                           "filled_qty": 0, "avg_fill": None, "saving_usd": 0.0}}
+        mid = self._mid_debit(plan)
+        if mid is None or mid >= natural:
+            return out
+        out["summary"]["mid"] = round(mid, 2)
+        probes = [p for p in ladder_prices(mid, natural, self.debit_ladder_steps)
+                  if p < round(natural, 2) - 1e-9]
+        cost = 0.0
+
+        def settle():
+            n = out["summary"]["filled_qty"]
+            if n:
+                out["summary"]["avg_fill"] = round(cost / n, 4)
+                out["summary"]["saving_usd"] = round((natural * n - cost) * 100, 2)
+
+        for price in probes:
+            cid = f"ta-{run_id[:8]}-l{len(out['summary']['probes'])}-{uuid.uuid4().hex[:8]}"
+            payload = {"type": "limit", "time_in_force": "day", "order_class": "mleg",
+                       "qty": str(out["remaining"]), "limit_price": f"{price:.2f}",
+                       "client_order_id": cid, "legs": legs_payload}
+            logger.info("[%s] Ladder probe: %d @ $%.2f (mid $%.2f, natural $%.2f)",
+                        plan.ticker, out["remaining"], price, mid, natural)
+            res = self._submit_order_with_idempotency(plan=plan, plan_path=plan_path, run_id=run_id,
+                                                      order_payload=payload, client_order_id=cid)
+            if res.get("status") != "submitted":
+                break                                   # broker refused: the natural path decides
+            self._await_fill(res["order_id"], wait_s=ENTRY_LADDER_WAIT_S)
+            status, filled, avg = self._order_fill(res["order_id"])
+            filled = min(filled, out["remaining"])
+            out["summary"]["probes"].append({"price": price, "status": status, "filled": filled,
+                                             "order_id": res["order_id"]})
+            if filled:
+                cost += (avg if avg is not None else price) * filled
+                out["remaining"] -= filled
+                out["summary"]["filled_qty"] += filled
+            if out["remaining"] == 0 or (status != "filled" and status not in _ORDER_TERMINAL_FAIL):
+                # All filled — or the cancel was not confirmed: stop here.
+                settle()
+                if out["remaining"]:
+                    logger.warning("[%s] Ladder probe %s not confirmed cancelled (%s) — "
+                                   "sending nothing more", plan.ticker, res["order_id"], status)
+                else:
+                    logger.info("[%s] Ladder filled %d @ avg $%.2f vs natural $%.2f (saved $%.2f)",
+                                plan.ticker, qty, out["summary"]["avg_fill"], natural,
+                                out["summary"]["saving_usd"])
+                out["final"] = {**res, "qty": qty, "limit_price": price, "ladder": out["summary"]}
+                return out
+        settle()
+        return out
 
     def _submit_order_with_idempotency(
         self, plan: SpreadPlan, plan_path: str, run_id: str,
@@ -1362,11 +1494,12 @@ class OrderExecutor:
                            spread.underlying, price, exc)
             return None
 
-    def _await_fill(self, order_id: str) -> str:
-        """Poll until filled / terminal / timeout. On timeout, cancel and
+    def _await_fill(self, order_id: str, wait_s: Optional[float] = None) -> str:
+        """Poll until filled / terminal / timeout (``wait_s``, default
+        ``CLOSE_FILL_WAIT_S`` read at call time). On timeout, cancel and
         return the post-cancel status — a fill can race the cancel."""
         url = f"{self.base_url}/orders/{order_id}"
-        deadline = time.monotonic() + CLOSE_FILL_WAIT_S
+        deadline = time.monotonic() + (CLOSE_FILL_WAIT_S if wait_s is None else wait_s)
         status = "unknown"
         while True:
             try:

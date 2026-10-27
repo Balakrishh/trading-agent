@@ -274,7 +274,7 @@ def _score_calendar_with_reason(*, debit: float, mid_value: float,
 
 ### Mid-first entry ladder — shadow (backlog C1, 2026-10-16)
 
-`trading_agent/debit_ladder.py`. Debit verticals are still sent at the natural price; with `debit_ladder_mode = "shadow"` (default; `"off"` disables; `"live"` is not built and falls back to the default with a warning) the agent measures what a mid-first ladder would have done:
+`trading_agent/debit_ladder.py`. Debit verticals are still sent at the natural price; with `debit_ladder_mode = "shadow"` (default; `"off"` disables; `"live"` since 2026-10-27, below) the agent measures what a mid-first ladder would have done:
 
 ```python
 ladder_prices(mid, cap, steps)        # mid (rounded up) → cap (rounded down), debit_ladder_steps prices
@@ -289,6 +289,27 @@ ladder_outcome(prices, naturals, step_cycles)
 * Presets: `debit_ladder_mode` ("shadow"), `debit_ladder_steps` (4), `debit_ladder_step_cycles` (1 ≈ 75 s a step). Summary token `Ladder shadow 4×1c` in the debit block; dashboard controls under "Debit stop".
 
 Example (GLD put debit, 2026-10-15): mid 3.975, cap 4.1738, natural 4.25 → prices 3.98 / 4.04 / 4.11 / 4.17.
+
+### Mid-first entry ladder — live (2026-10-27)
+
+`debit_ladder_mode = "live"` (the paper account's preset, backlog §14). The order path changes only for Call / Put Debit Spreads that already passed every gate — the scanner's `debit_above_fair` rejection is unchanged, so live mode never *unlocks* a trade (the shadow's "unlocked" count is not acted on).
+
+```python
+# trading_agent/executor.py — OrderExecutor._submit_order, debit branch, after sizing
+if submit_credit < 0 and self.debit_ladder_live and plan.strategy_name in LADDER_STRATEGIES:
+    ladder = self._debit_ladder_probes(plan, plan_path, run_id, legs_payload, qty,
+                                       natural=-submit_credit)
+    if ladder["final"] is not None:            # all filled, or a cancel not confirmed
+        return ladder["final"]
+    qty = ladder["remaining"]                  # the rest goes out at natural, as before
+
+# _debit_ladder_probes: mid from fresh quotes; probes = ladder_prices(mid, natural, steps)
+# below natural (4 steps → mid + 2 more); each: POST (own client_order_id
+# ta-<run>-l<i>-<hex>), _await_fill(wait_s=ENTRY_LADDER_WAIT_S=10) which cancels on
+# timeout, then GET status / filled_qty / filled_avg_price.
+```
+
+The executor's `debit_ladder_live` / `debit_ladder_steps` are set by `TradingAgent.__init__` from the preset. The result carries `ladder = {natural, mid, probes: [{price, status, filled, order_id}], filled_qty, avg_fill, saving_usd}`, journalled as `debit_ladder` on the plan row; `saving_usd = (natural × filled − Σ fill) × 100`. Alpaca paper does fill inside the spread sometimes — the SPY calendar close on 2026-10-27 filled at the halfway price (1 of 5 atomic closes). The shadow trackers run only in `shadow` mode.
 
 ## 4. Edge Cases / Guardrails
 
@@ -317,6 +338,10 @@ Example (GLD put debit, 2026-10-15): mid 3.975, cap 4.1738, natural 4.25 → pri
 - **Toggles** — `debit_spreads_enabled`, `calendar_enabled`, `bounce_bull_put_enabled` (all default on, paper). Off → that playbook never plans; the bounce/wait replacements also turn off, restoring the bear call.
 - **Earnings (2026-10-15, skill 65).** On single stocks the debit expiry (`_expiration_near`) is pulled to the last weekly before the next report, and a calendar is skipped when its far leg would end after it ("no far leg ends before earnings on D"). Debit spreads and calendars are also where the trend filters bite most: call debits need a leader near support, put debits a laggard near resistance.
 
+- **Live ladder can never double a position.** A probe whose cancel is not confirmed (status not `filled` and not terminal after `_await_fill`'s DELETE — e.g. `pending_cancel`, or the status GET failed → `unknown`) stops the ladder: that order is returned as the submission and nothing else is sent; it may still fill at its probe price (≤ natural) and is then seen as a pending order / position like any other.
+- **Partial fills.** mleg fills keep every leg equal, so a probe that fills k of n contracts leaves n − k; the next probe and the natural order are for the remainder only. If the natural order then fails after a partial ladder fill, the result is still `submitted` with `qty` = contracts filled and `natural_error` set, so the journal matches the broker.
+- **Ladder skipped** (natural sent as before) when quotes are missing, mid ≥ natural, or the first probe POST is refused. Time cost: up to 3 × 10 s per debit entry, inside the 270 s cycle guard.
+
 ## 5. Cross-References
 
 - `58_market_state_playbook.md` — `playbook_for` routes here; gates per state.
@@ -327,4 +352,4 @@ Example (GLD put debit, 2026-10-15): mid 3.975, cap 4.1738, natural 4.25 → pri
 
 ---
 
-*Last verified against repo HEAD on 2026-10-26.*
+*Last verified against repo HEAD on 2026-10-27.*

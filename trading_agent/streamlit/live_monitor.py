@@ -3028,7 +3028,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Debit stop (% of debit)", 0.2, 0.9,
                 float(getattr(seed, "debit_stop_loss_pct", 0.50)), 0.05,
                 key="cust_debit_sl")
-            _ladder_modes = ["shadow", "off"]
+            _ladder_modes = ["shadow", "live", "off"]
             debit_ladder_mode = st.selectbox(
                 "Mid-first ladder (C1)", _ladder_modes,
                 index=_ladder_modes.index(getattr(seed, "debit_ladder_mode", "shadow")
@@ -3037,7 +3037,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 key="cust_debit_ladder_mode",
                 help="shadow: orders still go out at natural; record what offering mid → "
                      "cap in steps would have saved, and which rejected near misses it "
-                     "would have opened. Live mode is not built yet.")
+                     "would have opened. live: offer mid and steps up to natural, ~10 s "
+                     "each, then send the rest at natural.")
             debit_ladder_steps = st.number_input(
                 "Ladder steps", 1, 8, int(getattr(seed, "debit_ladder_steps", 4)), 1,
                 key="cust_debit_ladder_steps")

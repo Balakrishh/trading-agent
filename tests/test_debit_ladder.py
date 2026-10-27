@@ -177,12 +177,13 @@ def test_scanner_skips_candidate_failing_rr_at_cap():
 
 # ── preset ────────────────────────────────────────────────────────────
 
-def test_preset_defaults_summary_and_live_rejected():
+def test_preset_defaults_summary_and_modes():
     f = PresetConfig.__dataclass_fields__
     assert (f["debit_ladder_mode"].default, f["debit_ladder_steps"].default,
             f["debit_ladder_step_cycles"].default) == ("shadow", 4, 1)
     assert "Ladder shadow 4×1c" in PRESETS["balanced"].to_summary_line()
-    assert "debit_ladder_mode" not in _coerce_overrides({"debit_ladder_mode": "live"})
+    assert _coerce_overrides({"debit_ladder_mode": "live"})["debit_ladder_mode"] == "live"
+    assert "debit_ladder_mode" not in _coerce_overrides({"debit_ladder_mode": "turbo"})
 
 
 # ── agent hooks ───────────────────────────────────────────────────────

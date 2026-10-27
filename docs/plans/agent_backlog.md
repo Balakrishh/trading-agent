@@ -273,10 +273,10 @@ The operator asked to stop running new rules in shadow on a paper account: live 
 | Relative strength filter (skill 65) | 28 verdicts on approved plans, 0 failures. | **live** — would have blocked nothing so far; kept as a guard. |
 | Pullback filter (skill 65) | 21 failures, on 2 trades that were opened: XLU 10-16 (price already back above the 50-day — "resistance broken") and GLD 10-22 (2.1 ATR below the 20-day — extended). Both under water on 10-27 (−$120, −$27.50). | **live** — small sample, right direction. |
 | Net-delta budget (E4, skill 37) | 0 `net_delta_shadow` rows: the book reached +31 % on 10-26 but no same-side candidate got through the other gates. | **live built and on** (30 % budget): blocks a candidate leaning the same way as a book past it; an unknown reading never blocks. |
-| Debit ladder (C1, skill 59) | 2 submitted orders: ladder fill = actual fill, **$0 saved**; 5 of 188 over-the-cap near misses would have opened (GLD ×2, XLF, XLE, SMH). | **stays shadow** — live is an order-management change (re-pricing a working order across cycles) with no measured saving; revisit with more submitted orders. |
+| Debit ladder (C1, skill 59) | 2 submitted orders: ladder fill = actual fill, **$0 saved**; 5 of 188 over-the-cap near misses would have opened (GLD ×2, XLF, XLE, SMH). | **live** (built the same day): within the cycle, offer mid and steps up to natural, 10 s each, cancel-confirmed before the next; the rest at natural. Paper does fill inside the spread sometimes (the SPY calendar close filled at the halfway price). Never unlocks a rejected trade. |
 | Realized-vol POP (`pop_rv`, §3) | Log only, compared on outcomes by skill 66. | n/a — not a gate. |
 
-Set in the Pi's `STRATEGY_PRESET.json` (custom profile overrides; backup `STRATEGY_PRESET.json.bak-20261027`). The skill-68 gates (macro events, IV/RV floor, credit stress) went live the same day without a shadow period. Re-read this table against outcomes after ~20 closed trades.
+After this nothing runs in shadow on the paper account except the measurement-only logs (`pop_rv`, `position_excursion`). Set in the Pi's `STRATEGY_PRESET.json` (custom profile overrides; backup `STRATEGY_PRESET.json.bak-20261027`). The skill-68 gates (macro events, IV/RV floor, credit stress) went live the same day without a shadow period. Re-read this table against outcomes after ~20 closed trades.
 
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 
