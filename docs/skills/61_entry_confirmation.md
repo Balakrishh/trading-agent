@@ -171,6 +171,8 @@ def timing_decision(history: List[Dict[str, float]], required: int,
 - **`entry_confirm_cycles = 1`** restores immediate entry; the Wheel's operator-staged orders (`/propose` → promote) are not affected.
 - **Trend filters before confirmation (2026-10-15, skill 65).** `_trend_filter_block` runs just before `_entry_confirmation_block`, so in live mode a filtered plan never advances its confirmation streak; in shadow it records the verdict and confirmation proceeds as before.
 
+- **Entry timing live on the paper account (2026-10-27).** `entry_timing_mode = "live"` in the Pi's custom preset (backlog §14). Shadow evidence: 8 entries, the timing rule matched the actual price 7 times and was 2¢ better once (+$4 total). Live it waits up to `entry_max_wait_cycles` (8) for a price within `entry_best_tolerance_pct` of the best seen, and skips (re-confirms) rather than chase ≥ `entry_chase_limit_pct` (3 %). The default stays "shadow".
+
 ## 5. Cross-References
 
 - `30_profit_target_management.md` — the exit-side counterpart (trailing profit).
@@ -179,4 +181,4 @@ def timing_decision(history: List[Dict[str, float]], required: int,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-15.*
+*Last verified against repo HEAD on 2026-10-27.*

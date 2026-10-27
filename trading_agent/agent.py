@@ -2596,17 +2596,22 @@ class TradingAgent:
         except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — shadow measurement only
             logger.warning("Book net delta unavailable (%s)", exc)
 
-    def _net_delta_shadow(self, ticker: str, plan) -> None:
-        """E4 shadow: journal (once per ticker + strategy a day) a candidate
-        that a live net-delta cap would block. Never blocks."""
-        if str(getattr(self.preset, "net_delta_mode", "off")) != "shadow":
-            return
+    def _net_delta_gate(self, ticker: str, plan) -> Optional[str]:
+        """E4 net-delta budget. ``live`` (2026-10-27): block a candidate
+        that leans the same way as a book already past
+        ``max_net_beta_delta_pct``. ``shadow``: journal it (once per ticker
+        + strategy a day) and allow. An unknown book reading never blocks."""
+        mode = str(getattr(self.preset, "net_delta_mode", "off"))
+        if mode not in ("shadow", "live"):
+            return None
         try:
             from zoneinfo import ZoneInfo
             from trading_agent import book_delta as bd
             cand = bd.plan_share_delta(plan)
             reason = bd.shadow_verdict(getattr(self, "_book_delta_pct", None), cand,
                                        float(getattr(self.preset, "max_net_beta_delta_pct", 0.0)))
+            if reason and mode == "live":
+                return reason
             day = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
             if reason and bd.first_shadow_today(f"{ticker}|{plan.strategy_name}", day):
                 logger.info("[%s] net-delta shadow: %s", ticker, reason)
@@ -2615,8 +2620,9 @@ class TradingAgent:
                     raw_signal={"strategy": plan.strategy_name, "reason": reason,
                                 "book_pct": self._book_delta_pct, "candidate_share_delta": cand,
                                 "budget_pct": float(getattr(self.preset, "max_net_beta_delta_pct", 0.0))})
-        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — shadow measurement only
-            logger.warning("[%s] net-delta shadow failed (%s)", ticker, exc)
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — a failed reading never blocks
+            logger.warning("[%s] net-delta check failed (%s)", ticker, exc)
+        return None
 
     def _entry_scope_key(self, ticker: str) -> str:
         """Bucket for the hourly entry limit: the ticker's sector, or one
@@ -3007,7 +3013,7 @@ class TradingAgent:
                      or self._trend_filter_block(ticker, plan, analysis)
                      or self._entry_confirmation_block(ticker, plan))
             if not block:
-                self._net_delta_shadow(ticker, plan)
+                block = self._net_delta_gate(ticker, plan)
             if block:
                 logger.info("[%s] %s", ticker, block)
                 verdict = dataclasses.replace(

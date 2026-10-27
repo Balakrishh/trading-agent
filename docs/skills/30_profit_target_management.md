@@ -151,6 +151,8 @@ signal, reason = pos.evaluate_exit(
 
 - **Trailing profit (2026-10-05).** Stops always win — the trail only rewrites HOLD / PROFIT_TARGET. Profit is the natural-price P&L (cost to close now), and a trail close still needs 3 consecutive votes, so one bad quote cannot end a winner. The trail watches intraday only: an overnight gap through the lock closes at the next open, possibly below it (bounded by the ceiling and the 7-DTE stop). State lives in `trade_journal/profit_trail.json` (atomic) because the agent restarts every cycle; positions that close without ever arming are dropped. A ghost leg with no usable quote is retried next cycle; a ghost past expiry records its last P&L.
 
+- **Live on the paper account (2026-10-27).** `profit_trail_mode = "live"` in the Pi's custom preset (backlog §14): one armed winner of shadow evidence (SPY calendar, trail −$4 vs target). After arming at the target the trail closes on a 25 % giveback from the peak, the ceiling (debit 90 %) or ≤ 7 DTE — worst case vs close-at-target ≈ 37.5 % instead of 50 % of a debit after a reversal. Stops are never touched. The default stays "shadow".
+
 ## 5. Cross-References
 
 - `13_preset_system_hot_reload.md` — `profit_target_pct` is hot-reloadable like the other preset knobs; changes apply on the next cycle without a restart.
@@ -159,4 +161,4 @@ signal, reason = pos.evaluate_exit(
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-10-27.*

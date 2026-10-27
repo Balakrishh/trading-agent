@@ -182,10 +182,36 @@ def test_agent_net_delta_shadow_journals_once(tmp_path, monkeypatch):
     plan = SimpleNamespace(strategy_name="Put Debit Spread",
                            legs=[SimpleNamespace(delta=-0.5, action="buy"),
                                  SimpleNamespace(delta=-0.25, action="sell")])
-    a._net_delta_shadow("IWM", plan)
-    a._net_delta_shadow("IWM", plan)
+    assert a._net_delta_gate("IWM", plan) is None
+    assert a._net_delta_gate("IWM", plan) is None
     assert len(rows) == 1 and rows[0]["action"] == "net_delta_shadow"
     assert rows[0]["raw_signal"]["candidate_share_delta"] == -25.0
+
+
+def test_agent_net_delta_live_blocks_same_side_only(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from trading_agent.agent import TradingAgent
+    from trading_agent.strategy_presets import PRESETS
+    monkeypatch.setattr(bd, "STATE_PATH", tmp_path / "bd.json")
+    a = TradingAgent.__new__(TradingAgent)
+    a.preset = replace(PRESETS["balanced"], net_delta_mode="live")
+    rows = []
+    a.journal_kb = SimpleNamespace(log_signal=lambda **kw: rows.append(kw))
+    a._cached_price = lambda t: 1.0
+    bear = SimpleNamespace(strategy_name="Put Debit Spread",
+                           legs=[SimpleNamespace(delta=-0.5, action="buy"),
+                                 SimpleNamespace(delta=-0.25, action="sell")])
+    bull = SimpleNamespace(strategy_name="Call Debit Spread",
+                           legs=[SimpleNamespace(delta=0.5, action="buy"),
+                                 SimpleNamespace(delta=0.25, action="sell")])
+    a._book_delta_pct = -0.45                    # book 45 % short, budget 30 %
+    assert a._net_delta_gate("IWM", bear).startswith("net_delta_budget (book -45%")
+    assert a._net_delta_gate("IWM", bull) is None              # reduces the tilt
+    a._book_delta_pct = None                                     # unknown reading
+    assert a._net_delta_gate("IWM", bear) is None
+    a._book_delta_pct = -0.20                                    # inside the budget
+    assert a._net_delta_gate("IWM", bear) is None
+    assert rows == []                                            # live mode journals via the rejection
 
 
 def test_schwab_quotes_pass_delta_through(monkeypatch):
