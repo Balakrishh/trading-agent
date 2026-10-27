@@ -104,7 +104,7 @@ def direction_risk_failure(...) -> (reason | None, room | None)
 def stop_cooldown_failure(ticker, strategy, today, recent_stops, sessions,
                           repeat_sessions=0, repeat_window=20) -> Optional[str]
 
-# trading_agent/book_delta.py (E4, shadow)
+# trading_agent/book_delta.py (E4; live on the paper preset since 2026-10-27)
 def share_deltas(legs, quotes) -> {underlying: share Δ | None}   # from the monitor's re-mark quotes
 def beta_from_closes(closes, spy, n=60) -> Optional[float]
 def book_reading(deltas, spots, betas, equity) -> {"spy_equiv_dollars", "pct_of_equity", "unknown", …}
@@ -116,12 +116,14 @@ def shadow_verdict(book_pct, candidate_delta, budget_pct) -> Optional[str]
 #   Stage 2 setup:  self._direction_exposure = direction_exposure(monitor_results)
 #                   self._book_delta_update(account_balance)   → trade_journal/book_delta.json
 #   gate chain:     market state → ladder → stop cool-down → _direction_risk_block
-#                   → trend filters → entry confirmation; then _net_delta_shadow (never blocks)
+#                   → _macro_vol_block (skill 68) → trend filters → entry confirmation
+#                   → _net_delta_gate: live → return shadow_verdict(...) as the block;
+#                                      shadow → journal net_delta_shadow once a day, allow
 #   after a submit: add_exposure(self._direction_exposure, ticker, strategy, max_loss × qty)
 #   _entry_scope_key: "group:<g>" for grouped tickers when entry_rate_scope="sector"
 ```
 
-Preset fields: `max_group_direction_risk_pct` 0.03, `max_book_direction_risk_pct` 0.06, `stop_cooldown_sessions` 5 (was 1), `stop_cooldown_repeat_sessions` 10, `stop_cooldown_repeat_window` 20, `net_delta_mode` "shadow" ("off"; "live" not built — coerced to shadow), `max_net_beta_delta_pct` 0.30. Dashboard: "Direction risk" block below the ladder controls. Summary tokens `Stop cool-down 5 sess (10 after a repeat)`, `Dir risk ≤3%/group ≤6%/book`, `NetΔ shadow ≤30%`.
+Preset fields: `max_group_direction_risk_pct` 0.03, `max_book_direction_risk_pct` 0.06, `stop_cooldown_sessions` 5 (was 1), `stop_cooldown_repeat_sessions` 10, `stop_cooldown_repeat_window` 20, `net_delta_mode` "shadow" (default; "live" blocks since 2026-10-27; "off"), `max_net_beta_delta_pct` 0.30. Dashboard: "Direction risk" block below the ladder controls. Summary tokens `Stop cool-down 5 sess (10 after a repeat)`, `Dir risk ≤3%/group ≤6%/book`, `NetΔ shadow ≤30%`.
 
 ## 4. Edge Cases / Guardrails
 
@@ -141,6 +143,7 @@ Preset fields: `max_group_direction_risk_pct` 0.03, `max_book_direction_risk_pct
 - **Cool-down after a stop (2026-10-16).** `PresetConfig.stop_cooldown_sessions` (default 1; 0 = off). A stop-type close (`STOP_EXIT_SIGNALS`: `stop_loss`, `hard_stop`, `delta_stop`, `strike_proximity`) blocks new entries on that ticker in the same direction for the rest of the stop's session and the next N sessions (`stop_cooldown_failure`, journaled as `risk: stop_cooldown (…)`). Direction (`trade_direction`): bull = Bull Put, Call Debit, Bounce Bull Put, Cash-Secured Put; bear = Bear Call, Put Debit; any other structure cools down only its own kind. Sessions are weekdays (`sessions_between`; an exchange holiday shortens the cool-down by one session). The stops come from `JournalReader.closes_since(7)` once per cycle in `_begin_entry_gates` (`TradingAgent._stops_from`, close time converted to the ET date). Why: TLT's put debit was stopped at 09:46 ET on 2026-10-15 and a new TLT put debit on the same view was bought at 09:50 — the ladder rules only see open positions, so a full close cleared every block. Gate order is now market-state → ladder → stop cool-down → trend filters → entry confirmation. Dashboard: "Stop cool-down (sessions)" next to the ladder controls; summary token `Stop cool-down N sess`.
 - **Longer cool-down and repeat stops (2026-10-26).** Default 1 → 5 sessions; a second same-direction stop within 20 sessions blocks for 10. Evidence: TLT stopped 10-15, re-entered 10-19 (2 sessions later — allowed by the 1-session rule), stopped again 10-22 (−$186, −$148). The stops are read from `closes_since(35)` so the window is covered.
 - **Correlated groups (E6, 2026-10-26).** Sector caps saw Treasuries and Utilities as unrelated while TLT ×2 + XLU (≈ $839, 2.9 % of equity on 10-19) were one bet on higher yields, and every entry from 10-14 to 10-22 was bearish. The group / book one-direction caps size a trade into the room left and block it below one contract. On the 2026-10-23 book: bear $1,066 of a $1,735 book budget, rates bear $555 of $868 — one more full-size rates bear does not fit. Grouped tickers also share one hourly entry bucket (`group:rates`), so XLU waits an hour after a TLT entry. Orders pending from a previous cycle are not in the exposure (same gap as the total-risk cap; their tickers are blocked). Neutral structures (condor, calendar, butterfly) and Wheel legs are not counted.
+- **Net delta live (E4, 2026-10-27).** `net_delta_mode="live"` (set on the paper account's preset, backlog §14): `_net_delta_gate` returns `shadow_verdict`'s reason (`net_delta_budget (book +35% of equity long, > 30%; candidate Δ +40 sh/contract adds to it)`) as a failed check, so it lands in the rejection row; candidates that reduce the tilt and neutral structures (|Δ| < 1 share) pass; `book_pct` None (no reading this cycle) never blocks; an exception is logged and allows. Shadow mode is unchanged.
 - **Net delta in shadow (E4, 2026-10-26).** Leg deltas come from the monitor's mid re-mark quotes (Schwab `QuoteOption.delta`, passed through `fetch_option_quotes` as `delta`, None when absent), betas from the cached 200-day history — no extra API calls. A leg with no delta makes its underlying `unknown` (listed in the reading; the book % covers the rest). `net_delta_shadow` rows are journalled once per ticker + strategy a day (keys in `book_delta.json`, because the process restarts every cycle). The 30 % budget is a starting guess: dollar delta of a put debit is large next to its max loss (2 IWM 273/270 at Δ ≈ −0.2 ≈ −$10k notional), so read a week of readings before choosing a live budget.
 
 ## 5. Cross-References
@@ -153,4 +156,4 @@ Preset fields: `max_group_direction_risk_pct` 0.03, `max_book_direction_risk_pct
 
 ---
 
-*Last verified against repo HEAD on 2026-10-26.*
+*Last verified against repo HEAD on 2026-10-27.*

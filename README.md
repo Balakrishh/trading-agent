@@ -176,7 +176,9 @@ Every trade must pass **all eight checks** before execution:
 * **Per sector:** 2 (`sector_map.py`); counts pending orders and every submission earlier in the same cycle.
 * **Total open risk:** Σ max loss of open defined-risk positions ≤ `max_total_risk_pct` (10 %) of equity; each trade is sized into what remains; Wheel legs excluded (their collateral has its own 40 %-of-equity rule).
 * **One-direction risk (2026-10-26):** Σ max loss of bullish (or bearish) positions ≤ `max_group_direction_risk_pct` (3 %) of equity within a correlated group — rates (TLT, IEF, TLH, XLU), gold (GLD, IAU, GDX, GDXJ, SLV), US equity (SPY, QQQ, DIA, IWM, XLK, SMH) — and ≤ `max_book_direction_risk_pct` (6 %) across the book. Trades are sized into the room left and blocked below one contract (`direction_risk_cap`). Grouped tickers share one hourly entry slot. Last week every entry was a bearish put debit and TLT + XLU were one bet on yields.
-* **Net delta (shadow):** each cycle the book's beta-weighted, SPY-equivalent delta is measured from the legs' deltas (`trade_journal/book_delta.json`); candidates that a cap of `max_net_beta_delta_pct` (30 %) would block are journalled as `net_delta_shadow`. Nothing is blocked yet.
+* **Net delta:** each cycle the book's beta-weighted, SPY-equivalent delta is measured from the legs' deltas (`trade_journal/book_delta.json`). With `net_delta_mode = "live"` (the paper account since 2026-10-27) a candidate leaning the same way as a book past `max_net_beta_delta_pct` (30 %) is blocked (`net_delta_budget`); `"shadow"` (default) only journals it as `net_delta_shadow`.
+
+**Shadow → live (2026-10-27).** On the paper account entry timing, the profit trail, the relative-strength and pullback filters and the net-delta budget run **live** (custom preset overrides); the debit ladder stays in shadow (no live order path, $0 measured saving). Evidence per feature: backlog §14.
 * **No put-debit fallback** on `put_debit_excluded_tickers` (XLY, XLK, XLI, GDX) — their option legs quote 30–90¢ wide, so the attempt always ended in `leg_spread_wide`.
 * **Market state:** size multiplier and allowed families (above). Credit stress is one of its CAUTION reasons since 2026-10-27: HYG/IEF (dividend-adjusted) ≥ 2 % under its 50-day average; CAUTION is held until it is back under 1 % (skill 68).
 
@@ -739,7 +741,7 @@ trading-agent/
 │   ├── analyst_estimates.py          # Analyst estimates / revisions from Yahoo, cached (skill 67)
 │   ├── drop_cause_llm.py             # "Why did it drop" label from 30 days of news via the claude CLI (skill 67)
 │   ├── position_caps.py              # Per-ticker ladder, per-sector, total-risk, direction-risk caps, stop cool-down (skill 37)
-│   ├── book_delta.py                 # Book beta-weighted net delta, shadow budget (skill 37, E4)
+│   ├── book_delta.py                 # Book beta-weighted net delta + budget (skill 37, E4)
 │   ├── book_view.py                  # Open book with contracts / total risk for list_positions + reviewer (F6)
 │   ├── entry_filters.py              # Relative strength + pullback filters (skill 65)
 │   ├── entry_confirmation.py         # Entry confirmation, rate limit, timing (skill 61)

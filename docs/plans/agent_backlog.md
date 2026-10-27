@@ -260,7 +260,23 @@ Realized +$42 (GLD Nov 6 +$190 by hand, TLT Nov 20 −$148 stop); account $29,37
 | CAUTION 6 sessions | **E1 checked, no change** — SPDR breadth would have read the same, and SPY < SMA-50 / VIX term were independent reasons (skill 58 §4). |
 | Data server lost Schwab for 10 h on 10-20 unnoticed | **A8**: `/ready` probes real data; the watchdog pages on a 503 in session. Skills 47, 64. |
 
-Still open from that week: E4 live (after a week of readings), the digest dedup bug (§ portfolio digest), EDGAR history (12.2).
+Still open from that week: E4 live (after a week of readings), the digest dedup bug (§ portfolio digest), EDGAR history (12.2). *(E4 live 2026-10-27 — §14.)*
+
+## 14. Shadow → live on the paper account (2026-10-27)
+
+The operator asked to stop running new rules in shadow on a paper account: live paper trades teach more than would-have rows. The shadow data, such as it was, and the call made for each:
+
+| Feature | Shadow evidence (to 2026-10-27) | Decision |
+|---|---|---|
+| Entry timing (`entry_timing_mode`, skill 61) | 8 entries: the timing rule would have entered at the same price 7 times and 2¢ better once — **+$4 total**. No cost seen either. | **live** — neutral; it can only wait (≤ 8 cycles) or skip a chase (≥ 3 %). |
+| Profit trail (`profit_trail_mode`, skill 30) | 1 armed winner (SPY calendar 10-27): trail −$4 vs the target close. Most positions never reached the target (GLD peaked +$370 vs +$425). | **live** — worst case vs close-at-target ≈ 37.5 % instead of 50 % of the debit after a reversal (25 % giveback from a peak ≥ target); upside to the 90 % ceiling. |
+| Relative strength filter (skill 65) | 28 verdicts on approved plans, 0 failures. | **live** — would have blocked nothing so far; kept as a guard. |
+| Pullback filter (skill 65) | 21 failures, on 2 trades that were opened: XLU 10-16 (price already back above the 50-day — "resistance broken") and GLD 10-22 (2.1 ATR below the 20-day — extended). Both under water on 10-27 (−$120, −$27.50). | **live** — small sample, right direction. |
+| Net-delta budget (E4, skill 37) | 0 `net_delta_shadow` rows: the book reached +31 % on 10-26 but no same-side candidate got through the other gates. | **live built and on** (30 % budget): blocks a candidate leaning the same way as a book past it; an unknown reading never blocks. |
+| Debit ladder (C1, skill 59) | 2 submitted orders: ladder fill = actual fill, **$0 saved**; 5 of 188 over-the-cap near misses would have opened (GLD ×2, XLF, XLE, SMH). | **stays shadow** — live is an order-management change (re-pricing a working order across cycles) with no measured saving; revisit with more submitted orders. |
+| Realized-vol POP (`pop_rv`, §3) | Log only, compared on outcomes by skill 66. | n/a — not a gate. |
+
+Set in the Pi's `STRATEGY_PRESET.json` (custom profile overrides; backup `STRATEGY_PRESET.json.bak-20261027`). The skill-68 gates (macro events, IV/RV floor, credit stress) went live the same day without a shadow period. Re-read this table against outcomes after ~20 closed trades.
 
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 

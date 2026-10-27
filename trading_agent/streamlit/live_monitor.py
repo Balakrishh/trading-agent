@@ -2771,11 +2771,11 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 help="Σ max loss of bullish (or bearish) positions in one correlated group, "
                      "share of equity. New trades are sized into what is left. 0 = off.")
             net_delta_mode = st.selectbox(
-                "Book net-delta budget", ["shadow", "off"],
-                index=0 if getattr(seed, "net_delta_mode", "shadow") == "shadow" else 1,
+                "Book net-delta budget", ["shadow", "live", "off"],
+                index=["shadow", "live", "off"].index(getattr(seed, "net_delta_mode", "shadow")),
                 key="cust_net_delta_mode",
-                help="shadow: journal candidates a net-delta cap would block (net_delta_shadow); "
-                     "never blocks. live is not built.")
+                help="shadow: journal candidates a net-delta cap would block (net_delta_shadow) · "
+                     "live: block a candidate leaning the same way as a book past the budget.")
         with dr2:
             max_book_dir = st.slider(
                 "Max one-direction loss, whole book", 0.0, 0.20,

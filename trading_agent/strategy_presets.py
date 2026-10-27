@@ -790,8 +790,7 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("profit_trail_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid profit_trail_mode %r — using the default",
                        out.pop("profit_trail_mode"))
-    if out.get("net_delta_mode") not in (None, "off", "shadow"):
-        # "live" is not built yet (backlog E4) — fall back to shadow.
+    if out.get("net_delta_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid net_delta_mode %r — using the default",
                        out.pop("net_delta_mode"))
     if out.get("debit_ladder_mode") not in (None, "off", "shadow"):

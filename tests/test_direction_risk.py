@@ -176,4 +176,5 @@ def test_preset_defaults_summary_and_custom_coercion():
     line = PRESETS["balanced"].to_summary_line()
     assert "Dir risk ≤3%/group ≤6%/book" in line and "No put debit: XLY,XLK,XLI,GDX" in line
     c = _make_custom({"put_debit_excluded_tickers": ["XLY"], "net_delta_mode": "live"})
-    assert c.put_debit_excluded_tickers == ("XLY",) and c.net_delta_mode == "shadow"
+    assert c.put_debit_excluded_tickers == ("XLY",) and c.net_delta_mode == "live"
+    assert _make_custom({"net_delta_mode": "bogus"}).net_delta_mode == "shadow"

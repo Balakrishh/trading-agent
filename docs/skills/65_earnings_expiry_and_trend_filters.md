@@ -178,6 +178,8 @@ Preset (`PresetConfig`, dashboard "Earnings & trend entry filters"): `earnings_g
 - **One ticker / ties** — a single ranked ticker is percentile 0.5; equal scores share the mean rank.
 - **SPY itself** — RS score 0 by construction; it still ranks against the rest.
 
+- **Filters live on the paper account (2026-10-27).** `rs_filter_mode` and `pullback_filter_mode` = "live" in the Pi's custom preset (backlog §14). Shadow evidence: relative strength 0 failures in 28 verdicts; pullback failed on two trades that were opened — XLU 10-16 (back above its 50-day) and GLD 10-22 (2.1 ATR below its 20-day) — both under water on 10-27. Small sample; the defaults stay "shadow".
+
 ## 5. Cross-References
 
 - `59_debit_spreads_calendars.md` — debit and calendar planners whose expiries are capped.
@@ -187,4 +189,4 @@ Preset (`PresetConfig`, dashboard "Earnings & trend entry filters"): `earnings_g
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-10-27.*
