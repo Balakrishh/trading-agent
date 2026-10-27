@@ -47,8 +47,8 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 44 | position monitor scaling | position_monitor.py | test_backtest/test_sim_position.py, test_debit_strategies.py, test_executor.py, test_exit_opening_window.py, test_fill_model.py, test_manual_close.py, test_plan_retention.py, test_position_monitor.py, test_position_snapshot.py, test_production_readiness.py, test_profit_trail.py, test_stop_hygiene.py, test_wheel_integration.py | conformance/test_skill_44_position_monitor_scaling.py | — |
 | 45 | iron butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_book_view.py, test_chain_scanner.py, test_debit_ladder.py, test_debit_strategies.py, test_direction_risk.py, test_earnings_and_trend_filters.py, test_entry_confirmation.py, test_exit_opening_window.py, test_fill_model.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_profit_trail.py, test_stop_hygiene.py, test_streamlit/test_backtest_ui.py, test_trading_halt.py, test_wheel_filters.py | conformance/test_skill_45_iron_butterfly.py | — |
 | 46 | broken wing butterfly | chain_scanner.py, strategy_presets.py | test_backtest/test_synthetic_chain.py, test_book_view.py, test_chain_scanner.py, test_debit_ladder.py, test_debit_strategies.py, test_direction_risk.py, test_earnings_and_trend_filters.py, test_entry_confirmation.py, test_exit_opening_window.py, test_fill_model.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_profit_trail.py, test_stop_hygiene.py, test_streamlit/test_backtest_ui.py, test_trading_halt.py, test_wheel_filters.py | conformance/test_skill_46_broken_wing_butterfly.py | — |
-| 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | test_book_view.py | conformance/test_skill_47_schwab_data_api.py | 08_raspberry_pi_deployment.md |
-| 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_mcp_get_quote_options.py, test_position_snapshot.py, test_trading_halt.py | conformance/test_skill_48_mcp_readonly.py, conformance/test_subagent_and_command_shape.py | 08_raspberry_pi_deployment.md |
+| 47 | schwab data api | data_server/app.py, data_server/auth.py, data_server/cache.py, data_server/config.py | test_book_view.py, test_data_server_research.py | conformance/test_skill_47_schwab_data_api.py | 08_raspberry_pi_deployment.md |
+| 48 | claude code mcp surface | mcp/__init__.py, mcp/server.py, mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_data_server_research.py, test_mcp_get_quote_options.py, test_position_snapshot.py, test_trading_halt.py | conformance/test_skill_48_mcp_readonly.py, conformance/test_subagent_and_command_shape.py | 08_raspberry_pi_deployment.md |
 | 49 | daily portfolio review | mcp/tools/positions.py, mcp/tools/strategy.py, mcp/tools/market.py | test_position_snapshot.py, test_trading_halt.py | ❌ MISSING | — |
 | 50 | position triage | mcp/tools/positions.py, mcp/tools/strategy.py, defensive_roll_evaluator.py | test_position_snapshot.py | ❌ MISSING | — |
 | 51 | pre trade approval | mcp/tools/strategy.py, pending_orders_writer.py, executor_promote.py | test_wheel_integration.py | ❌ MISSING | — |
@@ -67,7 +67,7 @@ This matrix maps every skill to its cited source files, tests, and runbooks. The
 | 64 | liveness watchdog | liveness.py | test_liveness.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
 | 65 | earnings expiry and trend filters | strategy.py, chain_scanner.py, earnings_calendar.py, entry_filters.py, agent.py, calendar_utils.py | test_after_hours_shutdown.py, test_agent_integration.py, test_backtest/test_synthetic_chain.py, test_book_view.py, test_chain_scanner.py, test_close_cooldown.py, test_cycle_singleton.py, test_debit_ladder.py, test_debit_strategies.py, test_direction_risk.py, test_earnings_and_trend_filters.py, test_earnings_calendar.py, test_entry_confirmation.py, test_executor.py, test_exit_opening_window.py, test_fill_model.py, test_journal_derived_cooldown.py, test_ladder.py, test_market_state_agent.py, test_position_caps_total_risk.py, test_production_readiness.py, test_profit_trail.py, test_risk_manager.py, test_schwab_reauth_warning.py, test_shadow_pop.py, test_stop_hygiene.py, test_strategy.py, test_trading_halt.py | ❌ MISSING | — |
 | 66 | calibrated probability model | prob_model.py, vol_surface.py, scripts/research/calibrate_prob_model.py | test_prob_model.py, test_vol_surface.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
-| 67 | quality at lows sleeve | quality_lows.py, analyst_estimates.py, drop_cause_llm.py, news_aggregator.py, market_data_schwab.py, scripts/research/quality_lows_backtest.py | test_analyst_estimates.py, test_book_view.py, test_drop_cause_llm.py, test_market_data_factory.py, test_market_data_schwab.py, test_quality_lows.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
+| 67 | quality at lows sleeve | quality_lows.py, analyst_estimates.py, drop_cause_llm.py, news_aggregator.py, market_data_schwab.py, scripts/research/quality_lows_backtest.py | test_analyst_estimates.py, test_book_view.py, test_data_server_research.py, test_drop_cause_llm.py, test_market_data_factory.py, test_market_data_schwab.py, test_quality_lows.py | ❌ MISSING | 08_raspberry_pi_deployment.md |
 
 **Skills with conformance tests:** 43 / 59 (72%)
 
@@ -79,6 +79,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/config.py` (last modified 2026-04-24)
 - `trading_agent/daily_state.py` (last modified 2026-10-15)
 - `trading_agent/data_server/__main__.py` (last modified 2026-10-08)
+- `trading_agent/data_server/research.py` (last modified 2026-10-26)
 - `trading_agent/debit_ladder.py` (last modified 2026-10-15)
 - `trading_agent/file_locks.py` (last modified 2026-05-01)
 - `trading_agent/fine_tuning.py` (last modified 2026-04-02)
@@ -116,7 +117,7 @@ Code paths under `trading_agent/` that NO skill currently cites. Each is a candi
 - `trading_agent/wheel_lifecycle.py` (last modified 2026-09-29)
 - `trading_agent/wheel_policy.py` (last modified 2026-10-05)
 
-**Orphan source coverage:** 40 / 121 files (33% uncovered)
+**Orphan source coverage:** 41 / 122 files (33% uncovered)
 
 ## Orphan skills (no conformance test)
 
