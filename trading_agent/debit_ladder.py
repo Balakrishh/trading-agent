@@ -1,5 +1,8 @@
 """debit_ladder.py — mid-first entry ladder for debit verticals (backlog C1),
-shadow mode only (added 2026-10-16, skill 59 §3).
+shadow measurement (added 2026-10-16, skill 59 §3). The live ladder
+(2026-10-27) is ``OrderExecutor._debit_ladder_probes``: it uses
+``ladder_prices`` from here but submits within the cycle, so the shadow
+trackers below run only in ``shadow`` mode.
 
 Debit orders go out at the natural price (pay the long ask, take the short
 bid) and a plan is rejected when natural > mid × (1 + ``debit_max_overpay``)
@@ -40,7 +43,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from trading_agent.entry_confirmation import score_legs
 
-LADDER_MODES = ("off", "shadow")          # "live" is not built yet
+LADDER_MODES = ("off", "shadow", "live")  # live: OrderExecutor._debit_ladder_probes
 LADDER_STRATEGIES = frozenset({"Call Debit Spread", "Put Debit Spread"})
 STATE_PATH = Path(os.environ.get("TRADING_AGENT_DEBIT_LADDER",
                                  "trade_journal/debit_ladder_shadow.json"))

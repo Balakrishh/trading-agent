@@ -363,6 +363,11 @@ class TradingAgent:
             delta_aware_floor=(self.preset.scan_mode == "adaptive"),
             edge_buffer=self.preset.edge_buffer,
         )
+        # Live mid-first debit ladder (backlog C1, skill 59 §3, 2026-10-27).
+        if hasattr(self.executor, "debit_ladder_live"):
+            self.executor.debit_ladder_live = (
+                str(getattr(self.preset, "debit_ladder_mode", "off")) == "live")
+            self.executor.debit_ladder_steps = max(1, int(getattr(self.preset, "debit_ladder_steps", 4)))
         self.position_monitor: PositionsPort = PositionMonitor(
             api_key=config.alpaca.api_key,
             secret_key=config.alpaca.secret_key,
@@ -3334,6 +3339,9 @@ class TradingAgent:
         raw["playbook_implemented"] = pb.implemented
         raw.update(self._shadow_pop_fields(plan, analysis))
         raw.update(self._macro_vol_fields(plan))
+        # Live debit ladder (C1): probes, fills and the saving vs natural.
+        if exec_result and exec_result.get("ladder"):
+            raw["debit_ladder"] = exec_result["ladder"]
         # Skill 65: trend filter verdicts (shadow or live) for this plan.
         trend = getattr(self, "_trend_eval", {}).get(ticker)
         if trend is not None and plan.valid:

@@ -793,8 +793,7 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("net_delta_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid net_delta_mode %r — using the default",
                        out.pop("net_delta_mode"))
-    if out.get("debit_ladder_mode") not in (None, "off", "shadow"):
-        # "live" is not built yet (backlog C1) — fall back to shadow.
+    if out.get("debit_ladder_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid debit_ladder_mode %r — using the default",
                        out.pop("debit_ladder_mode"))
     for mode in ("rs_filter_mode", "pullback_filter_mode"):

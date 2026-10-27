@@ -173,6 +173,8 @@ if isinstance(exec_result, dict) and exec_result.get("status") == "error":
 
 - **`_append_to_plan` is called on both success and error.** The trade plan's `state_history` always records what happened: `order_result` on success, `order_error` on failure. Combined with the `client_order_id` field this gives a deterministic forensic trail per plan.
 
+- **Debit ladder probes (2026-10-27, skill 59).** Each live-ladder probe is its own order with its own `client_order_id` (`ta-<run_id[:8]>-l<i>-<hex8>`), POSTed through `_submit_order_with_idempotency`, so a retried probe still collapses at the broker. A new probe is sent only after the previous one is confirmed terminal (filled / cancelled) — never two live entry orders for one plan.
+
 ## 5. Cross-References
 
 - `00_sdlc_and_conventions.md` — broker port abstraction (the executor is the only module that talks to Alpaca's order endpoint).
@@ -182,4 +184,4 @@ if isinstance(exec_result, dict) and exec_result.get("status") == "error":
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-10-27.*
