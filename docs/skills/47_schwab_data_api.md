@@ -24,7 +24,7 @@ The server is **read-only by design and by construction**. Order placement lives
 
 ## 2. Endpoint surface
 
-Eleven routes. The first eight are thin passthroughs to `SchwabMarketDataProvider` — no new schemas, no new logic beyond auth + caching + rate limiting. The three research routes (§3.5, 2026-10-26) put news, analyst research and sentiment behind the same server and key, so every data point comes from one place.
+Sixteen routes. The first eight are thin passthroughs to `SchwabMarketDataProvider` — no new schemas, no new logic beyond auth + caching + rate limiting. The three research routes (§3.5, 2026-10-26) and five market-context routes (§3.6, 2026-10-27) put news, analyst research, sentiment and the skill-68 market inputs behind the same server and key, so every data point comes from one place.
 
 ```text
 GET  /health                                     — liveness, no auth
@@ -39,6 +39,11 @@ GET  /fundamentals/{ticker}                      — P/E, EPS, market cap, divid
 GET  /news/{ticker}?days=30&limit=60             — Alpaca news + Yahoo RSS, de-duplicated, spread across days (§3.5)
 GET  /research/{ticker}                          — analyst estimates/revisions/targets (Yahoo) + latest quality-at-lows row
 GET  /sentiment/{ticker}                         — Claude drop-cause label (stored) + analyst stance + news flow
+GET  /macro-events?days=45                       — FOMC / CPI / NFP releases ahead + calendar coverage (§3.6)
+GET  /credit-stress                              — HYG/IEF % under its 50-day, CAUTION threshold, last 20 readings
+GET  /vol/{ticker}                               — 30d ATM IV, 20d realized, IV/RV, short-premium verdict
+GET  /gamma/{ticker}                             — latest recorded dealer gamma (SPY/QQQ/IWM, 16:05 ET)
+GET  /market-context                             — market state snapshot + the four above in one call
 ```
 
 **Explicitly NOT exposed** — CI-verified via `test_readonly_no_forbidden_imports`:
@@ -175,6 +180,26 @@ def news(ticker, days=30, limit=60): ...   # 400 outside days 1-90 / limit 1-200
 
 The logic stays in `news_aggregator.py`, `analyst_estimates.py` and `quality_lows.py` (skill 67); the server only exposes it. MCP tools `get_news`, `get_research`, `get_sentiment` (skill 48) read these routes with a 45 s timeout.
 
+### 3.6 Market-context routes (2026-10-27, skill 68)
+
+```python
+# trading_agent/data_server/market_context.py
+@dataclass
+class ContextSources:
+    history: Callable[[str], Any]                 # provider.fetch_historical_prices (yfinance)
+    atm_iv: Callable[[str, date], Optional[float]]   # macro_vol_gates.latest_atm_iv (vol_surface rows)
+    gamma_rows: Callable[[], Dict]                # gamma_exposure.latest_rows
+    market_state: Callable[[], Optional[Dict]]    # market_state.read_state (the agent's snapshot)
+    events: Callable[[], List[MacroEvent]]        # macro_calendar.all_events
+    now_et: Callable[[], datetime]
+    adjusted: Optional[Callable] = None           # market_state.yfinance_adjusted_history (credit pair)
+
+# app.py — build_app(..., context_sources=None)
+context_cache = TTLCache(900)        # /credit-stress and /vol: daily-history inputs
+```
+
+Same thresholds and functions as the agent (`credit_stress_pct`, `iv_rv_ratio`, `pending_events`, `MarketStateConfig`, the active preset's `vrp_min_ratio`), so the server and the agent cannot disagree. MCP: `get_macro_events`, `get_credit_stress`, `get_vol`, `get_gamma`, `get_market_context`. `/chain` contracts gained `open_interest` (None when Schwab omits it) for the gamma recorder.
+
 ## 4. Edge Cases / Guardrails
 
 - **Read-only invariant enforced by conformance test.** `test_readonly_no_forbidden_imports` greps `data_server/*.py` for imports of `executor`, `journal_kb`, `submit_order`, `place_order`, `TradingClient`. Any hit fails CI. Belt for the "one bad refactor and we're now placing orders" scenario; suspenders for the "compromised bearer token" scenario.
@@ -203,15 +228,19 @@ The logic stays in `news_aggregator.py`, `analyst_estimates.py` and `quality_low
 - **News flow is approximate when capped.** Past `limit` items, `ticker_news` takes items round-robin across days, so `items_last_7d` vs `items_prior_23d` undercounts busy days; `news_flow.capped` is true in that case.
 - **Analyst cache file.** `/research` and `/sentiment` go through `get_estimates`, which refetches from Yahoo after 20 h and rewrites `trade_journal/analyst_estimates.json` (temp + rename) — the only file the server writes. Relative to the service's working directory (the repo).
 
+- **Market-context routes read local snapshots (2026-10-27).** `/market-context` returns the agent's last `market_state.json` (with `age_seconds`), `/vol` the newest vol-surface row ≤ 4 days old, `/gamma` the newest gamma row — none of them call Schwab. A failed piece of `/market-context` becomes `null` plus a `notes` entry; `/credit-stress` alone returns 502 `context_upstream` when the history fetch raises. `/credit-stress` and `/vol` are cached 15 minutes (their inputs are daily).
+- **Gamma rows need the restarted server.** `open_interest` appears on `/chain` only after the data server restarts on the 2026-10-27 code; the recorder refuses to write rows without it.
+
 ## 5. Cross-References
 
 - `16_market_data_provider_routing.md` — the underlying provider this server wraps. When the surface routing picks Schwab, we're calling the same code path this server exposes.
 - `18_order_submission_idempotency.md` — the executor whose contract we deliberately don't re-implement here. The `SERVER_READ_ONLY = True` invariant is symmetric to "the executor is the ONLY place that submits orders."
 - `34_exception_monitor.md` — Schwab auth failures inside the server still bubble up to `ExceptionMonitor.record(...)` so the operator's Telegram error channel pages once per failure mode per day.
+- `68_macro_events_vrp_credit_gamma.md` — the market inputs behind `/macro-events`, `/credit-stress`, `/vol`, `/gamma`, `/market-context`.
 - `67_quality_at_lows_sleeve.md` — owner of the news, analyst-estimate and drop-cause logic the research routes expose.
 - `48_claude_code_mcp_surface.md` — `get_news` / `get_research` / `get_sentiment` passthroughs.
 - `42_portfolio_alert_scheduler.md` — a current in-process consumer of `SchwabMarketDataProvider` that could optionally refactor to use this API (Phase 4 in `docs/plans/schwab_data_api_plan.md`).
 
 ---
 
-*Last verified against repo HEAD on 2026-10-26.*
+*Last verified against repo HEAD on 2026-10-27.*

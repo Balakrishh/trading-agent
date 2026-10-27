@@ -17,6 +17,11 @@ Route summary (skill 47 §2):
     GET  /news/{ticker}?days=&limit=   Alpaca + Yahoo RSS (§3.5)
     GET  /research/{ticker}            analyst estimates + quality-at-lows row
     GET  /sentiment/{ticker}           Claude label + analyst stance + news flow
+    GET  /macro-events?days=45         FOMC / CPI / NFP ahead (§3.6, skill 68)
+    GET  /credit-stress                HYG/IEF under its 50-day average
+    GET  /vol/{ticker}                 30d ATM IV, 20d realized, IV/RV
+    GET  /gamma/{ticker}               latest recorded dealer gamma
+    GET  /market-context               market state + the above for SPY
 
 Read-only invariant: this file imports nothing from ``trading_agent.executor``,
 ``trading_agent.journal_kb``, or anything named ``submit_order`` /
@@ -37,6 +42,7 @@ from trading_agent.data_server.cache import TTLCache
 from trading_agent.data_server.config import CacheTTLs, ServerConfig
 from trading_agent.data_server import research as _research
 from trading_agent.data_server.research import ResearchSources
+from trading_agent.data_server import market_context as _ctx
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +87,7 @@ def build_app(
     provider: Any,
     config: Optional[ServerConfig] = None,
     research_sources: Optional[ResearchSources] = None,
+    context_sources: Optional[Any] = None,
 ) -> "Any":
     """Construct the FastAPI application.
 
@@ -99,6 +106,10 @@ def build_app(
     # Schwab data, and Alpaca + Yahoo take seconds per ticker.
     news_cache = TTLCache(_research.NEWS_TTL_SEC)
     src = research_sources or _research.default_sources()
+    ctx = context_sources or _ctx.default_sources(provider)
+    # Daily-history inputs (credit stress, realized vol) move once a day;
+    # 15 minutes keeps repeated MCP calls off yfinance.
+    context_cache = TTLCache(900)
     auth_dep = build_fastapi_dependency(cfg.api_key)
 
     app = FastAPI(
@@ -329,8 +340,42 @@ def build_app(
             rows = None
         return _research.sentiment(t, rows, src, notes)
 
+    # ── Market context (skill 47 §3.6, skill 68) ─────────────────────
+
+    def _context_error(exc: Exception):
+        return HTTPException(status_code=502,
+                             detail={"error": "context_upstream", "detail": str(exc)[:200]})
+
+    @app.get("/macro-events", tags=["context"], dependencies=[Depends(auth_dep)])
+    def macro_events(days: int = 45) -> Dict[str, Any]:
+        if not (1 <= days <= 400):
+            raise HTTPException(status_code=400,
+                                detail={"error": "invalid_range", "days": days, "allowed": "1-400"})
+        return _ctx.macro_events(ctx, days)
+
+    @app.get("/credit-stress", tags=["context"], dependencies=[Depends(auth_dep)])
+    def credit_stress() -> Dict[str, Any]:
+        try:
+            return context_cache.get_or_set("credit", lambda: _ctx.credit_stress(ctx))
+        except Exception as exc:                                # noqa: BLE001
+            raise _context_error(exc)
+
+    @app.get("/vol/{ticker}", tags=["context"], dependencies=[Depends(auth_dep)])
+    def vol(ticker: str) -> Dict[str, Any]:
+        t = _validate_ticker(ticker)
+        return context_cache.get_or_set(f"vol|{t}", lambda: _ctx.vol(t, ctx))
+
+    @app.get("/gamma/{ticker}", tags=["context"], dependencies=[Depends(auth_dep)])
+    def gamma(ticker: str) -> Dict[str, Any]:
+        return _ctx.gamma(_validate_ticker(ticker), ctx)
+
+    @app.get("/market-context", tags=["context"], dependencies=[Depends(auth_dep)])
+    def market_context() -> Dict[str, Any]:
+        return _ctx.market_context(ctx)
+
     # Attach caches to app.state so tests can invalidate them.
     app.state.price_cache = price_cache
+    app.state.context_cache = context_cache
     app.state.news_cache = news_cache
     app.state.snapshot_cache = snapshot_cache
     app.state.config = cfg

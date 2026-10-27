@@ -41,6 +41,11 @@ get_fundamentals(ticker)                        — P/E, EPS, mcap, dividend, be
 get_news(ticker, days=30, limit=60)             — Alpaca + Yahoo RSS headlines (skill-47 /news, 45 s timeout)
 get_research(ticker)                            — analyst estimates + latest quality-at-lows row (skill-47 /research)
 get_sentiment(ticker)                           — stored Claude drop-cause label, analyst stance, news flow (skill-47 /sentiment)
+get_macro_events(days=45)                       — FOMC / CPI / NFP ahead + coverage (skill-47 /macro-events, skill 68)
+get_credit_stress()                             — HYG/IEF stress vs the CAUTION threshold (skill-47 /credit-stress)
+get_vol(ticker)                                 — 30d ATM IV, 20d realized, IV/RV verdict (skill-47 /vol)
+get_gamma(ticker="SPY")                         — latest dealer-gamma row (skill-47 /gamma)
+get_market_context()                            — market state + all of the above for SPY (skill-47 /market-context)
 get_recent_alerts(hours=24)                     — ExceptionMonitor tail
 ```
 
@@ -80,6 +85,11 @@ READONLY_TOOLS: tuple[str, ...] = (
     "get_news",
     "get_research",
     "get_sentiment",
+    "get_macro_events",
+    "get_credit_stress",
+    "get_vol",
+    "get_gamma",
+    "get_market_context",
     "get_recent_alerts",
 )
 ```
@@ -104,6 +114,11 @@ _HANDLERS: Dict[str, Callable[..., Any]] = {
     "get_news":           _market.get_news,
     "get_research":       _market.get_research,
     "get_sentiment":      _market.get_sentiment,
+    "get_macro_events":   _market.get_macro_events,
+    "get_credit_stress":  _market.get_credit_stress,
+    "get_vol":            _market.get_vol,
+    "get_gamma":          _market.get_gamma,
+    "get_market_context": _market.get_market_context,
     "get_recent_alerts":  _market.get_recent_alerts,
 }
 ```
@@ -158,4 +173,4 @@ The `sh -c` wrapper prefers the repo's `myenv` virtualenv. With a bare `python`,
 
 ---
 
-*Last verified against repo HEAD on 2026-10-26.*
+*Last verified against repo HEAD on 2026-10-27.*

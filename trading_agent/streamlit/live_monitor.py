@@ -2923,6 +2923,35 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Max stretch from 20-day SMA (ATR)", 0.25, 3.0,
                 float(getattr(seed, "pullback_max_atr", 1.0)), 0.25, key="cust_pullback_atr")
 
+        # ── Macro events + implied vs realized (skill 68) ─────────────
+        st.markdown("**Macro events & implied vs realized** *(skill 68 — short premium only)*")
+        mv1, mv2, mv3 = st.columns(3)
+        with mv1:
+            macro_guard = st.checkbox(
+                "Macro event guard",
+                value=bool(getattr(seed, "macro_event_guard_enabled", True)),
+                key="cust_macro_guard",
+                help="No new short-premium trade on an equity ETF whose life holds a "
+                     "pending release of the chosen kinds (bonds / metals exempt).")
+            macro_kinds = st.multiselect(
+                "Releases", ["NFP", "CPI", "FOMC"],
+                default=list(getattr(seed, "macro_event_kinds", ("NFP",))),
+                key="cust_macro_kinds",
+                help="Backtest: jobs-report days moved equity ETFs 1.4–1.9×; CPI barely; "
+                     "FOMC not at all close-to-close.")
+        with mv2:
+            macro_max_dte = st.number_input(
+                "Only trades of ≤ DTE", 1, 60, int(getattr(seed, "macro_event_max_dte", 14)), 1,
+                key="cust_macro_max_dte",
+                help="One event day is ~10 % of a 21-session trade's variance but 25–40 % of "
+                     "a 5-session one.")
+        with mv3:
+            vrp_min = st.slider(
+                "Min 30d ATM IV / 20d realized", 0.0, 2.0,
+                float(getattr(seed, "vrp_min_ratio", 1.0)), 0.05, key="cust_vrp_min",
+                help="0 = off. SPY: under 1.0 the ±1σ range held 77–82 % of the time, "
+                     "over 1.5 it held 87–88 %.")
+
         # ── Debit structures + bounce bull put (skill 59) ─────────────
         st.markdown("**Debit spreads, calendars, bounce bull put** *(skill 59)*")
         db_c1, db_c2, db_c3 = st.columns(3)
@@ -3111,6 +3140,10 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "earnings_guard_enabled":       bool(earnings_guard),
         "earnings_buffer_days":         int(earnings_buffer),
         "earnings_min_dte":             int(earnings_min_dte),
+        "macro_event_guard_enabled":    bool(macro_guard),
+        "macro_event_kinds":            list(macro_kinds),
+        "macro_event_max_dte":          int(macro_max_dte),
+        "vrp_min_ratio":                float(vrp_min),
         "rs_filter_mode":               rs_mode,
         "rs_min_percentile":            rs_min_pct,
         "pullback_filter_mode":         pullback_mode,

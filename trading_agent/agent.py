@@ -2316,6 +2316,7 @@ class TradingAgent:
                 lambda t: self.data_provider.fetch_historical_prices(t, period_days=200),
                 market_state.breadth_universe(tickers),
                 market_state.yfinance_level,
+                market_state.yfinance_adjusted_history,
             )
             result = market_state.classify_market_state(inputs, prior_state)
         except Exception as exc:
@@ -2370,6 +2371,75 @@ class TradingAgent:
         out.update(shadow_pop(plan, float(analysis.current_price or 0.0), sigma, dte))
         out["rv_20d"] = round(sigma, 4) if sigma is not None else None
         return out
+
+    # ── Macro events + implied vs realized (skill 68, 2026-10-27) ───────
+
+    def _realized_vol_20d(self, ticker: str) -> Optional[float]:
+        """20-day realized vol from the daily history (cached per cycle)."""
+        cache = self.__dict__.setdefault("_rv20_cache", {})
+        if ticker not in cache:
+            from trading_agent.shadow_pop import realized_vol
+            try:
+                df = self.data_provider.fetch_historical_prices(ticker, period_days=200)
+                cache[ticker] = realized_vol([float(x) for x in df["Close"].dropna().tolist()])
+            except Exception as exc:  # noqa: skill-34-exempt — missing input never blocks (vrp_available=False)
+                logger.debug("[%s] realized vol unavailable: %s", ticker, exc)
+                cache[ticker] = None
+        return cache[ticker]
+
+    @staticmethod
+    def _now_et() -> datetime:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+
+    @staticmethod
+    def _plan_expiry(plan) -> Optional[date]:
+        """Latest leg expiry (a calendar's far leg) or the plan's own."""
+        from trading_agent.strategy import StrategyPlanner
+        days = [StrategyPlanner._leg_expiry(l.symbol) for l in (getattr(plan, "legs", None) or [])]
+        days = [d for d in days if d is not None]
+        if days:
+            return max(days)
+        try:
+            return date.fromisoformat(str(plan.expiration))
+        except (TypeError, ValueError):
+            return None
+
+    def _macro_vol_block(self, ticker: str, plan) -> Optional[str]:
+        """Skill 68 gates for short-premium plans: a pending macro release
+        inside a short trade, or implied vol too cheap vs realized."""
+        from trading_agent import macro_vol_gates as mvg
+        if not mvg.is_short_premium(plan.strategy_name):
+            return None
+        now = self._now_et()
+        exp = self._plan_expiry(plan)
+        if exp is not None and getattr(self.preset, "macro_event_guard_enabled", False):
+            reason = mvg.macro_event_failure(
+                ticker, plan.strategy_name, exp, now,
+                tuple(getattr(self.preset, "macro_event_kinds", ()) or ()),
+                int(getattr(self.preset, "macro_event_max_dte", 0)))
+            if reason:
+                return reason
+        min_ratio = float(getattr(self.preset, "vrp_min_ratio", 0.0) or 0.0)
+        if min_ratio > 0:
+            return mvg.vrp_failure(plan.strategy_name, mvg.latest_atm_iv(ticker, now.date()),
+                                   self._realized_vol_20d(ticker), min_ratio)
+        return None
+
+    def _macro_vol_fields(self, plan) -> Dict:
+        """Journal context: next macro release, releases inside the trade,
+        30-day ATM IV and IV / RV20 — for every plan with legs."""
+        if not getattr(plan, "legs", None):
+            return {}
+        from trading_agent import macro_vol_gates as mvg
+        try:
+            now = self._now_et()
+            return mvg.context_fields(
+                plan.ticker, self._plan_expiry(plan), now,
+                mvg.latest_atm_iv(plan.ticker, now.date()), self._realized_vol_20d(plan.ticker))
+        except Exception as exc:  # noqa: skill-34-exempt — journal context only
+            logger.debug("[%s] macro/vol context unavailable: %s", plan.ticker, exc)
+            return {}
 
     # ── Entry gates (2026-10-05) ─────────────────────────────────────────
 
@@ -2933,6 +3003,7 @@ class TradingAgent:
                      or self._ladder_block(ticker, plan.expiration)
                      or self._stop_cooldown_block(ticker, plan)
                      or self._direction_risk_block(ticker, plan, balance)
+                     or self._macro_vol_block(ticker, plan)
                      or self._trend_filter_block(ticker, plan, analysis)
                      or self._entry_confirmation_block(ticker, plan))
             if not block:
@@ -3256,6 +3327,7 @@ class TradingAgent:
         raw["playbook"] = pb.name
         raw["playbook_implemented"] = pb.implemented
         raw.update(self._shadow_pop_fields(plan, analysis))
+        raw.update(self._macro_vol_fields(plan))
         # Skill 65: trend filter verdicts (shadow or live) for this plan.
         trend = getattr(self, "_trend_eval", {}).get(ticker)
         if trend is not None and plan.valid:
