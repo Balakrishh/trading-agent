@@ -122,9 +122,10 @@ if cs is not None and cs >= cfg.caution_credit_stress:
 ```
 
 ```python
-# trading_agent/gamma_exposure.py:61-71
-def contract_gex(c, spot):
-    g, oi = float(c.get("gamma") or 0), float(c.get("open_interest") or 0)
+# trading_agent/gamma_exposure.py — contract_gex
+def contract_gex(c, spot, today=None):
+    oi = float(c.get("open_interest") or 0)
+    g = contract_gamma(c, spot, today)      # BS Γ from the contract's IV; quoted Γ as fallback
     if g <= 0 or oi <= 0 or spot <= 0:
         return None
     sign = 1.0 if str(c.get("type", "")).lower() == "call" else -1.0
@@ -149,6 +150,7 @@ Timer: `trading-agent-gamma.timer`, 16:05 ET weekdays → `trade_journal/gamma_e
 - **Credit stress must use adjusted closes.** The agent's own history is unadjusted (to match live quotes); HYG's monthly ex-dividend drop read as 0.4 % of stress. `compute_inputs(..., fetch_adjusted=yfinance_adjusted_history)`; the data server uses the same function. A failed fetch leaves `credit_stress` None — skipped, never 0.
 - **Credit hysteresis.** Entering CAUTION at 2 % and leaving under 1 % keeps a hovering ratio from flipping the state every cycle.
 - **Gamma needs open interest.** `/chain` contracts carry `open_interest` from 2026-10-27 (`market_data_schwab._normalize_contract`, None when Schwab omits it). A data server still running older code returns contracts without it; the recorder logs "data server needs a restart" and records nothing instead of a zero.
+- **One Γ for the net and the flip (2026-11-01).** `contract_gamma` recomputes Γ with Black–Scholes from each contract's own IV (quoted Γ only when IV, strike or expiry is missing), and `net_gex_at` is the same per-contract sum, so `net_gex` equals the flip curve at spot and `regime` agrees with it. Before, the net used Schwab's Γ, which is rounded to 3 decimals (far strikes read 0.000), while the flip used BS: the 10-28 SPY row said long gamma with spot 0.12 % under its flip. Rows carry `gamma_source: "bs_iv"`; rows without it (10-27 → 10-30) used the quoted Γ — compare only within one source.
 - **Naive GEX convention.** Assumes dealers are long calls / short puts; wrong for a market where customers sell calls heavily. It is a record for testing, not a trading input.
 - **Flip may not exist** within ±8 % of spot (all-call or all-put books) → `flip` None.
 
@@ -163,4 +165,4 @@ Timer: `trading-agent-gamma.timer`, 16:05 ET weekdays → `trade_journal/gamma_e
 
 ---
 
-*Last verified against repo HEAD on 2026-10-27.*
+*Last verified against repo HEAD on 2026-11-01.*

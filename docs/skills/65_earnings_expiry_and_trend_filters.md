@@ -164,6 +164,32 @@ Inputs: `_begin_entry_gates` computes `_relative_strength_map(watchlist)` once p
 
 Preset (`PresetConfig`, dashboard "Earnings & trend entry filters"): `earnings_guard_enabled` (True), `earnings_buffer_days` (1), `earnings_min_dte` (7), `rs_filter_mode` / `pullback_filter_mode` (`"shadow"` | `"live"` | `"off"`, default shadow), `rs_min_percentile` (0.50), `pullback_max_atr` (1.0). Summary: `Earnings exp ≤ report−1d (≥7d) • RS shadow ≥p50% • Pullback shadow ≤1ATR`.
 
+### Earnings exit for open positions (2026-11-01)
+
+```python
+# trading_agent/position_monitor.py — in _check_exit, after the Wheel branch,
+# before every P&L rule
+earnings = self._check_earnings_exit(spread)
+if earnings is not None:
+    return earnings
+
+def _check_earnings_exit(self, spread, today=None):
+    if not self.earnings_exit_enabled or self.earnings_lookup is None or self.earnings_exit_sessions <= 0:
+        return None
+    report = self.earnings_lookup(spread.underlying)        # exceptions → None, logged
+    if report is None:
+        return None
+    last = self._last_expiry(spread)                         # latest leg (calendar far leg)
+    if last is None or last < report:
+        return None
+    n = sessions_before(today or _today_et(), report)        # NYSE sessions in [today, report)
+    if n == 0 or n > self.earnings_exit_sessions:
+        return None
+    return (ExitSignal.EARNINGS_EXIT, f"Earnings {report}: position runs to {last} — closing {n} session(s) before the report")
+```
+
+`ExitSignal.EARNINGS_EXIT` is in `IMMEDIATE_EXIT_SIGNALS` (a calendar fact — no mark to debounce). `TradingAgent.__init__` passes `earnings_exit_enabled` / `earnings_exit_sessions` and sets `position_monitor.earnings_lookup = next_earnings_date`. Preset: `earnings_exit_enabled` (True), `earnings_exit_sessions` (1); dashboard "Close before earnings"; summary ` • Earnings exit 1 sess before`. `calendar_utils.sessions_before(today, day)`.
+
 ## 4. Edge Cases / Guardrails
 
 - **Unknown earnings date** (yfinance down, rate-limited, no date listed) — no cap; the failed lookup is cached for 12 h so a failing source is not hammered. ETFs (`_NON_ISSUER_TICKERS`) are never looked up.
@@ -172,7 +198,7 @@ Preset (`PresetConfig`, dashboard "Earnings & trend entry filters"): `earnings_g
 - **No expiry fits** — strategy name `""` (a deliberate no-trade, like `wait_for_stabilization`) with reason "Earnings on D (in N d): … no new X trade until after it"; no chain is fetched.
 - **Calendar** — the far leg is ~28 days past the near leg, so a calendar is skipped whenever the report falls between; reason "no far leg ends before earnings on D".
 - **Scanner** — a grid point whose whole DTE window lies past the cap is dropped; the rest are clamped to the cap. A cap shorter than the grid's shortest window leaves no expirations (the plan-level no-trade check normally fires first).
-- **Open positions are not touched** — the guard applies to new plans only; an open trade holding through a report (AMZN 10-29) is the operator's call.
+- **Open positions spanning a report (2026-11-01).** The entry guard applies to new plans; an open position whose latest leg expires on or after the next report is closed by `EARNINGS_EXIT` during the last `earnings_exit_sessions` sessions before it (AMZN 255/265, opened 10-06 before the guard, held through 10-29: −16 % gap, −$403 of $460). Report time is unknown (BMO / AMC), so the report day itself never triggers — an after-close report on day D is exited on D − 1, a day early. The exit runs before the stop / target rules, so a position at its stop closes as `earnings_exit`; the stop cool-down (skill 37) does not count it. ETFs (no date), unknown dates, a failed lookup and weekends (0 sessions) never exit. Wheel legs are exempt — assignment is part of the plan.
 - **Trend filters, missing data** — no SPY history, no ticker history, or fewer than 51 daily bars → verdict `ok: null`, never blocks.
 - **Shadow vs live** — shadow writes the verdicts (`blocked: false`) and lets the entry continue; live blocks with `risk: trend: <filter> — <reason>`. The filters run after the market-state and ladder gates and before entry confirmation, so a filtered plan does not advance the confirmation streak.
 - **One ticker / ties** — a single ranked ticker is percentile 0.5; equal scores share the mean rank.
@@ -189,4 +215,4 @@ Preset (`PresetConfig`, dashboard "Earnings & trend entry filters"): `earnings_g
 
 ---
 
-*Last verified against repo HEAD on 2026-10-27.*
+*Last verified against repo HEAD on 2026-11-01.*

@@ -385,7 +385,13 @@ class TradingAgent:
             debit_profit_target_basis=self.preset.debit_profit_target_basis,
             calendar_profit_target_pct=self.preset.calendar_profit_target_pct,
             calendar_max_strike_drift_pct=self.preset.calendar_max_strike_drift_pct,
+            # 2026-11-01: close single-stock positions before a report they span.
+            earnings_exit_enabled=self.preset.earnings_exit_enabled,
+            earnings_exit_sessions=self.preset.earnings_exit_sessions,
         )
+        if hasattr(self.position_monitor, "earnings_lookup"):
+            from trading_agent.earnings_calendar import next_earnings_date as _ned
+            self.position_monitor.earnings_lookup = _ned
         self.order_tracker: OrdersPort = OrderTracker(
             api_key=config.alpaca.api_key,
             secret_key=config.alpaca.secret_key,
@@ -2317,11 +2323,14 @@ class TradingAgent:
         prior = market_state.read_state()
         prior_state = prior.get("state") if prior else None
         try:
+            universe = list(market_state.breadth_universe(tickers))
+            spots, today = self._market_state_spots(universe)
             inputs = market_state.compute_inputs(
                 lambda t: self.data_provider.fetch_historical_prices(t, period_days=200),
-                market_state.breadth_universe(tickers),
+                universe,
                 market_state.yfinance_level,
                 market_state.yfinance_adjusted_history,
+                live_spots=spots, today=today,
             )
             result = market_state.classify_market_state(inputs, prior_state)
         except Exception as exc:
@@ -2348,6 +2357,24 @@ class TradingAgent:
                 )
             except Exception as exc:  # noqa: skill-34-exempt — state-change journal row is best-effort; snapshot already written
                 logger.warning("Market state journal row failed: %s", exc)
+
+    def _market_state_spots(self, universe):
+        """(ticker → live price, today ET) during the session when
+        ``preset.market_state_live_prices`` is on, so the state reads today's
+        prices; ({}, None) when off, outside the session or when the quote
+        call fails — the state then uses the daily closes (prior session)."""
+        from trading_agent.market_hours import is_within_market_hours
+        if not getattr(self.preset, "market_state_live_prices", False) or not is_within_market_hours():
+            return {}, None
+        syms = list(dict.fromkeys(["SPY", *universe]))
+        try:
+            batch = getattr(self.data_provider, "fetch_batch_snapshots", None)
+            spots = (batch(syms) if batch else
+                     {t: self.data_provider.get_current_price(t) for t in syms})
+        except Exception as exc:  # noqa: skill-34-exempt — daily closes still classify; logged
+            logger.warning("Market state: live prices unavailable (%s) — using daily closes", exc)
+            return {}, None
+        return {t: float(p) for t, p in (spots or {}).items() if p}, self._now_et().date()
 
     def _apply_risk_multiplier(self, mult: float) -> None:
         self._cycle_risk_pct = self._base_max_risk_pct * mult
@@ -2990,6 +3017,10 @@ class TradingAgent:
             ticker, analysis.regime.value,
             self._regime_to_strategy(analysis.regime),
         )
+        # Fit to budget (2026-11-01): debit verticals narrow their width to
+        # the cycle's per-trade cap (market-state multiplier applied).
+        self.strategy_planner.max_loss_budget = round(
+            balance * float(self.risk_manager.max_risk_pct), 2) if balance > 0 else None
         plan: SpreadPlan = self.strategy_planner.plan(ticker, analysis)
 
         # Snapshot adaptive-scan results immediately so the next ticker's

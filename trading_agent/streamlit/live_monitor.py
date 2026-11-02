@@ -2615,6 +2615,14 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                  "position-size multiplier, allowed strategies, Wheel CSP "
                  "pause. Exits are never gated.",
         )
+        market_state_live_prices = st.checkbox(
+            "Market state on today's prices",
+            value=bool(getattr(seed, "market_state_live_prices", False)),
+            key="cust_market_state_live_prices",
+            help="Append the live price to the daily closes so SPY trend and breadth "
+                 "read today instead of yesterday's close. Off = thresholds as validated "
+                 "on daily closes.",
+        )
 
         # ── Profit-target management (skill 30, added 2026-05-19) ──────
         # Close any position once unrealized P&L ≥ X × initial credit.
@@ -2900,6 +2908,16 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
             earnings_min_dte = st.number_input(
                 "Shortest DTE allowed", 1, 30, int(getattr(seed, "earnings_min_dte", 7)), 1,
                 key="cust_earnings_min_dte")
+            earnings_exit = st.checkbox(
+                "Close before earnings",
+                value=bool(getattr(seed, "earnings_exit_enabled", True)),
+                key="cust_earnings_exit",
+                help="Close a single-stock position whose life spans the next report "
+                     "during the last sessions before it (Wheel legs exempt).")
+            earnings_exit_sessions = st.number_input(
+                "Sessions before the report", 1, 5,
+                int(getattr(seed, "earnings_exit_sessions", 1)), 1,
+                key="cust_earnings_exit_sessions")
         with tf2:
             rs_mode = st.selectbox(
                 "Relative strength filter", _modes,
@@ -3045,6 +3063,12 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
             debit_ladder_step_cycles = st.number_input(
                 "Cycles per step", 1, 5, int(getattr(seed, "debit_ladder_step_cycles", 1)), 1,
                 key="cust_debit_ladder_cycles")
+            fit_to_budget = st.checkbox(
+                "Fit to budget",
+                value=bool(getattr(seed, "fit_to_budget_enabled", True)),
+                key="cust_fit_to_budget",
+                help="When every grid width costs more than the per-trade cap (halved in "
+                     "CAUTION), try narrower widths at the same long delta.")
         with db_e3:
             cal_tp = st.slider(
                 "Calendar TP (% of debit)", 0.1, 0.6,
@@ -3075,6 +3099,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "max_leg_spread_pct_mid": max_leg_spread_pct_mid,
         "fill_model":             fill_model,
         "market_state_enabled":   market_state_enabled,
+        "market_state_live_prices": bool(market_state_live_prices),
         "profit_target_pct":  profit_target_pct,
         # Iron Butterfly knobs (skill 45).
         "iron_butterfly_enabled":       ib_enabled,
@@ -3087,6 +3112,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "debit_max_overpay":            debit_overpay,
         "debit_ladder_mode":            debit_ladder_mode,
         "debit_ladder_steps":           int(debit_ladder_steps),
+        "fit_to_budget_enabled":        bool(fit_to_budget),
         "debit_ladder_step_cycles":     int(debit_ladder_step_cycles),
         "debit_min_reward_risk":        debit_min_rr,
         "debit_profit_target_pct":      debit_tp,
@@ -3141,6 +3167,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "earnings_guard_enabled":       bool(earnings_guard),
         "earnings_buffer_days":         int(earnings_buffer),
         "earnings_min_dte":             int(earnings_min_dte),
+        "earnings_exit_enabled":        bool(earnings_exit),
+        "earnings_exit_sessions":       int(earnings_exit_sessions),
         "macro_event_guard_enabled":    bool(macro_guard),
         "macro_event_kinds":            list(macro_kinds),
         "macro_event_max_dte":          int(macro_max_dte),

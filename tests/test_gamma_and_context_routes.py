@@ -40,7 +40,8 @@ def test_flip_between_put_and_call_heavy_strikes():
 
 def test_summarize_walls_and_regime():
     chain = [_c("call", 105, oi=3000), _c("call", 110, oi=500), _c("put", 95, oi=2000),
-             _c("put", 90, oi=100), _c("call", 120, gamma=0.0)]
+             _c("put", 90, oi=100),
+             _c("call", 120, gamma=0.0, iv=0.0)]      # no IV and no Γ → skipped (a 0.0 Γ with IV is BS-priced)
     row = gx.summarize("SPY", chain, 100.0, TODAY)
     assert row["contracts"] == 4 and row["call_wall"] == 105 and row["put_wall"] == 95
     assert row["net_gex"] == row["call_gex"] + row["put_gex"]

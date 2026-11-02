@@ -548,14 +548,18 @@ def test_wheel_screen_falls_back_to_monthly_expiration(monkeypatch):
     import trading_agent.mcp.tools.strategy as st
     monkeypatch.setattr(st, "_positions_provider", lambda: ManualPositionsProvider.from_dicts([]))
     monkeypatch.setattr(st, "_earnings_days", lambda t: None)
+    from datetime import date, timedelta
+    # Relative to today: fixed 2026-11-13/20 fell under the 21-day CSP
+    # band on 2026-11-01 and the test started failing on the calendar.
+    weekly, monthly = (str(date.today() + timedelta(days=d)) for d in (28, 35))
     monkeypatch.setattr(st, "_wheel_expiration_candidates",
-                        lambda today, dte, **kw: ["2026-11-13", "2026-11-20"])
+                        lambda today, dte, **kw: [weekly, monthly])
     monkeypatch.setattr(st._market, "get_quote", lambda t: {"price": 100.0})
     monkeypatch.setattr(st._market, "get_fundamentals", lambda t: {"fundamentals": _GOOD})
     monkeypatch.setattr(st, "_chain_from_dataserver",
-                        lambda t, e, o: [_short_put()] if e == "2026-11-20" else None)
+                        lambda t, e, o: [_short_put()] if e == monthly else None)
     out = st.wheel_screen(["KO"], max_collateral=12000)
-    assert out["expiration_by_ticker"] == {"KO": "2026-11-20"}
+    assert out["expiration_by_ticker"] == {"KO": monthly}
     assert len(out["recommendations"]) == 1
 
 

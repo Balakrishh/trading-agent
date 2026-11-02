@@ -20,14 +20,14 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import requests
 
-from trading_agent.calendar_utils import is_last_trading_day_before
+from trading_agent.calendar_utils import is_last_trading_day_before, sessions_before
 from trading_agent.market_data import ALPACA_TIMEOUT
 from trading_agent.regime import Regime
 from trading_agent.wheel_policy import (
@@ -52,6 +52,11 @@ POSITION_FETCH_RETRY_BACKOFF_S = 0.5
 logger = logging.getLogger(__name__)
 
 
+def _today_et() -> date:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
 class ExitSignal(Enum):
     HOLD = "hold"
     STOP_LOSS = "stop_loss"          # legacy alias kept for compatibility
@@ -63,6 +68,7 @@ class ExitSignal(Enum):
     EXPIRED = "expired"
     DELTA_STOP = "delta_stop"        # Wheel CSP |Δ| ≥ CSP_STOP_ABS_DELTA (debounced)
     STRIKE_DRIFT = "strike_drift"    # calendar: underlying ≥ X % from the strike (debounced)
+    EARNINGS_EXIT = "earnings_exit"  # life spans the next earnings report (2026-11-01)
     MANUAL = "manual"                # operator close via manual_close.py (skill 63); never set by evaluate()
 
 
@@ -71,6 +77,7 @@ IMMEDIATE_EXIT_SIGNALS = {
     ExitSignal.HARD_STOP,
     ExitSignal.STRIKE_PROXIMITY,
     ExitSignal.DTE_SAFETY,
+    ExitSignal.EARNINGS_EXIT,       # a calendar fact, not a mark — nothing to debounce
 }
 
 # Which regime each strategy is compatible with
@@ -298,7 +305,9 @@ class PositionMonitor:
                  debit_stop_loss_pct: float = 0.50,
                  debit_profit_target_basis: str = "debit",
                  calendar_profit_target_pct: float = 0.25,
-                 calendar_max_strike_drift_pct: float = 0.03):
+                 calendar_max_strike_drift_pct: float = 0.03,
+                 earnings_exit_enabled: bool = False,
+                 earnings_exit_sessions: int = 1):
         """
         Additional parameter
         --------------------
@@ -328,6 +337,11 @@ class PositionMonitor:
         self.debit_profit_target_basis = debit_profit_target_basis
         self.calendar_profit_target_pct = calendar_profit_target_pct
         self.calendar_max_strike_drift_pct = calendar_max_strike_drift_pct
+        # Earnings exit (2026-11-01, skill 65): the agent sets
+        # ``earnings_lookup`` (ticker → next report date or None).
+        self.earnings_exit_enabled = bool(earnings_exit_enabled)
+        self.earnings_exit_sessions = int(earnings_exit_sessions)
+        self.earnings_lookup: Optional[Callable[[str], Optional[date]]] = None
 
     def _profit_pl(self, spread: "SpreadPosition") -> float:
         if self.profit_target_basis == "natural" and spread.net_natural_pl is not None:
@@ -828,6 +842,44 @@ class PositionMonitor:
         basis = spread.original_credit * 100 * contracts
         return "credit", basis, basis * self.profit_target_pct
 
+    @staticmethod
+    def _last_expiry(spread: "SpreadPosition") -> Optional[date]:
+        """Latest leg expiry (a calendar's far leg), else ``expiration``."""
+        from trading_agent.strategy import StrategyPlanner
+        exps = [e for e in (StrategyPlanner._leg_expiry(l.symbol) for l in spread.legs) if e]
+        if exps:
+            return max(exps)
+        try:
+            return date.fromisoformat(spread.expiration[:10]) if spread.expiration else None
+        except ValueError:
+            return None
+
+    def _check_earnings_exit(self, spread: "SpreadPosition",
+                             today: Optional[date] = None):
+        """EARNINGS_EXIT during the last ``earnings_exit_sessions`` sessions
+        before a report the position's life spans; None otherwise (off,
+        ETF, unknown date, expiry before the report, report passed)."""
+        if (not self.earnings_exit_enabled or self.earnings_lookup is None
+                or self.earnings_exit_sessions <= 0):
+            return None
+        try:
+            report = self.earnings_lookup(spread.underlying)
+        except Exception as exc:  # noqa: skill-34-exempt — unknown date → no earnings exit; logged
+            logger.warning("[%s] earnings lookup failed: %s", spread.underlying, exc)
+            return None
+        if report is None:
+            return None
+        today = today or _today_et()
+        last = self._last_expiry(spread)
+        if last is None or last < report:
+            return None
+        n = sessions_before(today, report)
+        if n == 0 or n > self.earnings_exit_sessions:
+            return None
+        return (ExitSignal.EARNINGS_EXIT,
+                f"Earnings {report.isoformat()}: position runs to {last.isoformat()} "
+                f"— closing {n} session(s) before the report")
+
     def _check_debit_exit(self, spread: SpreadPosition,
                           current_regimes: Dict[str, Regime],
                           underlying_price: float = 0.0):
@@ -972,6 +1024,11 @@ class PositionMonitor:
         # regime shift, credit-multiple hard stop) must not run here.
         if spread.strategy_name in WHEEL_STRATEGIES:
             return self._check_wheel_exit(spread)
+
+        # --- Earnings exit (2026-11-01) — before every P&L rule ---------
+        earnings = self._check_earnings_exit(spread)
+        if earnings is not None:
+            return earnings
 
         # --- Debit structures (skill 59) ------------------------------
         # The credit rules are keyed to a credit received; a long spread

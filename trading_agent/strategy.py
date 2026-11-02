@@ -233,6 +233,9 @@ class StrategyPlanner:
         self._expiry_cap: Optional[date] = None
         self._earnings_date: Optional[date] = None
         self.earnings_ticker: Optional[str] = None
+        # Fit to budget (2026-11-01): the agent sets the cycle's per-trade
+        # max loss in $ per contract before each plan(); None = no budget.
+        self.max_loss_budget: Optional[float] = None
 
     # ------------------------------------------------------------------
     # PDT-aware DTE cap (skill 33, added 2026-05-20)
@@ -626,8 +629,15 @@ class StrategyPlanner:
         opt = "call" if kind == "call_debit" else "put"
         logger.info("[%s] Planning %s, expiration %s", ticker, kind, expiration)
         slc = self._typed_slice(ticker, expiration, opt)
-        out = decide_debit_spread(DecisionInput(side=kind, chain_slices=[slc],
-                                                preset=self.preset))
+        budget = self.max_loss_budget
+        out = decide_debit_spread(DecisionInput(
+            side=kind, chain_slices=[slc], preset=self.preset,
+            max_debit=(budget / 100.0) if budget and budget > 0 else None))
+        if out.diagnostics.fit_to_budget:
+            logger.info("[%s] Fit to budget: width $%g at $%.2f (cap $%.2f/share)", ticker,
+                        out.diagnostics.fit_to_budget["width"],
+                        out.diagnostics.fit_to_budget["debit"],
+                        out.diagnostics.fit_to_budget["budget"])
         return self._plan_from_debit_output(ticker, analysis, kind, out, expiration)
 
     def _plan_calendar(self, ticker: str, analysis: RegimeAnalysis) -> SpreadPlan:

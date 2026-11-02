@@ -101,6 +101,14 @@ def next_weekly_expiration(today: date, target_dte: int,
     return min(all_candidates, key=lambda d: abs((d - target).days))
 
 
+def sessions_before(today: date, day: date) -> int:
+    """NYSE sessions in [today, day) — 1 when today is the last session
+    before ``day``; 0 when ``day`` ≤ today."""
+    if day <= today:
+        return 0
+    return len(_valid_days(today, day - timedelta(days=1)))
+
+
 def is_last_trading_day_before(today: date, expiration: date) -> bool:
     """True if *today* is the last NYSE trading day strictly before *expiration*.
 

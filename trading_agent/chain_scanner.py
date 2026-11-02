@@ -899,6 +899,10 @@ class ScanDiagnostics:
     # reward/risk still clears the floor at the cap — what a mid-first
     # ladder could have tried. Leg symbols included for the shadow tracker.
     ladder_candidate:     Optional[Dict[str, Any]] = None
+    # Debit verticals, fit_to_budget_enabled (2026-11-01): set when no grid
+    # width fit the per-trade cap and a narrower width was chosen —
+    # {"budget", "grid_min_debit", "width", "debit"} (per share).
+    fit_to_budget:        Optional[Dict[str, Any]] = None
 
     def record(self, reason: str, count: int = 1) -> None:
         """Increment the histogram bucket for ``reason``."""
@@ -916,6 +920,7 @@ class ScanDiagnostics:
             "rejects_by_reason":    dict(self.rejects_by_reason),
             "best_near_miss":       self.best_near_miss,
             "ladder_candidate":     self.ladder_candidate,
+            "fit_to_budget":        self.fit_to_budget,
         }
 
 
