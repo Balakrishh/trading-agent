@@ -278,6 +278,20 @@ The operator asked to stop running new rules in shadow on a paper account: live 
 
 After this nothing runs in shadow on the paper account except the measurement-only logs (`pop_rv`, `position_excursion`). Set in the Pi's `STRATEGY_PRESET.json` (custom profile overrides; backup `STRATEGY_PRESET.json.bak-20261027`). The skill-68 gates (macro events, IV/RV floor, credit stress) went live the same day without a shadow period. Re-read this table against outcomes after ~20 closed trades.
 
+## 15. Week of 2026-10-26 follow-ups (2026-11-01)
+
+From the week's learnings (`docs/plans/journal_learnings.md`, −$760 on 6 closes, CAUTION all week) and `docs/plans/research_debit_entry.md`:
+
+| Item | Evidence | Decision |
+|---|---|---|
+| Fit debit verticals to the halved CAUTION cap | 1,140 valid plans rejected on size; 0.50Δ at narrower widths no worse than 2 % (2008–2026), 0.40/0.35Δ worse | **built, live on paper** — `fit_to_budget_enabled` (skill 59). Helps on $1-strike chains; QQQ's $5 strikes fail the fair-price cap when narrow |
+| Trend confirmation for debit spreads (close on the trade's side of SMA20 + 10-day momentum) | No gain alone; on top of the pullback filter better in the first half, worse in the second | **not built** — live pullback filter stays |
+| Earnings exit for open positions | AMZN held through 10-29: −$403 of $460 | **built, live on paper** — `earnings_exit_enabled`, 1 session before (skill 65) |
+| Dealer-gamma net vs flip disagreed (SPY 10-28) | Net used Schwab's 3-decimal Γ, flip used BS | **fixed** — one BS Γ for both, rows tagged `gamma_source` (skill 68) |
+| Market state reads yesterday's SPY close | 10-30: state 769.36 vs SPY 756 | **option built, off** — `market_state_live_prices` (skill 58 §4); prior close was a deliberate choice (E5). Operator to decide |
+| Re-test bear calls on index ETFs with the IV/RV floor | B6 found short calls under-survived; IV/RV 1.2–1.3 on SPY/DIA | open — backtest first |
+| Total-spread liquidity test instead of per-leg | ~5,300 put-debit `leg_spread_wide` rejects | open — measure ladder fills vs mid first |
+
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 
 **Why:** two days of paper trading opened 0 new spreads (≈3,100 "no positive-EV" rejects). Causes: (1) the agent only *sells* premium, which is correctly idle when IV Rank is low (3–36 on 2026-09-30/10-01); (2) delta-as-probability assumes zero edge, so EV rarely clears after bid/ask; (3) oversold + high-IV setups — historically the best time to sell puts — are skipped rather than traded the other way. Goal: a deterministic regime → strategy map that always has an appropriate, small, defined-risk trade, measured per playbook.

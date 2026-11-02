@@ -58,13 +58,29 @@ FLIP_STEP = 0.0025
 MACRO_REFRESH_DAYS = 7
 
 
-def contract_gex(c: Dict[str, Any], spot: float) -> Optional[float]:
-    """Signed GEX of one contract ($ delta change per 1 % move), None when
-    gamma or open interest is missing."""
+def contract_gamma(c: Dict[str, Any], spot: float, today: Optional[date] = None) -> float:
+    """Γ of one contract at ``spot``: Black–Scholes from the contract's own
+    IV when IV, strike and expiry are known (2026-11-01: Schwab rounds Γ
+    to 3 decimals, so far strikes read 0.0 and the net disagreed with the
+    flip, which was always BS); else the quoted Γ."""
     try:
-        g, oi = float(c.get("gamma") or 0), float(c.get("open_interest") or 0)
+        iv, k = float(c.get("iv") or 0), float(c.get("strike") or 0)
+        if today is not None and iv > 0 and k > 0 and c.get("expiration"):
+            t = max((date.fromisoformat(str(c["expiration"])[:10]) - today).days, 0.5) / 365.0
+            return bs_gamma(spot, k, t, iv)
+        return float(c.get("gamma") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def contract_gex(c: Dict[str, Any], spot: float, today: Optional[date] = None) -> Optional[float]:
+    """Signed GEX of one contract ($ delta change per 1 % move), None when
+    gamma or open interest is missing. Γ from ``contract_gamma``."""
+    try:
+        oi = float(c.get("open_interest") or 0)
     except (TypeError, ValueError):
         return None
+    g = contract_gamma(c, spot, today)
     if g <= 0 or oi <= 0 or spot <= 0:
         return None
     sign = 1.0 if str(c.get("type", "")).lower() == "call" else -1.0
@@ -79,20 +95,9 @@ def bs_gamma(spot: float, strike: float, t_years: float, iv: float) -> float:
 
 
 def net_gex_at(contracts: List[Dict[str, Any]], spot: float, today: date) -> float:
-    """Net GEX if the underlying were at ``spot`` (Γ re-computed)."""
-    total = 0.0
-    for c in contracts:
-        try:
-            k, iv = float(c["strike"]), float(c.get("iv") or 0)
-            oi = float(c.get("open_interest") or 0)
-            t = max((date.fromisoformat(str(c["expiration"])[:10]) - today).days, 0.5) / 365.0
-        except (KeyError, TypeError, ValueError):
-            continue
-        if oi <= 0 or iv <= 0:
-            continue
-        sign = 1.0 if str(c.get("type", "")).lower() == "call" else -1.0
-        total += sign * bs_gamma(spot, k, t, iv) * oi * 100 * spot * spot * 0.01
-    return total
+    """Net GEX if the underlying were at ``spot`` (Γ re-computed) — the
+    same per-contract sum ``summarize`` reports at the real spot."""
+    return sum(g for g in (contract_gex(c, spot, today) for c in contracts) if g is not None)
 
 
 def flip_level(contracts: List[Dict[str, Any]], spot: float, today: date,
@@ -117,7 +122,7 @@ def summarize(ticker: str, contracts: List[Dict[str, Any]], spot: float,
     n = 0
     oi_total = 0.0
     for c in contracts:
-        g = contract_gex(c, spot)
+        g = contract_gex(c, spot, today)
         if g is None:
             continue
         n += 1
@@ -145,6 +150,7 @@ def summarize(ticker: str, contracts: List[Dict[str, Any]], spot: float,
         "call_wall": max(calls, key=calls.get) if calls else None,
         "put_wall": min(puts, key=puts.get) if puts else None,
         "regime": "long_gamma" if net > 0 else "short_gamma",
+        "gamma_source": "bs_iv",          # 2026-11-01; rows before it used Schwab's rounded Γ
     }
 
 

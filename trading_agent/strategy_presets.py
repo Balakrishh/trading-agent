@@ -132,6 +132,11 @@ class PresetConfig:
     # gated. False = legacy behaviour (per-ticker regime only).
     # ------------------------------------------------------------------
     market_state_enabled:    bool  = True
+    # 2026-11-01: append today's live prices to the daily closes so SPY's
+    # price / SMAs / RSI and breadth read today (the history ends at
+    # yesterday's bar). Off by default — the thresholds were validated on
+    # daily closes and intraday breadth can flicker (skill 58 §4, E5).
+    market_state_live_prices: bool = False
 
     # ------------------------------------------------------------------
     # Profit-target management (added 2026-05-19 — see skill 30).
@@ -310,10 +315,18 @@ class PresetConfig:
     # skill 59 §3). Orders still go out at natural; "shadow" measures
     # what offering mid → cap in debit_ladder_steps prices, each held
     # debit_ladder_step_cycles cycles, would have saved or unlocked
-    # (``debit_ladder_shadow`` journal rows). "live" is not built yet.
+    # (``debit_ladder_shadow`` journal rows); "live" offers those prices
+    # before natural (2026-10-27).
     debit_ladder_mode:                 str   = "shadow"
     debit_ladder_steps:                int   = 4
     debit_ladder_step_cycles:          int   = 1
+    # Fit to budget (2026-11-01, skill 59 §3): when every debit vertical on
+    # the width grid costs more than the cycle's per-trade cap (CAUTION
+    # halves it to ~1 %), retry narrower widths — down to the chain's
+    # strike step — at the same long delta. Never moves the long leg out
+    # of the money: the 2008–2026 study (docs/plans/research_debit_entry.md)
+    # found 0.40/0.35-delta longs worse than 0.50, narrower widths better.
+    fit_to_budget_enabled:             bool  = True
     # Put-debit fallback skipped for these tickers (E7, backlog 11.4,
     # 2026-10-26): their legs quoted 30–90¢ wide on 2026-10-21 (limit 15¢ /
     # 5 % of mid), so every bearish cycle ended in leg_spread_wide — about
@@ -448,6 +461,12 @@ class PresetConfig:
     earnings_guard_enabled:            bool  = True
     earnings_buffer_days:              int   = 1
     earnings_min_dte:                  int   = 7
+    # Earnings exit (2026-11-01): close a single-stock position whose life
+    # spans the next report during the last ``earnings_exit_sessions``
+    # sessions before it (AMZN 2026-10-29: held through a −16 % gap,
+    # −$403 of $460). Wheel legs are exempt (assignment is the plan).
+    earnings_exit_enabled:             bool  = True
+    earnings_exit_sessions:            int   = 1
 
     # ------------------------------------------------------------------
     # Macro events + implied vs realized (skill 68, added 2026-10-27,
@@ -500,7 +519,8 @@ class PresetConfig:
                          f"{'cost' if self.debit_profit_target_basis == 'debit' else 'max'}"
                          f"/SL{self.debit_stop_loss_pct:.0%} "
                          f"Ladder {self.debit_ladder_mode}"
-                         f"{'' if self.debit_ladder_mode == 'off' else f' {self.debit_ladder_steps}×{self.debit_ladder_step_cycles}c'}")
+                         f"{'' if self.debit_ladder_mode == 'off' else f' {self.debit_ladder_steps}×{self.debit_ladder_step_cycles}c'}"
+                         f"{' • Fit to budget' if self.fit_to_budget_enabled else ''}")
         if self.calendar_enabled:
             parts.append(f"Cal@{self.dte_calendar_near}+{self.calendar_gap_days}d "
                          f"TP{self.calendar_profit_target_pct:.0%} drift≤{self.calendar_max_strike_drift_pct:.0%}")
@@ -513,6 +533,8 @@ class PresetConfig:
         """Summary-line token for the skill-65 earnings guard + filters."""
         earn = (f"Earnings exp ≤ report−{self.earnings_buffer_days}d (≥{self.earnings_min_dte}d)"
                 if self.earnings_guard_enabled else "Earnings guard OFF")
+        earn += (f" • Earnings exit {self.earnings_exit_sessions} sess before"
+                 if self.earnings_exit_enabled else " • Earnings exit OFF")
         macro = (f"Macro guard {'/'.join(self.macro_event_kinds) or 'none'} ≤{self.macro_event_max_dte}d"
                  if self.macro_event_guard_enabled else "Macro guard OFF")
         vrp = f"IV/RV ≥{self.vrp_min_ratio:g}" if self.vrp_min_ratio > 0 else "IV/RV off"
@@ -567,7 +589,8 @@ class PresetConfig:
                 f"LegSpread ≤ ${self.max_leg_spread_cents:.2f}/"
                 f"{self.max_leg_spread_pct_mid:.0%}mid • "
                 f"Fills @ {self.fill_model} • "
-                f"MarketState {'on' if self.market_state_enabled else 'off'} • "
+                f"MarketState {'on' if self.market_state_enabled else 'off'}"
+                f"{' (live prices)' if self.market_state_live_prices else ''} • "
                 f"{self._debit_tag()} • "
                 f"{self._wheel_tag()} • "
                 f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "
@@ -590,7 +613,8 @@ class PresetConfig:
             f"IC@{self.dte_iron_condor}d • MR@{self.dte_mean_reversion}d • "
             f"C/W ≥ {self.min_credit_ratio} • "
             f"Fills @ {self.fill_model} • "
-            f"MarketState {'on' if self.market_state_enabled else 'off'} • "
+            f"MarketState {'on' if self.market_state_enabled else 'off'}"
+            f"{' (live prices)' if self.market_state_live_prices else ''} • "
             f"{self._debit_tag()} • "
             f"{self._wheel_tag()} • "
             f"Ladder {self.max_positions_per_ticker}/ticker ≥{self.ladder_min_gap_days}d{' winners' if self.ladder_requires_profit else ''} • "

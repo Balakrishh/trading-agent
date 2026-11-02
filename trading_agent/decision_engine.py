@@ -115,6 +115,10 @@ class DecisionInput:
     chain_slices:  List[ChainSlice]
     preset:        Any                   # PresetConfig — duck-typed to avoid an import cycle
     spot:          Optional[float] = None   # underlying price; calendars need it (skill 59)
+    # Debit verticals (2026-11-01): the cycle's per-trade cap per share
+    # (max-risk $ ÷ 100). With preset.fit_to_budget_enabled, widths under
+    # the grid are tried when no grid width fits it. None = no budget.
+    max_debit:     Optional[float] = None
 
 
 @dataclass
@@ -565,7 +569,13 @@ def decide_debit_spread(inp: DecisionInput, *,
     by delta made QQQ spreads $33 wide (2026-10-05 live check). Among
     candidates that clear the reward/risk floor the SMALLEST debit ranks
     first: ranking by reward/risk picked the widest SPY spread ($913 max
-    loss, over a 3 % budget on $30k) and the trade would never size."""
+    loss, over a 3 % budget on $30k) and the trade would never size.
+
+    With ``inp.max_debit`` and ``preset.fit_to_budget_enabled`` (2026-11-01),
+    when no grid width costs ≤ the budget, narrower widths at the same
+    long leg are tried and the widest that fits is returned alone
+    (``diagnostics.fit_to_budget`` records it). The reward/risk and
+    fair-price checks are unchanged."""
     side = inp.side
     if side not in ("call_debit", "put_debit"):
         raise ValueError(f"Unsupported debit side {side!r}")
@@ -580,7 +590,10 @@ def decide_debit_spread(inp: DecisionInput, *,
     ladder = str(getattr(preset, "debit_ladder_mode", "off")) != "off"
     diag = ScanDiagnostics(grid_points_total=len(inp.chain_slices) * len(widths),
                            expirations_resolved=len(inp.chain_slices))
+    budget = float(inp.max_debit or 0.0)
+    fit = budget > 0 and bool(getattr(preset, "fit_to_budget_enabled", False))
     cands: List[DebitCandidate] = []
+    fit_pick: Optional[DebitCandidate] = None
     for slc in inp.chain_slices:
         chain = [c for c in slc.contracts
                  if str(c.get("type", opt)).lower().startswith(opt[0])]
@@ -596,22 +609,58 @@ def decide_debit_spread(inp: DecisionInput, *,
             diag.record(REJECT_LEG_SPREAD_WIDE, len(widths))
             continue
         grid_step = ChainScanner._infer_grid_step(chain)
-        for width_pct in widths:
-            width = ChainScanner._snap_width_to_grid(width_pct * k_long, grid_step)
+
+        def try_width(width: float) -> Optional[DebitCandidate]:
             short_c = (ChainScanner._find_strike(chain, k_long + sign * width)
                        if width > 0 else None)
             if short_c is None or sign * (float(short_c["strike"]) - k_long) <= 0:
                 diag.record(DEBIT_REJECT_NO_SHORT)
-                continue
+                return None
             if _lt_leg_too_wide(short_c, preset):
                 diag.record(REJECT_LEG_SPREAD_WIDE)
-                continue
-            cand = _debit_vertical_candidate(side, opt, slc, long_c, short_c, model,
+                return None
+            return _debit_vertical_candidate(side, opt, slc, long_c, short_c, model,
                                              max_overpay, min_rr, diag, ladder=ladder)
-            if cand is not None:
-                cands.append(cand)
+
+        grid_widths = [ChainScanner._snap_width_to_grid(w * k_long, grid_step) for w in widths]
+        slice_cands = [c for c in (try_width(w) for w in grid_widths) if c is not None]
+        cands.extend(slice_cands)
+        if fit and not any(c.debit <= budget for c in slice_cands):
+            fitted = _fit_to_budget(try_width, grid_step, min(grid_widths, default=0.0),
+                                    budget, diag)
+            if fitted is not None:
+                diag.fit_to_budget = {
+                    "budget": round(budget, 4), "width": fitted.width,
+                    "debit": round(fitted.debit, 4),
+                    "grid_min_debit": (round(min(c.debit for c in slice_cands), 4)
+                                       if slice_cands else None)}
+                fit_pick = fitted
+    if fit_pick is not None and not any(c.debit <= budget for c in cands):
+        return DebitDecisionOutput(candidates=[fit_pick], diagnostics=diag)
     cands.sort(key=lambda c: (c.debit, -c.reward_risk))
     return DebitDecisionOutput(candidates=cands[:max_candidates], diagnostics=diag)
+
+
+def _fit_to_budget(try_width, grid_step: float, grid_min_width: float,
+                   budget: float, diag) -> Optional[DebitCandidate]:
+    """Widest width under the grid's narrowest (multiples of the strike
+    step) whose candidate costs ≤ ``budget``; None when none does. The
+    widest fitting width keeps the bid/ask ticks the smallest share of
+    the spread — narrow spreads on high-priced ETFs pay proportionally
+    more to cross."""
+    if grid_step <= 0:
+        return None
+    widths = []
+    m = 1
+    while m * grid_step < grid_min_width - 1e-9 and m <= 50:
+        widths.append(round(m * grid_step, 4))
+        m += 1
+    diag.grid_points_total += len(widths)
+    for w in reversed(widths):
+        cand = try_width(w)
+        if cand is not None and cand.debit <= budget:
+            return cand
+    return None
 
 
 def _offer_ladder_candidate(diag, slc, long_c, short_c, natural, width,

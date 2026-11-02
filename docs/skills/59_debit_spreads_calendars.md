@@ -311,8 +311,36 @@ if submit_credit < 0 and self.debit_ladder_live and plan.strategy_name in LADDER
 
 The executor's `debit_ladder_live` / `debit_ladder_steps` are set by `TradingAgent.__init__` from the preset. The result carries `ladder = {natural, mid, probes: [{price, status, filled, order_id}], filled_qty, avg_fill, saving_usd}`, journalled as `debit_ladder` on the plan row; `saving_usd = (natural × filled − Σ fill) × 100`. Alpaca paper does fill inside the spread sometimes — the SPY calendar close on 2026-10-27 filled at the halfway price (1 of 5 atomic closes). The shadow trackers run only in `shadow` mode.
 
+### Fit to budget (2026-11-01)
+
+```python
+# trading_agent/decision_engine.py — decide_debit_spread, per chain slice
+grid_widths = [ChainScanner._snap_width_to_grid(w * k_long, grid_step) for w in widths]
+slice_cands = [c for c in (try_width(w) for w in grid_widths) if c is not None]
+cands.extend(slice_cands)
+if fit and not any(c.debit <= budget for c in slice_cands):
+    fitted = _fit_to_budget(try_width, grid_step, min(grid_widths, default=0.0), budget, diag)
+    if fitted is not None:
+        diag.fit_to_budget = {"budget", "width", "debit", "grid_min_debit"}
+        fit_pick = fitted
+...
+if fit_pick is not None and not any(c.debit <= budget for c in cands):
+    return DebitDecisionOutput(candidates=[fit_pick], diagnostics=diag)
+
+def _fit_to_budget(try_width, grid_step, grid_min_width, budget, diag):
+    widths = [m * grid_step for m = 1, 2, … while m * grid_step < grid_min_width]
+    for w in reversed(widths):              # widest that fits first
+        cand = try_width(w)                 # same long leg, same scorer
+        if cand is not None and cand.debit <= budget:
+            return cand
+    return None
+```
+
+`DecisionInput.max_debit` = the cycle's per-trade cap ÷ 100 (per share). The agent sets `StrategyPlanner.max_loss_budget = balance × risk_manager.max_risk_pct` (market-state multiplier already applied) before each `plan()`; `_plan_debit_spread` passes it on and logs `Fit to budget: width $W at $D`. The choice lands in the plan's scan diagnostics as `fit_to_budget`. Preset `fit_to_budget_enabled` (default True; dashboard "Fit to budget"; summary ` • Fit to budget`). Evidence: `docs/plans/research_debit_entry.md` — at 0.50Δ, narrower widths were no worse than 2 % in 2008–2026 (bear −0.087 per $ at 1 % vs −0.117 at 2 %), while 0.40/0.35Δ longs were worse, so the long leg is never moved.
+
 ## 4. Edge Cases / Guardrails
 
+- **Fit to budget (2026-11-01).** Only debit verticals, only when *no* grid candidate costs ≤ the budget (a cheaper grid candidate is never displaced, so outside CAUTION nothing changes); widths are multiples of the chain's strike step below the narrowest grid width. Every narrower candidate still has to pass the leg-spread gate, the fair-price cap (natural ≤ mid × (1 + `debit_max_overpay`)) and `debit_min_reward_risk` — on high-priced chains with $5 strikes that usually fails (QQQ Dec-4 puts on 2026-10-30 quotes: 5-wide natural 16 % over mid, 10-wide 8.5 %), so it helps mostly on $1-strike chains. Nothing fits → the over-budget grid candidates are returned unchanged and RiskManager rejects with the usual `Max loss $X > 1 %` line. Calendars are not fitted (one ATM strike by design; a cheaper calendar is a different trade). No budget (`max_loss_budget` None, balance 0) → off.
 - **Bear calls off by default (2026-10-14, backlog B6).** `PresetConfig.bear_call_enabled = False`. The calibration study (`docs/plans/research_pop_calibration.md`, 2019–2026, 12 tickers) found short calls survived 2–6 points *less* often than implied odds even in down-trends, while short puts beat them by 9–11. So in `StrategyPlanner.plan` a bearish ticker's `bear_call` playbook becomes `put_debit` at any volatility (the credit plan returns an invalid "bear calls off" plan and the put debit is the fallback); the VIX inter-market inhibit no longer demotes bullish / sideways setups to a bear call — it returns no trade. The oversold bounce / wait playbooks are unchanged. Planners built without a preset keep the legacy routing. `True` restores it; dashboard: "Sell bear call spreads"; summary: `BearCall off→put debit`. Iron condors (whose call wing carries the same weakness) and the mean-reversion spread are not changed here.
 - **Debit target measured on cost (2026-10-08).** `debit_profit_target_basis` = `"debit"` (default) makes `debit_profit_target_pct` a share of what was paid: 0.50 → close at +50 % on cost. `"max_profit"` keeps the old rule (a share of width − debit). On 2026-10-08 IWM 283/278 × 4 (debit $768, max profit $1,232) peaked at +$444 — past the new $384 target, short of the old $616 — and was closed by hand at +$288. `profit_basis` still returns max profit as the basis, so the trailing rule's debit ceiling (90 % of max profit) is unchanged; only the target (where the trail arms) moves. Invalid values in the preset file fall back to `"debit"`.
 - **Credit plan valid** — it wins; the debit/calendar fallback is not even planned. Both invalid → the credit plan is returned (stable journal strategy names) with `; fallback <name>: no acceptable candidate (<reasons>)` appended to its reason.
@@ -352,4 +380,4 @@ The executor's `debit_ladder_live` / `debit_ladder_steps` are set by `TradingAge
 
 ---
 
-*Last verified against repo HEAD on 2026-10-27.*
+*Last verified against repo HEAD on 2026-11-01.*

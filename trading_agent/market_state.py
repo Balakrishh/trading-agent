@@ -36,7 +36,7 @@ import logging
 import math
 import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
@@ -161,6 +161,9 @@ class MarketInputs:
     breadth: Optional[float] = None            # fraction of tickers above SMA-50
     breadth_n: int = 0
     credit_stress: Optional[float] = None      # % HYG/IEF sits under its 50-day (skill 68)
+    # 2026-11-01: True when today's live price was appended to the daily
+    # closes (the yfinance history ends at yesterday's bar during the day).
+    live_overlay: bool = False
 
     @property
     def term_ratio(self) -> Optional[float]:
@@ -335,17 +338,42 @@ def _closes(df: Any) -> List[float]:
         return []
 
 
+def _closes_live(df: Any, spot: Optional[float], today: Optional[date]) -> Tuple[List[float], bool]:
+    """Daily closes with today's live ``spot`` appended when the frame's
+    last bar is from an earlier day — so SPY's price, SMAs, RSI and the
+    breadth count read today instead of yesterday's close. Returns
+    (closes, appended)."""
+    c = _closes(df)
+    if not c or not spot or spot <= 0 or today is None:
+        return c, False
+    try:
+        last = df.index[-1]
+        last = last.date() if hasattr(last, "date") else date.fromisoformat(str(last)[:10])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return c, False
+    if last >= today:
+        return c, False
+    return c + [float(spot)], True
+
+
 def compute_inputs(fetch_history: Callable[[str], Any], tickers: Iterable[str],
                    fetch_level: Callable[[str], Optional[float]],
-                   fetch_adjusted: Optional[Callable[[str], Any]] = None) -> MarketInputs:
+                   fetch_adjusted: Optional[Callable[[str], Any]] = None,
+                   live_spots: Optional[Dict[str, float]] = None,
+                   today: Optional[date] = None) -> MarketInputs:
     """Each input fetched in its own try/except (one failed RPC must not
     blank the others). ``fetch_history(ticker)`` returns a daily OHLCV
     frame; ``fetch_level(symbol)`` returns the latest index level;
     ``fetch_adjusted(ticker)`` a dividend-adjusted frame for the credit
-    pair (defaults to ``fetch_history``)."""
+    pair (defaults to ``fetch_history``). ``live_spots`` (ticker → price,
+    passed during the session) is appended as ``today``'s close where the
+    history stops at an earlier bar (2026-11-01: the state read
+    yesterday's SPY close all day)."""
+    spots = live_spots or {}
+    overlay = False
     spy: List[float] = []
     try:
-        spy = _closes(fetch_history("SPY"))
+        spy, overlay = _closes_live(fetch_history("SPY"), spots.get("SPY"), today)
     except Exception as exc:                                    # noqa: BLE001
         logger.warning("market_state: SPY history unavailable (%s)", exc)
     vix = vix3m = None
@@ -360,7 +388,7 @@ def compute_inputs(fetch_history: Callable[[str], Any], tickers: Iterable[str],
     above = n = 0
     for t in tickers:
         try:
-            c = _closes(fetch_history(t))
+            c, _ = _closes_live(fetch_history(t), spots.get(t), today)
             s = _sma(c, 50)
             if s is not None:
                 n += 1
@@ -377,7 +405,7 @@ def compute_inputs(fetch_history: Callable[[str], Any], tickers: Iterable[str],
         spy_price=spy[-1] if spy else None, spy_sma20=_sma(spy, 20),
         spy_sma50=_sma(spy, 50), spy_sma200=_sma(spy, 200), spy_rsi=_rsi(spy),
         vix=vix, vix3m=vix3m, breadth=(above / n) if n else None, breadth_n=n,
-        credit_stress=credit,
+        credit_stress=credit, live_overlay=overlay,
     )
 
 
