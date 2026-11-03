@@ -7,7 +7,8 @@ Added 2026-10-15. Two checks on a directional plan before it can enter:
   1 = strongest). A bullish trade needs percentile ≥ ``rs_min_percentile``;
   a bearish trade needs ≤ 1 − ``rs_min_percentile``. This replaces "is the
   last 5-minute bar stronger than its anchor" with what traders mean by
-  relative strength.
+  relative strength. SPY, the benchmark, is not ranked and never blocked
+  (its score vs itself is always 0 — 2026-11-02).
 * **Pullback** — a bullish trade needs price above its 50-day SMA (the
   trend's support holds) and no more than ``pullback_max_atr`` × ATR(14)
   above its 20-day SMA (not chasing an extended move). A bearish trade is
@@ -106,9 +107,12 @@ class FilterVerdict:
 
 
 def rs_verdict(direction: str, score: Optional[float], pct: Optional[float],
-               min_pct: float, mode: str) -> FilterVerdict:
+               min_pct: float, mode: str, benchmark: bool = False) -> FilterVerdict:
     m = {"rs_score": None if score is None else round(score, 4),
          "rs_percentile": None if pct is None else round(pct, 3)}
+    if benchmark:
+        return FilterVerdict("relative_strength", mode, None,
+                             f"{RS_BENCHMARK} is the benchmark — not applicable", m)
     if pct is None:
         return FilterVerdict("relative_strength", mode, None, "no relative-strength data", m)
     if direction == "bull":
@@ -188,7 +192,8 @@ def evaluate(strategy_name: str, preset, *, price: float,
     if rs_mode != "off":
         rs = rs or {}
         verdicts.append(rs_verdict(direction, rs.get("score"), rs.get("percentile"),
-                                   float(getattr(preset, "rs_min_percentile", 0.5)), rs_mode))
+                                   float(getattr(preset, "rs_min_percentile", 0.5)), rs_mode,
+                                   benchmark=bool(rs.get("benchmark"))))
     pb_mode = str(getattr(preset, "pullback_filter_mode", "shadow"))
     if pb_mode != "off":
         bars = bars or {}

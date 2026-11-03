@@ -247,3 +247,46 @@ def test_summary_net_is_the_flip_curve_at_spot():
     assert row["net_gex"] == round(net_at_spot)
     assert row["regime"] == ("long_gamma" if net_at_spot > 0 else "short_gamma")
     assert row["gamma_source"] == "bs_iv"
+
+
+# ── 2026-11-02: strike step at the long leg; SPY not ranked against itself ──
+
+def _mixed_calls():
+    """$1 strikes 90–110 plus $5 strikes 115–250: the whole-chain mode is $5."""
+    far = [{"symbol": f"C{k}", "strike": float(k), "delta": 0.001, "bid": 0.01, "ask": 0.02,
+            "iv": 0.2, "type": "call"} for k in range(115, 255, 5)]
+    return _calls() + far
+
+
+def test_grid_step_near_the_long_leg():
+    from trading_agent.chain_scanner import ChainScanner
+    chain = _mixed_calls()
+    assert ChainScanner._infer_grid_step(chain) == 5.0
+    assert ChainScanner._infer_grid_step(chain, near=100.0) == 1.0
+    tie = [{"strike": float(k)} for k in (98, 99, 100, 102, 104)]     # two 1s, two 2s
+    assert ChainScanner._infer_grid_step(tie, near=100.0) == 1.0
+
+
+def test_fit_to_budget_uses_dollar_strikes_on_a_mixed_chain():
+    budget = (_debit_at(1) + _debit_at(2)) / 2
+    out = _decide(budget=budget, chain=_mixed_calls())
+    assert [(c.long_strike, c.width) for c in out.candidates] == [(100.0, 1.0)]
+    assert out.diagnostics.fit_to_budget["width"] == 1.0
+
+
+def test_benchmark_rs_verdict_never_blocks():
+    from trading_agent import entry_filters as ef
+    from trading_agent.debit_policy import PUT_DEBIT_STRATEGY
+    v = ef.rs_verdict("bear", 0.0, 0.59, 0.5, "live", benchmark=True)
+    assert v.ok is None and "benchmark" in v.reason
+    live = replace(PRESETS["balanced"], rs_filter_mode="live", pullback_filter_mode="off")
+    ev = ef.evaluate(PUT_DEBIT_STRATEGY, live, price=750.0,
+                     rs={"score": 0.0, "percentile": 0.59, "benchmark": True})
+    assert ev.block is None
+
+
+def test_agent_map_leaves_spy_out_of_the_ranking():
+    from tests.test_earnings_and_trend_filters import _agent
+    m = _agent()._relative_strength_map(["SPY", "XLK", "XLU"])
+    assert m["SPY"] == {"score": None, "percentile": None, "benchmark": True}
+    assert m["XLK"]["percentile"] == 1.0 and m["XLU"]["percentile"] == 0.0

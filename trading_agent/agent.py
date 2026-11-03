@@ -2509,7 +2509,8 @@ class TradingAgent:
     def _relative_strength_map(self, tickers: List[str]) -> Dict[str, Dict]:
         """{ticker: {"score", "percentile"}} — 20/60-day return vs SPY,
         ranked across the watchlist. Empty when the filter is off or SPY
-        history is unavailable."""
+        history is unavailable. SPY itself is not ranked (its score vs
+        itself is always 0) and carries ``benchmark: True``."""
         from trading_agent.entry_filters import RS_BENCHMARK, relative_strength, rs_percentiles
         if not tickers or str(getattr(self.preset, "rs_filter_mode", "off")) == "off":
             return {}
@@ -2520,13 +2521,18 @@ class TradingAgent:
             return {}
         scores: Dict[str, Optional[float]] = {}
         for t in tickers:
+            if t == RS_BENCHMARK:
+                continue
             try:
                 scores[t] = relative_strength(self._daily_bars(t)["close"], bench)
             except Exception as exc:  # noqa: skill-34-exempt — filter input only; missing data never blocks
                 logger.debug("[%s] relative strength unavailable: %s", t, exc)
                 scores[t] = None
         pct = rs_percentiles(scores)
-        return {t: {"score": scores.get(t), "percentile": pct.get(t)} for t in tickers}
+        out = {t: {"score": scores.get(t), "percentile": pct.get(t)} for t in tickers}
+        if RS_BENCHMARK in out:
+            out[RS_BENCHMARK]["benchmark"] = True
+        return out
 
     def _trend_filter_block(self, ticker: str, plan, analysis) -> Optional[str]:
         """Evaluate the trend filters for a valid, approved plan; journal

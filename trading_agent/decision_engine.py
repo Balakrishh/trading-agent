@@ -608,7 +608,7 @@ def decide_debit_spread(inp: DecisionInput, *,
         if _lt_leg_too_wide(long_c, preset):
             diag.record(REJECT_LEG_SPREAD_WIDE, len(widths))
             continue
-        grid_step = ChainScanner._infer_grid_step(chain)
+        grid_step = ChainScanner._infer_grid_step(chain, near=k_long)   # step at the long leg (2026-11-02)
 
         def try_width(width: float) -> Optional[DebitCandidate]:
             short_c = (ChainScanner._find_strike(chain, k_long + sign * width)
