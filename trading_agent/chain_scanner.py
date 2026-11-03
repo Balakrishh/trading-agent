@@ -1096,9 +1096,17 @@ class ChainScanner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _infer_grid_step(chain: List[Dict]) -> float:
-        """Modal gap between consecutive sorted strikes."""
+    def _infer_grid_step(chain: List[Dict], near: Optional[float] = None,
+                         span: int = 10) -> float:
+        """Modal gap between consecutive sorted strikes.
+
+        With ``near`` (2026-11-02), only the ``2 × span + 1`` strikes
+        closest to it count, ties going to the smaller gap: GLD lists $1
+        strikes near the money and $5 further out, and the whole-chain
+        mode ($5) hid the $1 widths from the debit engine."""
         strikes = sorted({float(c["strike"]) for c in chain if c.get("strike")})
+        if near is not None:
+            strikes = sorted(sorted(strikes, key=lambda k: abs(k - near))[:2 * span + 1])
         if len(strikes) < 3:
             return ChainScanner.DEFAULT_GRID_STEP
         gaps: Dict[float, int] = {}
@@ -1108,6 +1116,8 @@ class ChainScanner:
                 gaps[gap] = gaps.get(gap, 0) + 1
         if not gaps:
             return ChainScanner.DEFAULT_GRID_STEP
+        if near is not None:
+            return max(gaps, key=lambda g: (gaps[g], -g))
         return max(gaps, key=lambda g: gaps[g])
 
     @staticmethod

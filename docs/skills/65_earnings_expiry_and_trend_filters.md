@@ -160,7 +160,7 @@ class TrendEvaluation:
                      or self._entry_confirmation_block(ticker, plan))
 ```
 
-Inputs: `_begin_entry_gates` computes `_relative_strength_map(watchlist)` once per cycle from the daily history the cycle already pre-fetched; `_trend_filter_block` adds the ticker's daily bars and stores `TrendEvaluation.to_journal_dict()` for `_log_signal`, which writes it as `raw_signal.trend_filters` together with `earnings_date` / `earnings_expiry_cap` (`StrategyPlanner.earnings_fields`). Earnings dates come from `earnings_calendar.next_earnings_date` — yfinance, cached in `trade_journal/earnings_dates.json` for 12 h (the agent is a fresh process each cycle).
+Inputs: `_begin_entry_gates` computes `_relative_strength_map(watchlist)` (SPY, the benchmark, excluded from the ranking) once per cycle from the daily history the cycle already pre-fetched; `_trend_filter_block` adds the ticker's daily bars and stores `TrendEvaluation.to_journal_dict()` for `_log_signal`, which writes it as `raw_signal.trend_filters` together with `earnings_date` / `earnings_expiry_cap` (`StrategyPlanner.earnings_fields`). Earnings dates come from `earnings_calendar.next_earnings_date` — yfinance, cached in `trade_journal/earnings_dates.json` for 12 h (the agent is a fresh process each cycle).
 
 Preset (`PresetConfig`, dashboard "Earnings & trend entry filters"): `earnings_guard_enabled` (True), `earnings_buffer_days` (1), `earnings_min_dte` (7), `rs_filter_mode` / `pullback_filter_mode` (`"shadow"` | `"live"` | `"off"`, default shadow), `rs_min_percentile` (0.50), `pullback_max_atr` (1.0). Summary: `Earnings exp ≤ report−1d (≥7d) • RS shadow ≥p50% • Pullback shadow ≤1ATR`.
 
@@ -202,7 +202,7 @@ def _check_earnings_exit(self, spread, today=None):
 - **Trend filters, missing data** — no SPY history, no ticker history, or fewer than 51 daily bars → verdict `ok: null`, never blocks.
 - **Shadow vs live** — shadow writes the verdicts (`blocked: false`) and lets the entry continue; live blocks with `risk: trend: <filter> — <reason>`. The filters run after the market-state and ladder gates and before entry confirmation, so a filtered plan does not advance the confirmation streak.
 - **One ticker / ties** — a single ranked ticker is percentile 0.5; equal scores share the mean rank.
-- **SPY itself** — RS score 0 by construction; it still ranks against the rest.
+- **SPY itself (changed 2026-11-02)** — its score vs itself is 0 by construction, so its percentile only said how many watchlist names beat the index that day, not anything about SPY. On 2026-11-02 that blocked a valid SPY put debit in all 233 cycles ("percentile 59% (strong vs SPY, +0.0%)"). `_relative_strength_map` now leaves SPY out of the ranking and marks it `{"score": None, "percentile": None, "benchmark": True}`; `rs_verdict(..., benchmark=True)` returns `ok: null` with reason "SPY is the benchmark — not applicable" (never blocks). The pullback filter still applies to SPY.
 
 - **Filters live on the paper account (2026-10-27).** `rs_filter_mode` and `pullback_filter_mode` = "live" in the Pi's custom preset (backlog §14). Shadow evidence: relative strength 0 failures in 28 verdicts; pullback failed on two trades that were opened — XLU 10-16 (back above its 50-day) and GLD 10-22 (2.1 ATR below its 20-day) — both under water on 10-27. Small sample; the defaults stay "shadow".
 
@@ -215,4 +215,4 @@ def _check_earnings_exit(self, spread, today=None):
 
 ---
 
-*Last verified against repo HEAD on 2026-11-01.*
+*Last verified against repo HEAD on 2026-11-02.*
