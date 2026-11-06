@@ -3069,6 +3069,22 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 key="cust_fit_to_budget",
                 help="When every grid width costs more than the per-trade cap (halved in "
                      "CAUTION), try narrower widths at the same long delta.")
+            fit_to_budget_ladder = st.checkbox(
+                "…or ladder an in-budget width to its cap",
+                value=bool(getattr(seed, "fit_to_budget_ladder", True)),
+                key="cust_fit_to_budget_ladder",
+                help="Live ladder only: an in-budget width that failed just the fair-price "
+                     "check is offered mid → cap, never at natural.")
+            debit_exit_mid = st.checkbox(
+                "Debit exits judged at mid",
+                value=getattr(seed, "debit_exit_price", "natural") == "mid",
+                key="cust_debit_exit_mid",
+                help="Profit target / trail on the mid P&L; the close ladders from mid "
+                     "and gives back at most the share below of the mid profit.")
+            debit_exit_giveback = st.slider(
+                "Max give-back on a mid exit", 0.1, 0.9,
+                float(getattr(seed, "debit_exit_max_giveback", 0.5)), 0.05,
+                key="cust_debit_exit_giveback")
         with db_e3:
             cal_tp = st.slider(
                 "Calendar TP (% of debit)", 0.1, 0.6,
@@ -3113,6 +3129,9 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "debit_ladder_mode":            debit_ladder_mode,
         "debit_ladder_steps":           int(debit_ladder_steps),
         "fit_to_budget_enabled":        bool(fit_to_budget),
+        "fit_to_budget_ladder":         bool(fit_to_budget_ladder),
+        "debit_exit_price":             "mid" if debit_exit_mid else "natural",
+        "debit_exit_max_giveback":      float(debit_exit_giveback),
         "debit_ladder_step_cycles":     int(debit_ladder_step_cycles),
         "debit_min_reward_risk":        debit_min_rr,
         "debit_profit_target_pct":      debit_tp,

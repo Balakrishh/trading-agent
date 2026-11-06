@@ -388,6 +388,9 @@ class TradingAgent:
             # 2026-11-01: close single-stock positions before a report they span.
             earnings_exit_enabled=self.preset.earnings_exit_enabled,
             earnings_exit_sessions=self.preset.earnings_exit_sessions,
+            # 2026-11-06: debit target at mid, closed with a mid-first ladder.
+            debit_exit_price=self.preset.debit_exit_price,
+            debit_exit_max_giveback=self.preset.debit_exit_max_giveback,
         )
         if hasattr(self.position_monitor, "earnings_lookup"):
             from trading_agent.earnings_calendar import next_earnings_date as _ned
@@ -1455,8 +1458,19 @@ class TradingAgent:
                         fill_status="dry_run", dry_run=True,
                     )
                 else:
+                    if spread.exit_signal == ExitSignal.PROFIT_TARGET:
+                        # Skill 59 §4 (2026-11-06): a mid-judged debit exit
+                        # ladders from mid and may give back only so much.
+                        spread.close_min_profit = self.position_monitor.debit_close_floor(spread)
                     result = self.executor.close_spread(spread)
                     closed.append(result)
+                    if isinstance(result, dict) and result.get("deferred"):
+                        # Nothing filled down to the floor: still open, not
+                        # a failed close — the next cycle re-evaluates.
+                        logger.info("[%s] Profit close not filled down to $%.2f profit — "
+                                    "holding, retry next cycle", spread.underlying,
+                                    spread.close_min_profit or 0.0)
+                        continue
                     leg_results = result.get("leg_results", []) if isinstance(result, dict) else []
                     # Realized P&L from the actual close fill when known;
                     # the exit-signal mark is kept for comparison (skill 17).
@@ -2835,7 +2849,8 @@ class TradingAgent:
                     kind=kind, expiration=s.expiration)
                 st.legs = [{"symbol": l.symbol, "qty": int(l.qty),
                             "avg_entry": float(l.avg_entry_price)} for l in s.legs]
-                pt.track_excursion(st, self.position_monitor._profit_pl(s))
+                pt.track_excursion(st, self.position_monitor._profit_pl(s),
+                                   natural=getattr(s, "net_natural_pl", None))
                 if kind == "wheel" or not trail_on:   # excursion only (backlog D2)
                     st.last_pl = round(self.position_monitor._profit_pl(s), 2)
                     states[key] = st
