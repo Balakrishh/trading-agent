@@ -353,6 +353,12 @@ class PresetConfig:
     # 5 % of mid), so every bearish cycle ended in leg_spread_wide — about
     # 940 rejections that day. Re-measure quarterly.
     put_debit_excluded_tickers:        Tuple[str, ...] = ("XLY", "XLK", "XLI", "GDX")
+    # No call or put debit at all on these (2026-11-06, docs/plans/
+    # research_debit_stress.md): on real 2008–2025 option quotes IWM debit
+    # spreads lost under every rule tested (old −0.097, new −0.190 per $).
+    # The paper preset also adds SPY / QQQ to put_debit_excluded_tickers
+    # (put debits −0.13 per $ on their real quotes).
+    debit_excluded_tickers:            Tuple[str, ...] = ()
 
     # ------------------------------------------------------------------
     # Total open-risk cap (added 2026-10-05). Σ max loss of all open
@@ -606,7 +612,8 @@ class PresetConfig:
         return (f"Dir risk ≤{self.max_group_direction_risk_pct:.0%}/group "
                 f"≤{self.max_book_direction_risk_pct:.0%}/book • "
                 f"NetΔ {self.net_delta_mode} ≤{self.max_net_beta_delta_pct:.0%} • "
-                f"No put debit: {excl}")
+                f"No put debit: {excl}"
+                f"{' • No debit: ' + ','.join(self.debit_excluded_tickers) if self.debit_excluded_tickers else ''}")
 
     def to_summary_line(self) -> str:
         """Detailed one-liner for the agent log + dashboard expander body."""
@@ -832,6 +839,7 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 # ---------------------------------------------------------------------------
 
 _TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct", "put_debit_excluded_tickers",
+                 "debit_excluded_tickers",
                  "macro_event_kinds",
                  "iron_butterfly_dte_grid", "iron_butterfly_wing_width_pct",
                  "cc_dte_band", "csp_dte_band", "csp_strike_band"}

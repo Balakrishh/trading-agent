@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -185,6 +186,36 @@ def close_order_prices(legs, quotes: Dict) -> Optional[Tuple[float, float, List[
             payload.append({"symbol": leg.symbol, "ratio_qty": "1",
                             "side": "sell", "position_intent": "sell_to_close"})
     return mid, natural, payload
+
+
+STOP_LADDER_STEPS = 3
+
+
+def _is_debit_stop(spread) -> bool:
+    """A debit spread / calendar closing on its plain stop (not a hard stop
+    or strike-proximity emergency)."""
+    from trading_agent.debit_policy import DEBIT_STRATEGIES
+    sig = getattr(getattr(spread, "exit_signal", None), "value", "")
+    return sig == "stop_loss" and getattr(spread, "strategy_name", "") in DEBIT_STRATEGIES
+
+
+def stop_ladder_attempts(mid: float, natural: float,
+                         steps: int = STOP_LADDER_STEPS) -> List[Tuple[str, float]]:
+    """Close prices for a debit stop (2026-11-06, docs/plans/
+    research_debit_stress.md): mid, then evenly up to natural — on real
+    2008–2025 SPY / QQQ quotes closing at natural instead of halfway cost
+    ~0.025 per $ risked. The per-leg fallback still follows when none
+    fills (a stop must get out). Signed like Alpaca's limit_price."""
+    from trading_agent.debit_ladder import ladder_prices
+    prices = ladder_prices(mid, natural, steps)
+    prices[-1] = max(prices[-1], _cent_up(natural))   # the last step must not ask more than natural
+    return [(f"mleg_stop_{i}", p) for i, p in enumerate(prices)]
+
+
+def _cent_up(x: float) -> float:
+    """Round a signed close price up to the cent (toward paying more /
+    receiving less — the side that fills)."""
+    return math.ceil(round(x * 100, 6)) / 100
 
 
 def _keeps_live_position(entry: Dict) -> bool:
@@ -1447,6 +1478,8 @@ class OrderExecutor:
             attempts = self._close_ladder_attempts(spread, legs, qty, mid, natural, float(floor))
             if not attempts:
                 return self._close_deferred(spread, legs, mid, natural, None)
+        elif _is_debit_stop(spread):
+            attempts = stop_ladder_attempts(mid, natural)
         for method, price in attempts:
             if method == "mleg_natural" and price == attempts[0][1]:
                 continue         # natural == improved; nothing new to try
@@ -1526,6 +1559,11 @@ class OrderExecutor:
         if top < mid - 1e-9:
             return []
         prices = ladder_prices(mid, top, max(2, int(self.debit_ladder_steps)))
+        if natural <= worst + 1e-9:
+            # ladder_prices rounds its top down — for a close that asks a
+            # cent more than natural; round natural toward the fill, capped
+            # at the floor's price.
+            prices[-1] = max(prices[-1], min(_cent_up(natural), math.floor(round(worst * 100, 6)) / 100))
         return [(f"mleg_ladder_{i}", p) for i, p in enumerate(prices)]
 
     @staticmethod

@@ -236,7 +236,8 @@ attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
 - One `order_class="mleg"` limit order: shorts `buy_to_close`, longs `sell_to_close`, `qty` = common leg qty.
 - `natural` = Σ short ask − Σ long bid; `mid` = Σ short mid − Σ long mid (from `data_provider.fetch_option_quotes`).
 - Each attempt polls `GET /orders/{id}` for up to `CLOSE_FILL_WAIT_S` (15 s), then cancels and re-reads status (a fill can race the cancel).
-- Result carries `close_method` ∈ {`mleg_improved`, `mleg_natural`, `mleg_unresolved`, `per_leg`}.
+- Result carries `close_method` ∈ {`mleg_improved`, `mleg_natural`, `mleg_unresolved`, `per_leg`}; since 2026-11-06 also `mleg_stop_N` (debit stop ladder), `mleg_ladder_N` / `mleg_ladder_unfilled` (mid-judged debit profit close, skill 59 §4).
+- **Debit stop ladder (2026-11-06).** A debit spread / calendar closing on `STOP_LOSS` (not `HARD_STOP` / `STRIKE_PROXIMITY`) tries `stop_ladder_attempts(mid, natural)` — mid, halfway, natural (`STOP_LADDER_STEPS` 3, ≤ 45 s) — instead of halfway → natural; the per-leg fallback still follows when none fills. The last step is natural rounded *toward the fill* (`_cent_up`: −0.343 → −0.34, never a −0.35 ask). Evidence: on real 2008–2025 SPY / QQQ quotes, closing at natural instead of halfway cost ~0.025 per $ risked (`docs/plans/research_debit_stress.md`).
 
 ### `trading_agent/executor.py` — per-leg fallback: fill wait + realized P&L ledger (added 2026-10-14)
 
@@ -300,4 +301,4 @@ Alongside `MAX_POSITIONS_PER_TICKER = 1`, the agent now also enforces `MAX_POSIT
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-11-06.*

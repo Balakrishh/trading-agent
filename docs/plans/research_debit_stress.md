@@ -119,13 +119,16 @@ What they correct:
 ## 4. Recommendations
 
 1. **Stop trading IWM debit spreads** (call and put): negative under every
-   rule in both the model and the real quotes.
+   rule in both the model and the real quotes. *Built 2026-11-06*
+   (`debit_excluded_tickers`).
 2. **Treat put debits as unproven**: negative on real SPY / QQQ / IWM
    quotes under the old rules; the filters already leave very few. Keep
    them on paper with the filters, but review after ~10 closes, or turn
-   them off for index ETFs.
+   them off for index ETFs. *Done 2026-11-06 for SPY and QQQ*
+   (`put_debit_excluded_tickers` on the paper preset).
 3. **Extend the mid-first ladder to stop closes** (today: halfway, then
-   natural): execution is worth ~0.025 per $ on real quotes.
+   natural): execution is worth ~0.025 per $ on real quotes. *Built
+   2026-11-06* (mid → halfway → natural, then the per-leg fallback).
 4. **Keep the new exits and filters** for call debits on SPY / QQQ —
    the one place the real quotes show an edge, from 2017 on.
 5. **Size for a thin edge**: even with realistic costs the model gives a

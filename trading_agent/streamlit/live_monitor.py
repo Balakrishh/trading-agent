@@ -2797,7 +2797,13 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
             "No put-debit fallback on (comma list)",
             ",".join(getattr(seed, "put_debit_excluded_tickers", ("XLY", "XLK", "XLI", "GDX"))),
             key="cust_put_debit_excluded",
-            help="Tickers whose option legs quote too wide for put debits (backlog E7).")
+            help="Tickers whose option legs quote too wide for put debits (backlog E7), "
+                 "or whose put debits lost on real quotes (SPY, QQQ — 2026-11-06).")
+        debit_excluded = st.text_input(
+            "No debit spread at all on (comma list)",
+            ",".join(getattr(seed, "debit_excluded_tickers", ()) or ()),
+            key="cust_debit_excluded",
+            help="Neither call nor put debits (IWM lost under every rule on real 2008–2025 quotes).")
 
         # ── Entry confirmation + trailing profit (skills 61, 30) ─────────
         st.markdown("**Drawdown governor** *(skill 62)* — pauses new entries; exits keep running; only you resume")
@@ -3195,6 +3201,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "max_book_direction_risk_pct":  max_book_dir,
         "net_delta_mode":               net_delta_mode,
         "max_net_beta_delta_pct":       max_net_delta,
+        "debit_excluded_tickers":       [t.strip().upper() for t in debit_excluded.split(",")
+                                         if t.strip()],
         "put_debit_excluded_tickers":   [t.strip().upper() for t in put_debit_excluded.split(",")
                                          if t.strip()],
         "calendar_max_strike_drift_pct": cal_drift,
