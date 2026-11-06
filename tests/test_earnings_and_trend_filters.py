@@ -225,7 +225,8 @@ def test_evaluate_blocks_only_in_live_mode_and_only_directional():
     assert live.block.startswith("trend: relative_strength")
     assert ef.evaluate("Iron Condor", PRESETS["balanced"], price=101.0) is None
     assert ef.evaluate("Bounce Bull Put Spread", PRESETS["balanced"], price=101.0) is None
-    off = replace(PRESETS["balanced"], rs_filter_mode="off", pullback_filter_mode="off")
+    off = replace(PRESETS["balanced"], rs_filter_mode="off", pullback_filter_mode="off",
+                  trend200_filter_mode="off", vol_regime_filter_mode="off")
     assert ef.evaluate(CALL_DEBIT_STRATEGY, off, price=101.0) is None
     nodata = ef.evaluate(CALL_DEBIT_STRATEGY, replace(off, pullback_filter_mode="live"), price=101.0)
     assert nodata.block is None                         # missing bars never block
@@ -261,7 +262,8 @@ def test_agent_ranks_and_records_shadow_verdict():
     assert a._trend_filter_block("XLU", _plan(CALL_DEBIT_STRATEGY), an) is None
     rec = a._trend_eval["XLU"]
     assert rec["direction"] == "bull" and not rec["blocked"]
-    assert {c["name"] for c in rec["checks"]} == {"relative_strength", "pullback"}
+    assert {c["name"] for c in rec["checks"]} == {"relative_strength", "pullback",
+                                                  "trend200", "vol_regime"}   # debit vertical
 
 
 def test_agent_live_mode_blocks_laggard_bullish_entry():

@@ -657,8 +657,16 @@ class StrategyPlanner:
         near = self._typed_slice(ticker, near_exp, opt)
         gap = int(getattr(pre, "calendar_gap_days", 28))
         out = None
+        from trading_agent.calendar_utils import last_trading_day_of_week
         for shift in (0, 7, -7):
-            far_exp = (_date.fromisoformat(near_exp) + _td(days=gap + shift)).isoformat()
+            # Snap to that week's last trading day (2026-11-06): near + 28
+            # landed on 2026-12-25 / 2027-01-01, market holidays whose
+            # weeklies expire Thursday — two empty chain fetches per cycle
+            # and DIA fell back to the −7 shift (a 21-day gap).
+            far_day = last_trading_day_of_week(_date.fromisoformat(near_exp) + _td(days=gap + shift))
+            if far_day is None:
+                continue
+            far_exp = far_day.isoformat()
             if far_exp <= near_exp:
                 continue
             if self._expiry_cap is not None and far_exp > self._expiry_cap.isoformat():

@@ -23,7 +23,7 @@ def _agent(tmp_path, monkeypatch, *, before_window=False):
     a.preset = SimpleNamespace(no_exit_before_et="09:45")
     a.daily_state = DailyStateStore(str(tmp_path))
     monkeypatch.setattr("trading_agent.entry_confirmation.before_entry_window",
-                        lambda now, nb: before_window)
+                        lambda now, nb: before_window and nb != "09:30")   # after the bell
     return a
 
 

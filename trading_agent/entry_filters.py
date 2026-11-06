@@ -15,6 +15,19 @@ Added 2026-10-15. Two checks on a directional plan before it can enter:
   the mirror. The QQQ call debit bought on 2026-10-05 after a run-up and
   stopped on the first dip is the case this targets.
 
+Two more checks apply to debit verticals only (2026-11-06,
+docs/plans/research_debit_exits.md — a 2008–2026 simulation of the live
+exits on 16 ETFs; both held in each half of the sample):
+
+* **200-day trend** — a call debit needs price above its 200-day SMA, a
+  put debit below it (bear entries −0.138 → −0.056 per $ risked; bull
+  −0.040 → +0.022).
+* **Volatility regime** — the regime's ``iv_rank`` (20-day realized-vol
+  percentile over the fetched ~200 sessions, 0–100) at or under
+  ``vol_regime_bull_max_rank`` / ``vol_regime_bear_max_rank``. Debit
+  spreads bought in calm markets did far better; credit spreads, which
+  sell the volatility, are not filtered.
+
 Each filter has a preset mode: "off" (not computed), "shadow" (verdict
 journaled, never blocks — the default) or "live" (a failed check blocks
 the entry with reason ``trend: …``). Missing data never blocks.
@@ -99,7 +112,7 @@ def atr(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
 
 @dataclass(frozen=True)
 class FilterVerdict:
-    name: str                     # "relative_strength" | "pullback"
+    name: str                     # "relative_strength" | "pullback" | "trend200" | "vol_regime"
     mode: str                     # off | shadow | live
     ok: Optional[bool]            # None = not enough data (never blocks)
     reason: str
@@ -178,12 +191,49 @@ class TrendEvaluation:
                 "checks": [asdict(v) for v in self.verdicts]}
 
 
+def trend200_verdict(direction: str, price: float, sma200: Optional[float],
+                     mode: str) -> FilterVerdict:
+    m = {"sma200": None if not _num(sma200) else round(float(sma200), 2)}
+    if not _num(sma200) or not price:
+        return FilterVerdict("trend200", mode, None, "no 200-day SMA", m)
+    above = price > float(sma200)
+    ok = above if direction == "bull" else not above
+    word = "above" if above else "below"
+    need = "above" if direction == "bull" else "below"
+    reason = (f"price {price:.2f} {word} the 200-day SMA {float(sma200):.2f}"
+              + ("" if ok else f" — {direction}ish debit needs {need}"))
+    return FilterVerdict("trend200", mode, ok, reason, m)
+
+
+def vol_regime_verdict(direction: str, iv_rank: Optional[float], max_rank: float,
+                       mode: str) -> FilterVerdict:
+    m = {"iv_rank": None if not _num(iv_rank, allow_zero=True) else round(float(iv_rank), 1),
+         "max_rank": max_rank}
+    if not _num(iv_rank, allow_zero=True):
+        return FilterVerdict("vol_regime", mode, None, "no volatility rank", m)
+    ok = float(iv_rank) <= max_rank
+    reason = (f"realized-vol rank {float(iv_rank):.0f}"
+              + ("" if ok else f" — {direction}ish debit needs ≤ {max_rank:g} (calmer market)"))
+    return FilterVerdict("vol_regime", mode, ok, reason, m)
+
+
+def _num(x, allow_zero: bool = False) -> bool:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return False
+    return v == v and (v > 0 or (allow_zero and v == 0))
+
+
 def evaluate(strategy_name: str, preset, *, price: float,
              rs: Optional[Dict[str, Optional[float]]] = None,
-             bars: Optional[Dict[str, Sequence[float]]] = None) -> Optional[TrendEvaluation]:
+             bars: Optional[Dict[str, Sequence[float]]] = None,
+             sma200: Optional[float] = None,
+             iv_rank: Optional[float] = None) -> Optional[TrendEvaluation]:
     """Run the enabled filters for a plan. ``rs`` = {"score", "percentile"};
-    ``bars`` = {"close", "high", "low"} daily lists. None when the strategy
-    is not directional or both filters are off."""
+    ``bars`` = {"close", "high", "low"} daily lists; ``sma200`` /
+    ``iv_rank`` from the regime analysis (debit verticals only). None when
+    the strategy is not directional or every filter is off."""
     direction = direction_of(strategy_name)
     if direction is None:
         return None
@@ -200,4 +250,13 @@ def evaluate(strategy_name: str, preset, *, price: float,
         verdicts.append(pullback_verdict(
             direction, price, bars.get("close") or [], bars.get("high") or [],
             bars.get("low") or [], float(getattr(preset, "pullback_max_atr", 1.0)), pb_mode))
+    if strategy_name in (CALL_DEBIT_STRATEGY, PUT_DEBIT_STRATEGY):
+        t_mode = str(getattr(preset, "trend200_filter_mode", "shadow"))
+        if t_mode != "off":
+            verdicts.append(trend200_verdict(direction, price, sma200, t_mode))
+        v_mode = str(getattr(preset, "vol_regime_filter_mode", "shadow"))
+        if v_mode != "off":
+            cap = float(getattr(preset, "vol_regime_bull_max_rank" if direction == "bull"
+                                else "vol_regime_bear_max_rank", 100.0))
+            verdicts.append(vol_regime_verdict(direction, iv_rank, cap, v_mode))
     return TrendEvaluation(direction, verdicts) if verdicts else None

@@ -2940,6 +2940,27 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
             pullback_max_atr = st.slider(
                 "Max stretch from 20-day SMA (ATR)", 0.25, 3.0,
                 float(getattr(seed, "pullback_max_atr", 1.0)), 0.25, key="cust_pullback_atr")
+        tf5, tf6, tf7, tf8 = st.columns(4)
+        with tf5:
+            trend200_mode = st.selectbox(
+                "200-day trend filter (debit spreads)", _modes,
+                index=_modes.index(getattr(seed, "trend200_filter_mode", "shadow")),
+                key="cust_trend200_mode",
+                help="Call debits need price above the 200-day SMA, put debits below it.")
+        with tf6:
+            vol_regime_mode = st.selectbox(
+                "Volatility-regime filter (debit spreads)", _modes,
+                index=_modes.index(getattr(seed, "vol_regime_filter_mode", "shadow")),
+                key="cust_vol_regime_mode",
+                help="Realized-vol rank (the regime's iv_rank) at or under the cap below.")
+        with tf7:
+            vol_bull_max = st.slider(
+                "Bullish needs vol rank ≤", 10.0, 100.0,
+                float(getattr(seed, "vol_regime_bull_max_rank", 80.0)), 5.0, key="cust_vol_bull_max")
+        with tf8:
+            vol_bear_max = st.slider(
+                "Bearish needs vol rank ≤", 10.0, 100.0,
+                float(getattr(seed, "vol_regime_bear_max_rank", 50.0)), 5.0, key="cust_vol_bear_max")
 
         # ── Macro events + implied vs realized (skill 68) ─────────────
         st.markdown("**Macro events & implied vs realized** *(skill 68 — short premium only)*")
@@ -3041,11 +3062,21 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                                       in _tp_bases else "debit"),
                 format_func={"debit": "cost (debit paid)", "max_profit": "max profit"}.get,
                 horizontal=True, key="cust_debit_tp_basis")
+            debit_tp_bear = st.slider(
+                "Put debit TP (% · 0 = same)", 0.0, 0.9,
+                float(getattr(seed, "debit_profit_target_pct_bear", None) or 0.0), 0.05,
+                key="cust_debit_tp_bear",
+                help="Bearish debit spreads take profit / arm the trail here (sim: 40 %).")
         with db_e2:
             debit_sl = st.slider(
                 "Debit stop (% of debit)", 0.2, 0.9,
                 float(getattr(seed, "debit_stop_loss_pct", 0.50)), 0.05,
                 key="cust_debit_sl")
+            debit_sl_bull = st.slider(
+                "Call debit stop (% · 0 = same)", 0.0, 1.0,
+                float(getattr(seed, "debit_stop_loss_pct_bull", None) or 0.0), 0.05,
+                key="cust_debit_sl_bull",
+                help="Bullish debit spreads' stop (sim: 80 %).")
             _ladder_modes = ["shadow", "live", "off"]
             debit_ladder_mode = st.selectbox(
                 "Mid-first ladder (C1)", _ladder_modes,
@@ -3136,6 +3167,8 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "debit_min_reward_risk":        debit_min_rr,
         "debit_profit_target_pct":      debit_tp,
         "debit_profit_target_basis":    debit_tp_basis,
+        "debit_profit_target_pct_bear": (float(debit_tp_bear) or None),
+        "debit_stop_loss_pct_bull":     (float(debit_sl_bull) or None),
         "debit_stop_loss_pct":          debit_sl,
         "dte_calendar_near":            int(dte_cal_near),
         "calendar_gap_days":            int(cal_gap),
@@ -3196,6 +3229,10 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "rs_min_percentile":            rs_min_pct,
         "pullback_filter_mode":         pullback_mode,
         "pullback_max_atr":             pullback_max_atr,
+        "trend200_filter_mode":         trend200_mode,
+        "vol_regime_filter_mode":       vol_regime_mode,
+        "vol_regime_bull_max_rank":     float(vol_bull_max),
+        "vol_regime_bear_max_rank":     float(vol_bear_max),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

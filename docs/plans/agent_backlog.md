@@ -294,6 +294,14 @@ From the week's learnings (`docs/plans/journal_learnings.md`, −$760 on 6 close
 | Debit profit target judged at natural missed GLD (2026-11-06) | GLD 371/365 +$210 mid / +$130 natural vs $132.50 target, now −$50 | **built, live on paper** — `debit_exit_price="mid"`, capped mid-first close ladder (skill 59 §4) |
 | Fit to budget blocked by the fair-price check by a few cents (2026-11-06) | GLD 6-wide natural $2.75 vs cap $2.70, mid $2.575 under a $2.87 budget; 186 GLD + 48 QQQ size rejects | **built, live on paper** — `fit_to_budget_ladder`: ladder mid → cap, never natural (skill 59 §4) |
 | SPY ranked against itself in relative strength (2026-11-02) | 233 cycles blocked at "percentile 59 % (+0.0 %)" | **fixed** — benchmark not ranked (skill 65) |
+| Winners turning into losers; "watch from +30 %" (operator, 2026-11-06) | 12 closes: TLT / XLU up +$100 then stopped; sim: arm 30 % raises win rate, earns less once entries are filtered | **built, live on paper** — bear target / trail arm 40 % (`debit_profit_target_pct_bear`), bull stop 80 % (`debit_stop_loss_pct_bull`) (skill 59 §4, `research_debit_exits.md`) |
+| Bear debits on pullbacks in long-term uptrends / volatile markets | sim: bear above SMA200 −0.138 vs below −0.056; top vol tercile −0.131 vs bottom −0.027 | **built, live on paper** — `trend200_filter_mode`, `vol_regime_filter_mode` (bull ≤ 80, bear ≤ 50) for debit verticals (skill 65) |
+| Narrower debit widths (1–1.5 %) | 1 % "beat" 2 % only through reward/risk selection; same entries: bear 2 % −0.042 vs 1 % −0.054 | **not built** |
+| Hold losers longer / sell on a bounce (operator, 2026-11-06) | sim: helps call debits (wider stop), hurts put debits; bounce / defer rules worse than a plain stop | wider bull stop built; the rest **not built** |
+| Faster cycle (2 min) | cycle already ~95 s (76 cycles 14:00–16:00 on 11-06) | **no change** — noise and Schwab API load, no edge |
+| Exits before the bell; pre-open marks in the trail | agent runs from 09:25; immediate exits skipped the 09:45 window; excursion lows −$1,275 on $460 at 09:25 | **fixed** — nothing before 09:30, DTE / earnings wait for 09:45, trail skips pre-window and impossible marks (skill 30) |
+| Calendar far leg on a market holiday | 12-25 / 01-01 requested: 1,322 empty-chain warnings, DIA gap 21 d | **fixed** — snapped to the week's last trading day (skill 59) |
+| `.env` MAX_RISK_PCT 0.05 vs preset 0.02 | warning every cycle; preset wins | operator — set `.env` to 0.02 |
 
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 

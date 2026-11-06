@@ -15,8 +15,12 @@ Runs a two-stage cycle:
     III. PLAN       — select strategy and strikes
     IV.  ACT        — validate risk, execute or log
 
-5-minute cycle design notes
-------------------------------
+Cycle design notes
+------------------
+• Cadence: the supervisor sleeps AGENT_CYCLE_SLEEP_SEC (default 60 s)
+  between cycles and a cycle takes ~35 s, so one runs about every 95 s
+  in session (76 cycles 14:00–16:00 ET on 2026-11-06). Older notes said
+  5 minutes — that was the original cron cadence.
 • run_cycle() is wrapped in a 270-second (4.5 min) hard-timeout guard.
   If the cycle has not completed by then, a TIMEOUT event is logged to
   JournalKB and the guard calls shutdown.hard_exit(1) so the cron
@@ -87,6 +91,7 @@ from trading_agent.telegram_notifier import TelegramNotifier
 from trading_agent.journal_reader import JournalReader
 from trading_agent.position_monitor import (
     PositionMonitor, ExitSignal, SpreadPosition, IMMEDIATE_EXIT_SIGNALS,
+    CALENDAR_EXIT_SIGNALS, REGULAR_OPEN_ET,
     remark_positions_at_mid, attach_wheel_short_deltas, load_trade_plans,
 )
 from trading_agent.order_tracker import OrderTracker
@@ -391,6 +396,9 @@ class TradingAgent:
             # 2026-11-06: debit target at mid, closed with a mid-first ladder.
             debit_exit_price=self.preset.debit_exit_price,
             debit_exit_max_giveback=self.preset.debit_exit_max_giveback,
+            # 2026-11-06: put debits take profit earlier, call debits stop wider.
+            debit_profit_target_pct_bear=self.preset.debit_profit_target_pct_bear,
+            debit_stop_loss_pct_bull=self.preset.debit_stop_loss_pct_bull,
         )
         if hasattr(self.position_monitor, "earnings_lookup"):
             from trading_agent.earnings_calendar import next_earnings_date as _ned
@@ -857,8 +865,9 @@ class TradingAgent:
         # separate cron / Cowork scheduled task needed.
         #
         # Cheap minute-of-hour gate runs first: only fire on cycles
-        # where the wall clock minute is in [30, 34], which the
-        # 5-min cycle hits roughly once per hour. Everything else
+        # where the wall clock minute is in [30, 34] — about three ~95 s
+        # cycles per hour; the body-hash dedup keeps it to one message.
+        # Everything else
         # (market-hours, env opt-out, body-hash dedup) is enforced
         # inside run_scheduler so the in-cycle invocation behaves
         # IDENTICALLY to the standalone CLI.
@@ -2073,8 +2082,9 @@ class TradingAgent:
         """Skill 42 — invoke the portfolio alert scheduler in-cycle.
 
         Called from ``_run_cycle_impl`` after the VIX regime check.
-        The 5-min cycle hits a [:30, :34] minute window roughly once
-        per hour, which is the cheap "rate-limit" gate. Everything
+        The ~95 s cycle hits the [:30, :34] minute window about three
+        times an hour — the cheap gate; the body-hash dedup below sends
+        at most one message. Everything
         else — market-hours weekday/time-of-day check, env opt-out,
         body-hash dedup against the journal — lives inside
         ``portfolio_alert_scheduler.run_scheduler`` so the in-cycle
@@ -2086,7 +2096,7 @@ class TradingAgent:
         credit-spread cycle.
         """
         # Minute-of-hour gate: fire on cycles where wall clock is
-        # 30..34, which the 5-minute cycle passes through ~once/hour.
+        # 30..34 (about three ~95 s cycles an hour; dedup sends once).
         try:
             from datetime import datetime as _dt
             from datetime import timezone as _tz
@@ -2561,7 +2571,9 @@ class TradingAgent:
         ev = entry_filters.evaluate(
             plan.strategy_name, self.preset,
             price=float(getattr(analysis, "current_price", 0.0) or 0.0),
-            rs=self._trend_rs.get(ticker), bars=bars)
+            rs=self._trend_rs.get(ticker), bars=bars,
+            sma200=getattr(analysis, "sma_200", None),
+            iv_rank=getattr(analysis, "iv_rank", None))
         if ev is None:
             return None
         self._trend_eval[ticker] = ev.to_journal_dict()
@@ -2834,12 +2846,24 @@ class TradingAgent:
         mode = str(getattr(self.preset, "profit_trail_mode", "off"))
         trail_on = mode in ("shadow", "live")
         from trading_agent import profit_trail as pt
+        from trading_agent.entry_confirmation import before_entry_window
+        # 2026-11-06: opening / pre-open quotes are not marks — before the
+        # exit window nothing is recorded (a fake pre-open peak would arm
+        # the trail and close a winner at 09:45 on "giveback").
+        not_before = str(getattr(self.preset, "no_exit_before_et", "") or "") or REGULAR_OPEN_ET
+        if before_entry_window(datetime.now(timezone.utc), not_before):
+            return spreads
         try:
             params = pt.TrailParams.from_preset(self.preset)
             states = pt.load_states()
             seen = set()
             for s in spreads:
                 if not s.legs:
+                    continue
+                if not self.position_monitor.debit_mark_plausible(s):
+                    logger.info("[%s] Trail skipped: mark $%.2f outside the spread's range",
+                                s.underlying, s.net_unrealized_pl)
+                    seen.add(pt.position_key(l.symbol for l in s.legs))
                     continue
                 kind, basis, target = self.position_monitor.profit_basis(s)
                 key = pt.position_key(l.symbol for l in s.legs)
@@ -3486,6 +3510,26 @@ class TradingAgent:
             reset_exit_vote(self.daily_state, key)
             return False
 
+        # 2026-11-06: the agent runs from 09:25 ET (session buffer); an
+        # order sent before the 09:30 bell is priced off pre-open quotes
+        # (AMZN read −$1,275 on a $460 spread at 09:25 on 10-20). Nothing
+        # closes before the bell, and the calendar-fact signals (DTE
+        # safety, earnings exit) also wait for the exit window — only the
+        # mark-based emergencies (hard stop, strike proximity) skip it.
+        from trading_agent.entry_confirmation import before_entry_window
+        now_utc = datetime.now(timezone.utc)
+        if before_entry_window(now_utc, REGULAR_OPEN_ET):
+            reset_exit_vote(self.daily_state, key)
+            logger.info("[%s] Exit signal %s before the %s ET bell — not acted on",
+                        spread.underlying, spread.exit_signal.value, REGULAR_OPEN_ET)
+            return False
+        not_before = str(getattr(self.preset, "no_exit_before_et", "") or "")
+        if (spread.exit_signal in CALENDAR_EXIT_SIGNALS and not_before
+                and before_entry_window(now_utc, not_before)):
+            logger.info("[%s] %s waits for the %s ET exit window",
+                        spread.underlying, spread.exit_signal.value, not_before)
+            return False
+
         if spread.exit_signal in IMMEDIATE_EXIT_SIGNALS:
             logger.warning(
                 "[%s] IMMEDIATE exit signal %s — bypassing debounce",
@@ -3493,9 +3537,7 @@ class TradingAgent:
             )
             return True
 
-        from trading_agent.entry_confirmation import before_entry_window
-        not_before = str(getattr(self.preset, "no_exit_before_et", "") or "")
-        if not_before and before_entry_window(datetime.now(timezone.utc), not_before):
+        if not_before and before_entry_window(now_utc, not_before):
             reset_exit_vote(self.daily_state, key)
             logger.info(
                 "[%s] Exit signal %s before %s ET — not counted "
