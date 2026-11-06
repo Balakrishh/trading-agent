@@ -541,6 +541,12 @@ class OrderExecutor:
                 plan.ticker, self.FALLBACK_HAIRCUT_PCT * 100,
                 plan.net_credit, haircut_credit)
             live_credit = haircut_credit
+        elif (getattr(plan, "ladder_only", False) and self.debit_ladder_live
+              and live_credit < 0 and plan.max_debit and -live_credit > plan.max_debit):
+            # Ladder fit (skill 59 §3): natural is still over the cap — buy
+            # only inside it, mid → cap; never at natural.
+            return self._submit_ladder_only(plan, plan_path, run_id, legs_payload,
+                                            account_balance, natural=-live_credit)
         else:
             drift = abs(live_credit - plan.net_credit)
             drift_pct = drift / abs(plan.net_credit) if plan.net_credit else 0
@@ -744,10 +750,50 @@ class OrderExecutor:
         avg = body.get("filled_avg_price")
         return str(body.get("status", "unknown")), filled, (abs(float(avg)) if avg else None)
 
+    def _submit_ladder_only(self, plan: SpreadPlan, plan_path: str, run_id: str,
+                            legs_payload: List[Dict], account_balance: float,
+                            natural: float) -> Dict:
+        """Ladder-fit plan (skill 59 §3, 2026-11-06): size and recheck at
+        the fair-price cap, ladder mid → cap (the cap included), send
+        nothing at natural. Unfilled → ``rejected`` (``ladder_unfilled``);
+        partly filled → ``submitted`` for the filled qty."""
+        cap = float(plan.max_debit)
+
+        def done(result):
+            self._append_to_plan(plan_path, run_id, {"order_result": result})
+            return result
+        ok, why = self._recheck_live_economics(plan, -cap, account_balance)
+        if not ok:
+            return done({"status": "rejected", "reason": why, "plan_file": plan_path,
+                         "run_id": run_id})
+        qty = self._calculate_qty(plan, account_balance, live_credit=-cap)
+        if qty < 1:
+            return done({"status": "rejected", "plan_file": plan_path, "run_id": run_id,
+                         "reason": f"qty=0: ladder cap ${cap:.2f} × 100 over the sizing budget"})
+        logger.info("[%s] Ladder fit: natural $%.2f > cap $%.2f — laddering %d from mid to the cap",
+                    plan.ticker, natural, cap, qty)
+        ladder = self._debit_ladder_probes(plan, plan_path, run_id, legs_payload, qty,
+                                           natural=cap, include_top=True)
+        if ladder.get("final") is not None:
+            return ladder["final"]
+        summary = ladder["summary"]
+        if summary["filled_qty"]:
+            last = summary["probes"][-1]
+            return done({"status": "submitted", "order_id": last["order_id"], "plan_file": plan_path,
+                         "run_id": run_id, "qty": summary["filled_qty"],
+                         "limit_price": last["price"], "ladder": summary})
+        mid = "n/a" if summary["mid"] is None else f"${summary['mid']:.2f}"
+        return done({"status": "rejected", "plan_file": plan_path, "run_id": run_id,
+                     "ladder": summary,
+                     "reason": (f"ladder_unfilled: no fill from mid {mid} to cap ${cap:.2f} "
+                                f"(natural ${natural:.2f})")})
+
     def _debit_ladder_probes(self, plan: SpreadPlan, plan_path: str, run_id: str,
-                             legs_payload: List[Dict], qty: int, natural: float) -> Dict:
+                             legs_payload: List[Dict], qty: int, natural: float,
+                             include_top: bool = False) -> Dict:
         """Offer the debit at mid and at evenly spaced steps up to (not
-        including) natural, ``ENTRY_LADDER_WAIT_S`` each; cancel an unfilled
+        including) natural — or including it with ``include_top`` (ladder
+        fit passes the cap as ``natural``) — ``ENTRY_LADDER_WAIT_S`` each; cancel an unfilled
         probe before trying the next. Returns ``{"remaining", "qty",
         "summary", "final"}``: ``final`` is the result to return when the
         ladder filled everything, or when a cancel could not be confirmed
@@ -763,7 +809,7 @@ class OrderExecutor:
             return out
         out["summary"]["mid"] = round(mid, 2)
         probes = [p for p in ladder_prices(mid, natural, self.debit_ladder_steps)
-                  if p < round(natural, 2) - 1e-9]
+                  if include_top or p < round(natural, 2) - 1e-9]
         cost = 0.0
 
         def settle():
@@ -1396,6 +1442,11 @@ class OrderExecutor:
         # Alpaca sign convention: positive limit_price = net debit.
         attempts = [("mleg_improved", round((mid + natural) / 2, 2)),
                     ("mleg_natural", round(natural, 2))]
+        floor = getattr(spread, "close_min_profit", None)
+        if floor is not None:
+            attempts = self._close_ladder_attempts(spread, legs, qty, mid, natural, float(floor))
+            if not attempts:
+                return self._close_deferred(spread, legs, mid, natural, None)
         for method, price in attempts:
             if method == "mleg_natural" and price == attempts[0][1]:
                 continue         # natural == improved; nothing new to try
@@ -1453,10 +1504,53 @@ class OrderExecutor:
                     "close_method": "mleg_unresolved",
                     "limit_price": price,
                 }
+        if floor is not None:
+            return self._close_deferred(spread, legs, mid, natural, attempts[-1][1])
         logger.warning("[%s] Atomic close unfilled at improved and natural "
                        "prices — falling back to per-leg close",
                        spread.underlying)
         return None
+
+    def _close_ladder_attempts(self, spread, legs, qty: int, mid: float, natural: float,
+                               min_profit: float) -> List[Tuple[str, float]]:
+        """Mid-first close ladder for a mid-judged debit profit exit (skill
+        59 §4, 2026-11-06): ``debit_ladder_steps`` prices from mid toward
+        natural, none worse than the price that still realizes
+        ``min_profit``. Empty when even mid misses it."""
+        from trading_agent.debit_ladder import ladder_prices
+        entry = realized_pl_from_close(legs, 0.0)          # = entry credit × 100 × qty
+        if entry is None or qty <= 0:
+            return [("mleg_natural", round(natural, 2))]
+        worst = (entry - min_profit) / (100.0 * qty)       # highest close debit allowed
+        top = min(natural, worst)
+        if top < mid - 1e-9:
+            return []
+        prices = ladder_prices(mid, top, max(2, int(self.debit_ladder_steps)))
+        return [(f"mleg_ladder_{i}", p) for i, p in enumerate(prices)]
+
+    @staticmethod
+    def _close_deferred(spread, legs, mid: float, natural: float,
+                        last_price: Optional[float]) -> Dict:
+        """Result of a ladder close that filled nothing: the position is
+        untouched and stays open (no per-leg fallback — a profit exit is
+        never urgent)."""
+        logger.info("[%s] Ladder close unfilled (mid %.2f, natural %.2f, last %s) — "
+                    "holding for the next cycle", spread.underlying, mid, natural,
+                    "n/a" if last_price is None else f"{last_price:.2f}")
+        return {
+            "action": "close_spread",
+            "underlying": spread.underlying,
+            "strategy": spread.strategy_name,
+            "signal": spread.exit_signal.value,
+            "reason": spread.exit_reason,
+            "leg_results": [{"status": "open", "symbol": leg.symbol} for leg in legs],
+            "all_closed": False,
+            "deferred": True,
+            "close_method": "mleg_ladder_unfilled",
+            "limit_price": last_price,
+            "mid_debit": round(mid, 4),
+            "natural_debit": round(natural, 4),
+        }
 
     def _submit_close_order(self, spread, legs_payload, qty: int,
                             price: float) -> Optional[Dict]:

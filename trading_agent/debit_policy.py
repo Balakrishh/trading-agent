@@ -74,4 +74,5 @@ def build_debit_plan(*, ticker: str, regime: str, cand: Any,
         reasoning=reasoning,
         max_debit=round(float(cand.max_debit), 2),
         far_expiration=getattr(cand, "far_expiration", "") or "",
+        ladder_only=bool(getattr(cand, "ladder_only", False)),
     )

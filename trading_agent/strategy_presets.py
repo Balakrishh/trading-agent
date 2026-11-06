@@ -327,6 +327,20 @@ class PresetConfig:
     # of the money: the 2008–2026 study (docs/plans/research_debit_entry.md)
     # found 0.40/0.35-delta longs worse than 0.50, narrower widths better.
     fit_to_budget_enabled:             bool  = True
+    # Ladder fit (2026-11-06, skill 59 §3): with the live ladder on, when no
+    # width fits the cap at natural but an in-budget width failed only on
+    # the fair-price check, plan it at its cap and ladder mid → cap (never
+    # natural). GLD 6-wide on 2026-11-04: natural $2.75 vs cap $2.70, mid
+    # $2.575 — under the $287 budget at mid, rejected at natural.
+    fit_to_budget_ladder:              bool  = True
+    # Debit exit price (2026-11-06, skill 59 §4): "natural" judges the
+    # debit-spread / calendar profit target (and trail) on the cost to
+    # close at natural; "mid" judges it at mid and closes with a mid-first
+    # ladder that gives back at most ``debit_exit_max_giveback`` of the mid
+    # profit (unfilled → hold, retry next cycle). GLD 371/365 peaked at
+    # +$210 mid / +$130 natural on 2026-10-30, target $132.50, never fired.
+    debit_exit_price:                  str   = "natural"
+    debit_exit_max_giveback:           float = 0.50
     # Put-debit fallback skipped for these tickers (E7, backlog 11.4,
     # 2026-10-26): their legs quoted 30–90¢ wide on 2026-10-21 (limit 15¢ /
     # 5 % of mid), so every bearish cycle ended in leg_spread_wide — about
@@ -520,7 +534,9 @@ class PresetConfig:
                          f"/SL{self.debit_stop_loss_pct:.0%} "
                          f"Ladder {self.debit_ladder_mode}"
                          f"{'' if self.debit_ladder_mode == 'off' else f' {self.debit_ladder_steps}×{self.debit_ladder_step_cycles}c'}"
-                         f"{' • Fit to budget' if self.fit_to_budget_enabled else ''}")
+                         f"{' • Fit to budget' if self.fit_to_budget_enabled else ''}"
+                         f"{' +ladder' if self.fit_to_budget_enabled and self.fit_to_budget_ladder else ''}"
+                         f"{f' • Exit@mid (give back ≤{self.debit_exit_max_giveback:.0%})' if self.debit_exit_price == 'mid' else ''}")
         if self.calendar_enabled:
             parts.append(f"Cal@{self.dte_calendar_near}+{self.calendar_gap_days}d "
                          f"TP{self.calendar_profit_target_pct:.0%} drift≤{self.calendar_max_strike_drift_pct:.0%}")
@@ -808,6 +824,9 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("entry_timing_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid entry_timing_mode %r — using the default",
                        out.pop("entry_timing_mode"))
+    if out.get("debit_exit_price") not in (None, "natural", "mid"):
+        logger.warning("Invalid debit_exit_price %r — using the default",
+                       out.pop("debit_exit_price"))
     if out.get("debit_profit_target_basis") not in (None, "debit", "max_profit"):
         logger.warning("Invalid debit_profit_target_basis %r — using the default",
                        out.pop("debit_profit_target_basis"))

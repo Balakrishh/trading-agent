@@ -211,6 +211,11 @@ class SpreadPosition:
     # Sum of legs' natural_unrealized_pl (cost to close at natural); None
     # when any leg lacks a usable quote. Profit target basis (§6.1).
     net_natural_pl: Optional[float] = None
+    # Least realized profit the close may accept (2026-11-06, skill 59 §4):
+    # set by the agent on a mid-judged debit profit exit
+    # (``PositionMonitor.debit_close_floor``); the executor then ladders
+    # mid → that price and holds when nothing fills. None = usual close.
+    close_min_profit: Optional[float] = None
 
 
 def _contracts_of(legs) -> int:
@@ -307,7 +312,9 @@ class PositionMonitor:
                  calendar_profit_target_pct: float = 0.25,
                  calendar_max_strike_drift_pct: float = 0.03,
                  earnings_exit_enabled: bool = False,
-                 earnings_exit_sessions: int = 1):
+                 earnings_exit_sessions: int = 1,
+                 debit_exit_price: str = "natural",
+                 debit_exit_max_giveback: float = 0.50):
         """
         Additional parameter
         --------------------
@@ -342,11 +349,42 @@ class PositionMonitor:
         self.earnings_exit_enabled = bool(earnings_exit_enabled)
         self.earnings_exit_sessions = int(earnings_exit_sessions)
         self.earnings_lookup: Optional[Callable[[str], Optional[date]]] = None
+        # Debit exit price (2026-11-06, skill 59 §4): "mid" judges debit
+        # spreads' / calendars' profit target and trail at mid; the close
+        # then ladders from mid, giving back at most this share of it.
+        self.debit_exit_price = str(debit_exit_price)
+        self.debit_exit_max_giveback = float(debit_exit_max_giveback)
+
+    def _debit_at_mid(self, spread: "SpreadPosition") -> bool:
+        """Debit spread / calendar valued at mid: the mode is on and every
+        leg was re-marked from a live bid/ask (a broker last-trade mark is
+        not a mid)."""
+        return (self.debit_exit_price == "mid"
+                and spread.strategy_name in DEBIT_STRATEGIES
+                and bool(spread.legs)
+                and all(getattr(l, "mark_source", "") == "mid" for l in spread.legs))
 
     def _profit_pl(self, spread: "SpreadPosition") -> float:
+        if self._debit_at_mid(spread):
+            return spread.net_unrealized_pl
         if self.profit_target_basis == "natural" and spread.net_natural_pl is not None:
             return spread.net_natural_pl
         return spread.net_unrealized_pl
+
+    def _profit_label(self, spread: "SpreadPosition") -> str:
+        return "mid" if self._debit_at_mid(spread) else self.profit_target_basis
+
+    def debit_close_floor(self, spread: "SpreadPosition") -> Optional[float]:
+        """Least realized profit a mid-judged debit profit exit may close
+        for: the mid profit × (1 − ``debit_exit_max_giveback``). None when
+        the position is not judged at mid (the close keeps its usual
+        improved → natural → per-leg path)."""
+        if not self._debit_at_mid(spread):
+            return None
+        profit = spread.net_unrealized_pl
+        if profit <= 0:
+            return None
+        return round(profit * (1.0 - self.debit_exit_max_giveback), 2)
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -908,7 +946,7 @@ class PositionMonitor:
         profit_pl = self._profit_pl(spread)
         if profit_pl >= target > 0:
             return (ExitSignal.PROFIT_TARGET,
-                    f"Debit: profit ${profit_pl:.2f} ({self.profit_target_basis}) ≥ {label}")
+                    f"Debit: profit ${profit_pl:.2f} ({self._profit_label(spread)}) ≥ {label}")
         dte_signal = self._check_dte_safety(spread.expiration)
         if dte_signal:
             return (ExitSignal.DTE_SAFETY, dte_signal)

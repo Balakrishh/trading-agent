@@ -291,6 +291,9 @@ From the week's learnings (`docs/plans/journal_learnings.md`, −$760 on 6 close
 | Market state reads yesterday's SPY close | 10-30: state 769.36 vs SPY 756 | **option built, off** — `market_state_live_prices` (skill 58 §4); prior close was a deliberate choice (E5). Operator to decide |
 | Re-test bear calls on index ETFs with the IV/RV floor | B6 found short calls under-survived; IV/RV 1.2–1.3 on SPY/DIA | open — backtest first |
 | Total-spread liquidity test instead of per-leg | ~5,300 put-debit `leg_spread_wide` rejects | open — measure ladder fills vs mid first |
+| Debit profit target judged at natural missed GLD (2026-11-06) | GLD 371/365 +$210 mid / +$130 natural vs $132.50 target, now −$50 | **built, live on paper** — `debit_exit_price="mid"`, capped mid-first close ladder (skill 59 §4) |
+| Fit to budget blocked by the fair-price check by a few cents (2026-11-06) | GLD 6-wide natural $2.75 vs cap $2.70, mid $2.575 under a $2.87 budget; 186 GLD + 48 QQQ size rejects | **built, live on paper** — `fit_to_budget_ladder`: ladder mid → cap, never natural (skill 59 §4) |
+| SPY ranked against itself in relative strength (2026-11-02) | 233 cycles blocked at "percentile 59 % (+0.0 %)" | **fixed** — benchmark not ranked (skill 65) |
 
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 

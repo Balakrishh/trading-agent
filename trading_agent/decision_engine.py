@@ -520,6 +520,9 @@ class DebitCandidate:
     annualized_score:  float
     far_expiration:    str = ""
     far_dte:           int = 0
+    # Ladder fit (2026-11-06): priced at its fair-price cap, to be bought
+    # only by the live ladder (mid → cap), never at natural.
+    ladder_only:       bool = False
 
 
 @dataclass
@@ -594,6 +597,11 @@ def decide_debit_spread(inp: DecisionInput, *,
     fit = budget > 0 and bool(getattr(preset, "fit_to_budget_enabled", False))
     cands: List[DebitCandidate] = []
     fit_pick: Optional[DebitCandidate] = None
+    # Ladder fit (2026-11-06): in-budget pairs blocked only by the fair-
+    # price check, scored at their cap — used when nothing fits at natural.
+    ladder_pool: Optional[List[DebitCandidate]] = (
+        [] if (fit and str(getattr(preset, "debit_ladder_mode", "off")) == "live"
+               and bool(getattr(preset, "fit_to_budget_ladder", True))) else None)
     for slc in inp.chain_slices:
         chain = [c for c in slc.contracts
                  if str(c.get("type", opt)).lower().startswith(opt[0])]
@@ -620,7 +628,8 @@ def decide_debit_spread(inp: DecisionInput, *,
                 diag.record(REJECT_LEG_SPREAD_WIDE)
                 return None
             return _debit_vertical_candidate(side, opt, slc, long_c, short_c, model,
-                                             max_overpay, min_rr, diag, ladder=ladder)
+                                             max_overpay, min_rr, diag, ladder=ladder,
+                                             ladder_pool=ladder_pool)
 
         grid_widths = [ChainScanner._snap_width_to_grid(w * k_long, grid_step) for w in widths]
         slice_cands = [c for c in (try_width(w) for w in grid_widths) if c is not None]
@@ -637,6 +646,15 @@ def decide_debit_spread(inp: DecisionInput, *,
                 fit_pick = fitted
     if fit_pick is not None and not any(c.debit <= budget for c in cands):
         return DebitDecisionOutput(candidates=[fit_pick], diagnostics=diag)
+    if ladder_pool and not any(c.debit <= budget for c in cands):
+        fits = [c for c in ladder_pool if c.debit <= budget]
+        if fits:
+            pick = max(fits, key=lambda c: (c.width, -c.debit))   # widest, then cheapest
+            diag.fit_to_budget = {
+                "budget": round(budget, 4), "width": pick.width, "debit": pick.debit,
+                "ladder": True, "mid": pick.fair_value,
+                "grid_min_debit": round(min(c.debit for c in cands), 4) if cands else None}
+            return DebitDecisionOutput(candidates=[pick], diagnostics=diag)
     cands.sort(key=lambda c: (c.debit, -c.reward_risk))
     return DebitDecisionOutput(candidates=cands[:max_candidates], diagnostics=diag)
 
@@ -682,21 +700,43 @@ def _offer_ladder_candidate(diag, slc, long_c, short_c, natural, width,
 
 
 def _debit_vertical_candidate(side, opt, slc, long_c, short_c, model, max_overpay,
-                              min_rr, diag, ladder: bool = False) -> Optional[DebitCandidate]:
+                              min_rr, diag, ladder: bool = False,
+                              ladder_pool: Optional[List[DebitCandidate]] = None
+                              ) -> Optional[DebitCandidate]:
     """Price + score one (long, short) pair; record rejects in ``diag``.
     With ``ladder``, a pair rejected only for ``debit_above_fair`` whose
     reward/risk at the cap still clears ``min_rr`` is offered as
-    ``diag.ladder_candidate`` (cheapest cap wins; backlog C1)."""
+    ``diag.ladder_candidate`` (cheapest cap wins; backlog C1), and with
+    ``ladder_pool`` it is also scored at its cap and added there as a
+    ``ladder_only`` candidate (ladder fit, 2026-11-06)."""
     k_long = float(long_c["strike"])
     width = abs(float(short_c["strike"]) - k_long)
     lb, la = float(long_c["bid"]), float(long_c["ask"])
     sb, sa = float(short_c["bid"]), float(short_c["ask"])
     debit = _quote_debit(lb, la, sb, sa, model=model)
     diag.grid_points_priced += 1
-    r = _score_debit_spread_with_reason(
-        debit=debit, width=width, mid_value=debit_mid_value(lb, la, sb, sa),
-        long_delta=float(long_c["delta"]), short_delta=float(short_c.get("delta", 0) or 0),
-        dte=slc.dte, max_overpay=max_overpay, min_reward_risk=min_rr)
+
+    def score(d):
+        return _score_debit_spread_with_reason(
+            debit=d, width=width, mid_value=debit_mid_value(lb, la, sb, sa),
+            long_delta=float(long_c["delta"]), short_delta=float(short_c.get("delta", 0) or 0),
+            dte=slc.dte, max_overpay=max_overpay, min_reward_risk=min_rr)
+
+    def make(d, r, ladder_only=False):
+        return DebitCandidate(
+            kind=side, option_type=opt, expiration=slc.expiration, dte=slc.dte,
+            long_strike=k_long, short_strike=float(short_c["strike"]),
+            long_symbol=str(long_c.get("symbol", "")), short_symbol=str(short_c.get("symbol", "")),
+            long_delta=float(long_c["delta"]), short_delta=float(short_c["delta"]),
+            long_bid=float(long_c["bid"]), long_ask=float(long_c["ask"]),
+            short_bid=float(short_c["bid"]), short_ask=float(short_c["ask"]),
+            debit=d, width=width, fair_value=round(r["fair"], 4),
+            max_debit=round(r["ceiling"], 4), max_profit=round(r["max_profit"], 4),
+            reward_risk=round(r["rr"], 4), pop=round(r["pop"], 4),
+            ev_per_dollar_risked=round(r["ev"], 4), annualized_score=round(r["annualized"], 4),
+            ladder_only=ladder_only)
+
+    r = score(debit)
     if r["status"] == "rejected":
         diag.record(r["reason"])
         if "fair" in r:
@@ -708,18 +748,13 @@ def _debit_vertical_candidate(side, opt, slc, long_c, short_c, model, max_overpa
             if ladder and r["reason"] == DEBIT_REJECT_ABOVE_FAIR:
                 _offer_ladder_candidate(diag, slc, long_c, short_c, debit, width,
                                         r["fair"], r["ceiling"], min_rr, opt)
+                if ladder_pool is not None:
+                    cap = math.floor(round(r["ceiling"] * 100, 6)) / 100
+                    at_cap = score(cap)
+                    if at_cap["status"] == "accepted":
+                        ladder_pool.append(make(cap, at_cap, ladder_only=True))
         return None
-    return DebitCandidate(
-            kind=side, option_type=opt, expiration=slc.expiration, dte=slc.dte,
-            long_strike=k_long, short_strike=float(short_c["strike"]),
-            long_symbol=str(long_c.get("symbol", "")), short_symbol=str(short_c.get("symbol", "")),
-            long_delta=float(long_c["delta"]), short_delta=float(short_c["delta"]),
-            long_bid=float(long_c["bid"]), long_ask=float(long_c["ask"]),
-            short_bid=float(short_c["bid"]), short_ask=float(short_c["ask"]),
-            debit=debit, width=width, fair_value=round(r["fair"], 4),
-            max_debit=round(r["ceiling"], 4), max_profit=round(r["max_profit"], 4),
-            reward_risk=round(r["rr"], 4), pop=round(r["pop"], 4),
-            ev_per_dollar_risked=round(r["ev"], 4), annualized_score=round(r["annualized"], 4))
+    return make(debit, r)
 
 
 def _norm_cdf(x: float) -> float:

@@ -80,6 +80,10 @@ class TrailState:
     min_pl: Optional[float] = None
     min_pl_at: str = ""
     first_seen_at: str = ""
+    # Best P&L at natural (2026-11-06): with ``debit_exit_price="mid"``
+    # max_pl is the mid peak; this keeps the natural one beside it so the
+    # mid-exit change can be judged from the journal.
+    max_natural_pl: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -151,11 +155,15 @@ def evaluate(state: TrailState, profit: float, *, basis: float, target: float,
 
 
 def track_excursion(state: TrailState, profit: float,
-                    now_iso: Optional[str] = None) -> TrailState:
+                    now_iso: Optional[str] = None,
+                    natural: Optional[float] = None) -> TrailState:
     """Record the best / worst P&L since the position was first seen
-    (every cycle, armed or not). Pure apart from the default clock."""
+    (every cycle, armed or not), and the best natural P&L when given.
+    Pure apart from the default clock."""
     now_iso = now_iso or datetime.now(timezone.utc).isoformat()
     profit = round(profit, 2)
+    if natural is not None and (state.max_natural_pl is None or natural > state.max_natural_pl):
+        state.max_natural_pl = round(natural, 2)
     if not state.first_seen_at:
         state.first_seen_at = now_iso
     if state.max_pl is None or profit > state.max_pl:
@@ -172,6 +180,7 @@ def excursion_row(state: TrailState, exit_pl: Optional[float]) -> Dict[str, Any]
             "max_pl": state.max_pl, "max_pl_at": state.max_pl_at,
             "min_pl": state.min_pl, "min_pl_at": state.min_pl_at,
             "last_pl": state.last_pl, "exit_pl": exit_pl,
+            "max_natural_pl": state.max_natural_pl,
             "target_at_arming": state.target or None}
 
 

@@ -339,7 +339,41 @@ def _fit_to_budget(try_width, grid_step, grid_min_width, budget, diag):
 
 `DecisionInput.max_debit` = the cycle's per-trade cap ÷ 100 (per share). The agent sets `StrategyPlanner.max_loss_budget = balance × risk_manager.max_risk_pct` (market-state multiplier already applied) before each `plan()`; `_plan_debit_spread` passes it on and logs `Fit to budget: width $W at $D`. The choice lands in the plan's scan diagnostics as `fit_to_budget`. Preset `fit_to_budget_enabled` (default True; dashboard "Fit to budget"; summary ` • Fit to budget`). Evidence: `docs/plans/research_debit_entry.md` — at 0.50Δ, narrower widths were no worse than 2 % in 2008–2026 (bear −0.087 per $ at 1 % vs −0.117 at 2 %), while 0.40/0.35Δ longs were worse, so the long leg is never moved.
 
+### Ladder fit and mid exits (2026-11-06)
+
+```python
+# trading_agent/decision_engine.py — decide_debit_spread
+ladder_pool = [] if fit and preset.debit_ladder_mode == "live" and preset.fit_to_budget_ladder else None
+# _debit_vertical_candidate: a pair rejected only for debit_above_fair is
+# re-scored at its cap (floored to the cent) with the same scorer; accepted →
+ladder_pool.append(make(cap, score(cap), ladder_only=True))
+# after the grid and the narrower-width fit, when no candidate is ≤ budget:
+pick = max((c for c in ladder_pool if c.debit <= budget), key=lambda c: (c.width, -c.debit))
+diag.fit_to_budget = {..., "ladder": True, "mid": pick.fair_value}
+
+# trading_agent/executor.py — _submit_order
+if plan.ladder_only and debit_ladder_live and live natural > plan.max_debit:
+    return _submit_ladder_only(...)   # size + recheck at the cap, probes mid → cap
+                                      # (cap included), nothing at natural
+
+# trading_agent/position_monitor.py
+_profit_pl(spread)       # mid P&L when debit_exit_price == "mid", the spread is a
+                         # debit vertical / calendar and every leg is mid-marked
+debit_close_floor(spread) = mid profit × (1 − debit_exit_max_giveback)
+# agent: on PROFIT_TARGET, spread.close_min_profit = debit_close_floor(spread)
+# executor._close_spread_mleg with close_min_profit:
+worst = (entry credit × 100 × qty − min_profit) / (100 × qty)    # highest close debit
+prices = ladder_prices(mid, min(natural, worst), debit_ladder_steps)
+# none fills → {"deferred": True, "close_method": "mleg_ladder_unfilled"}: no
+# per-leg fallback, no close_failed row, retried next cycle
+```
+
+`SpreadPlan.ladder_only` / `DebitCandidate.ladder_only` (append-only) carry the ladder fit to the executor; `SpreadPosition.close_min_profit` carries the floor. Preset: `fit_to_budget_ladder` (default True, acts only with the live ladder; dashboard "…or ladder an in-budget width to its cap"; summary ` +ladder`), `debit_exit_price` ("natural" default / "mid"; dashboard "Debit exits judged at mid"; summary ` • Exit@mid (give back ≤50%)`) and `debit_exit_max_giveback` (0.50). Both live on the paper preset from 2026-11-06. The excursion row gains `max_natural_pl` beside `max_pl` (which is the mid peak for mid-judged debits) so the change can be judged.
+
 ## 4. Edge Cases / Guardrails
+
+- **Ladder fit (2026-11-06).** Live ladder only (`debit_ladder_mode == "live"`; shadow does not count), only with a budget, and only when neither the grid nor the narrower-width fit has a candidate ≤ the budget at natural — a natural fit always wins. The pair must be rejected for `debit_above_fair` alone and pass `debit_min_reward_risk` at its cap. Evidence: GLD Dec-4 6-wide on 2026-11-04 — natural $2.75, cap $2.70, mid $2.575, budget $2.87 — while the 8-wide at natural ($3.45) went to the risk check and was rejected; 186 GLD and 48 QQQ size rejects that week. At submission, if natural has come down to ≤ the cap the plan goes the usual way (ladder to natural). Otherwise the executor sizes and rechecks at the cap and probes mid → cap. Unfilled → `rejected` with `ladder_unfilled: no fill from mid $M to cap $C (natural $N)`, and the next cycle may re-plan. A partial fill is reported `submitted` for the filled quantity. The plan's debit and max loss are the cap, so RiskManager's `debit ≤ cap` and size checks see the worst price paid.
+- **Debit exits at mid (2026-11-06).** With `debit_exit_price="mid"`, debit verticals and calendars judge the profit target and the trail at mid. A spread with any leg on Alpaca's last-trade mark falls back to natural, and credit spreads and the Wheel are unchanged. Stops already used the mid valuation. The close ladders from mid toward natural but never past the price that realizes `(1 − debit_exit_max_giveback)` × the mid profit. If even mid misses that floor, nothing is sent. Unfilled → deferred: the position stays open with no per-leg fallback (a profit exit is never urgent), no `close_failed` row and no partial-close cooldown, and the next cycle re-evaluates. Evidence: GLD 371/365 peaked at +$210 mid / +$130 natural on 2026-10-30 against a $132.50 target; it never fired and the spread was −$50 a week later. Closes for any other reason (stops, DTE, regime, earnings) are untouched.
 
 - **Fit to budget (2026-11-01).** Only debit verticals, only when *no* grid candidate costs ≤ the budget (a cheaper grid candidate is never displaced, so outside CAUTION nothing changes); widths are multiples of the strike step below the narrowest grid width. The step is the modal gap among the 21 strikes nearest the long leg, ties to the smaller gap (2026-11-02): GLD lists $1 strikes near the money and $5 further out, and the whole-chain mode ($5) meant no width under $5 was ever tried — 20 GLD put debits were rejected for size on 2026-11-02 with fit never running. The same step snaps the grid widths, so on such chains the 1–2.5 % grid now lands on $1 multiples (GLD ≈ 4/5/7/9 instead of 5/10). Credit verticals, condors and butterflies keep the whole-chain step. Every narrower candidate still has to pass the leg-spread gate, the fair-price cap (natural ≤ mid × (1 + `debit_max_overpay`)) and `debit_min_reward_risk` — on high-priced chains with $5 strikes that usually fails (QQQ Dec-4 puts on 2026-10-30 quotes: 5-wide natural 16 % over mid, 10-wide 8.5 %), so it helps mostly on $1-strike chains. Nothing fits → the over-budget grid candidates are returned unchanged and RiskManager rejects with the usual `Max loss $X > 1 %` line. Calendars are not fitted (one ATM strike by design; a cheaper calendar is a different trade). No budget (`max_loss_budget` None, balance 0) → off.
 - **Bear calls off by default (2026-10-14, backlog B6).** `PresetConfig.bear_call_enabled = False`. The calibration study (`docs/plans/research_pop_calibration.md`, 2019–2026, 12 tickers) found short calls survived 2–6 points *less* often than implied odds even in down-trends, while short puts beat them by 9–11. So in `StrategyPlanner.plan` a bearish ticker's `bear_call` playbook becomes `put_debit` at any volatility (the credit plan returns an invalid "bear calls off" plan and the put debit is the fallback); the VIX inter-market inhibit no longer demotes bullish / sideways setups to a bear call — it returns no trade. The oversold bounce / wait playbooks are unchanged. Planners built without a preset keep the legacy routing. `True` restores it; dashboard: "Sell bear call spreads"; summary: `BearCall off→put debit`. Iron condors (whose call wing carries the same weakness) and the mean-reversion spread are not changed here.
@@ -381,4 +415,4 @@ def _fit_to_budget(try_width, grid_step, grid_min_width, budget, diag):
 
 ---
 
-*Last verified against repo HEAD on 2026-11-02.*
+*Last verified against repo HEAD on 2026-11-06.*

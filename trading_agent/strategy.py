@@ -65,6 +65,9 @@ class SpreadPlan:
     # the long leg's expiry for a calendar ("" otherwise).
     max_debit: Optional[float] = None
     far_expiration: str = ""
+    # Ladder fit (2026-11-06, skill 59 §3): priced at its fair-price cap;
+    # the executor ladders mid → cap and never sends it at natural.
+    ladder_only: bool = False
 
     def to_dict(self) -> Dict:
         return {
@@ -90,6 +93,7 @@ class SpreadPlan:
             "rejection_reason": self.rejection_reason,
             "max_debit": self.max_debit,
             "far_expiration": self.far_expiration,
+            "ladder_only": self.ladder_only,
         }
 
 
@@ -634,7 +638,8 @@ class StrategyPlanner:
             side=kind, chain_slices=[slc], preset=self.preset,
             max_debit=(budget / 100.0) if budget and budget > 0 else None))
         if out.diagnostics.fit_to_budget:
-            logger.info("[%s] Fit to budget: width $%g at $%.2f (cap $%.2f/share)", ticker,
+            logger.info("[%s] Fit to budget%s: width $%g at $%.2f (cap $%.2f/share)", ticker,
+                        " (ladder to the fair-price cap)" if out.diagnostics.fit_to_budget.get("ladder") else "",
                         out.diagnostics.fit_to_budget["width"],
                         out.diagnostics.fit_to_budget["debit"],
                         out.diagnostics.fit_to_budget["budget"])
