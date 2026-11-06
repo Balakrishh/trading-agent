@@ -67,6 +67,24 @@ class Policy:
 LIVE = Policy()                                        # 2026-11-06 live rules
 
 
+@dataclass(frozen=True)
+class Costs:
+    """Pricing and fill assumptions. ``markup`` = implied ÷ realized vol
+    used to price the spread (skill 68 measured 1.1–1.3 on these ETFs);
+    ``entry_slip`` / ``exit_slip`` scale the model value at the fill;
+    ``fixed`` is a per-share cost added on entry and taken on exit (the
+    bid/ask in cents, which a %-of-value haircut understates on cheap
+    spreads)."""
+    markup: float = 1.10
+    entry_slip: float = ENTRY_SLIP
+    exit_slip: float = EXIT_SLIP
+    fixed: float = 0.0
+    stop_slip: Optional[float] = None    # stops fill here instead (they close at natural)
+
+
+BASE_COSTS = Costs()
+
+
 def load(start: str, cache: Optional[Path]) -> Dict[str, Tuple[list, list, list, list]]:
     fp = cache / f"closes_{start}.pkl" if cache else None
     if fp and fp.exists():
@@ -85,7 +103,8 @@ def load(start: str, cache: Optional[Path]) -> Dict[str, Tuple[list, list, list,
     return out
 
 
-def trade(c: List[float], i: int, call: bool, side: Side, vol: float) -> Optional[float]:
+def trade(c: List[float], i: int, call: bool, side: Side, vol: float,
+          costs: Costs = BASE_COSTS) -> Optional[float]:
     """P&L per $1 of debit for one trade; None when skipped / no data."""
     s0, t0 = c[i], DTE / 365.0
     kl = strike_for_delta(s0, t0, vol, side.delta, call)
@@ -94,7 +113,7 @@ def trade(c: List[float], i: int, call: bool, side: Side, vol: float) -> Optiona
 
     def val(s, t):
         return bs(s, kl, t, vol, call) - bs(s, ks, t, vol, call)
-    debit = val(s0, t0) * ENTRY_SLIP
+    debit = val(s0, t0) * costs.entry_slip + costs.fixed
     if debit <= 0 or (width - debit) / debit < MIN_RR:
         return None
     ceiling = CEILING_OF_MAX * (width - debit) / debit
@@ -103,8 +122,11 @@ def trade(c: List[float], i: int, call: bool, side: Side, vol: float) -> Optiona
         if i + d >= len(c):
             return None
         days_left = DTE - d * 365 / 252
-        p = (val(c[i + d], max(days_left, 0) / 365.0) * EXIT_SLIP - debit) / debit
+        v = val(c[i + d], max(days_left, 0) / 365.0)
+        p = (max(v * costs.exit_slip - costs.fixed, 0.0) - debit) / debit
         if side.stop is not None and p <= -side.stop:
+            if costs.stop_slip is not None:
+                p = (max(v * costs.stop_slip - costs.fixed, 0.0) - debit) / debit
             return p
         if not armed and p >= side.arm:
             armed, peak = True, p
@@ -156,7 +178,7 @@ def rv_percentile(c: List[float], i: int, lookback: int = 200, every: int = 5) -
     return sum(h <= cur for h in hist) / len(hist) if hist and cur is not None else None
 
 
-def run(data, policy: Policy, ents) -> List[Tuple[str, object, str, float]]:
+def run(data, policy: Policy, ents, costs: Costs = BASE_COSTS) -> List[Tuple[str, object, str, float]]:
     rows = []
     for tk, day, i, direction, vol, spy_below, above200, rvp in ents:
         if direction == "bear" and policy.bear_needs_spy_below_sma50 and not spy_below:
@@ -167,7 +189,7 @@ def run(data, policy: Policy, ents) -> List[Tuple[str, object, str, float]]:
         if cap is not None and (rvp is None or rvp > cap):
             continue
         side = policy.bull if direction == "bull" else policy.bear
-        p = trade(data[tk][1], i, direction == "bull", side, vol)
+        p = trade(data[tk][1], i, direction == "bull", side, vol * costs.markup / 1.10, costs)
         if p is not None:
             rows.append((tk, day, direction, p))
     return rows
