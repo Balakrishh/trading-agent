@@ -479,7 +479,15 @@ class StrategyPlanner:
                 getattr(self.preset, "put_debit_excluded_tickers", ()) or ()):
             credit_plan.rejection_reason = (
                 f"{credit_plan.rejection_reason}; put debit skipped "
-                f"(put_debit_excluded_tickers: legs too wide)")
+                f"(put_debit_excluded_tickers)")
+            return credit_plan
+        # 2026-11-06 (docs/plans/research_debit_stress.md): no debit spread
+        # either way — IWM lost under every rule on real 2008–2025 quotes.
+        if playbook in ("call_debit", "put_debit") and ticker in tuple(
+                getattr(self.preset, "debit_excluded_tickers", ()) or ()):
+            credit_plan.rejection_reason = (
+                f"{credit_plan.rejection_reason}; {playbook.replace('_', ' ')} skipped "
+                f"(debit_excluded_tickers)")
             return credit_plan
         fallback = self._plan_playbook(ticker, analysis, playbook)
         if fallback is None:

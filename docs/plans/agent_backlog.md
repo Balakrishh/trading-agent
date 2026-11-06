@@ -301,7 +301,11 @@ From the week's learnings (`docs/plans/journal_learnings.md`, −$760 on 6 close
 | Faster cycle (2 min) | cycle already ~95 s (76 cycles 14:00–16:00 on 11-06) | **no change** — noise and Schwab API load, no edge |
 | Exits before the bell; pre-open marks in the trail | agent runs from 09:25; immediate exits skipped the 09:45 window; excursion lows −$1,275 on $460 at 09:25 | **fixed** — nothing before 09:30, DTE / earnings wait for 09:45, trail skips pre-window and impossible marks (skill 30) |
 | Calendar far leg on a market holiday | 12-25 / 01-01 requested: 1,322 empty-chain warnings, DIA gap 21 d | **fixed** — snapped to the week's last trading day (skill 59) |
-| `.env` MAX_RISK_PCT 0.05 vs preset 0.02 | warning every cycle; preset wins | operator — set `.env` to 0.02 |
+| `.env` MAX_RISK_PCT 0.05 vs preset 0.02 | warning every cycle; preset wins | **done** 2026-11-06 (Pi `.env` 0.02) |
+| IWM debit spreads (real quotes) | lost under every rule, 2008–2025 (`research_debit_stress.md`) | **built, live on paper** — `debit_excluded_tickers: ["IWM"]` |
+| Put debits on index ETFs (real quotes) | SPY + QQQ −0.13 per $ old rules; 3 filtered trades all lost | **paper preset** — SPY, QQQ added to `put_debit_excluded_tickers`; review DIA / others when data exists |
+| Stop closes at natural (real quotes: −0.025 per $ vs halfway) | `debit_chain_backtest.py` | **built** — debit stop ladder mid → halfway → natural (skill 17) |
+| Real chains for GLD / TLT / sector ETFs | no free source after philippdubach/options-data went offline | open — paid (iVolatility, historicaloptiondata.com, EODHD) |
 
 ## 6. Full playbook — trade every market condition (plan agreed 2026-10-01; start Friday)
 
