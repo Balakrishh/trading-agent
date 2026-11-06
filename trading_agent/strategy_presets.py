@@ -300,6 +300,13 @@ class PresetConfig:
     debit_min_reward_risk:             float = 1.0      # max profit ÷ debit
     debit_profit_target_pct:           float = 0.50     # verticals; measured against debit_profit_target_basis
     debit_stop_loss_pct:               float = 0.50     # of the debit (verticals + calendars)
+    # Exits by direction (2026-11-06, skill 59 §4; docs/plans/research_debit_exits.md).
+    # None = the shared value above. Bear put debits arm the trail / take
+    # profit earlier, bull call debits get a wider stop: 2008–2026 sim,
+    # filtered entries, bear target 40 % +0.056/$ vs +0.051 at 50 %; bull
+    # stop 80 % +0.068/$ vs +0.014 at 50 %, both halves.
+    debit_profit_target_pct_bear:      Optional[float] = None
+    debit_stop_loss_pct_bull:          Optional[float] = None
     dte_calendar_near:                 int   = 21       # sold leg
     calendar_gap_days:                 int   = 28       # bought leg ≈ near + gap
     calendar_option_type:              str   = "call"
@@ -509,6 +516,16 @@ class PresetConfig:
     rs_min_percentile:                 float = 0.50
     pullback_filter_mode:              str   = "shadow"
     pullback_max_atr:                  float = 1.0
+    # Debit-vertical entry filters (2026-11-06, skill 65 §4;
+    # docs/plans/research_debit_exits.md). Long-term trend: a call debit
+    # needs price above its 200-day SMA, a put debit below it. Volatility
+    # regime: the regime's iv_rank (20-day realized-vol percentile over
+    # the fetched ~200 sessions) ≤ the cap — calm markets; bear 50, bull 80.
+    # Credit spreads are not filtered (selling premium wants high vol).
+    trend200_filter_mode:              str   = "shadow"
+    vol_regime_filter_mode:            str   = "shadow"
+    vol_regime_bull_max_rank:          float = 80.0
+    vol_regime_bear_max_rank:          float = 50.0
 
     # ------------------------------------------------------------------
     # Convenience
@@ -532,6 +549,8 @@ class PresetConfig:
                          f"TP{self.debit_profit_target_pct:.0%} of "
                          f"{'cost' if self.debit_profit_target_basis == 'debit' else 'max'}"
                          f"/SL{self.debit_stop_loss_pct:.0%} "
+                         f"{'' if self.debit_profit_target_pct_bear is None else f'bearTP{self.debit_profit_target_pct_bear:.0%} '}"
+                         f"{'' if self.debit_stop_loss_pct_bull is None else f'bullSL{self.debit_stop_loss_pct_bull:.0%} '}"
                          f"Ladder {self.debit_ladder_mode}"
                          f"{'' if self.debit_ladder_mode == 'off' else f' {self.debit_ladder_steps}×{self.debit_ladder_step_cycles}c'}"
                          f"{' • Fit to budget' if self.fit_to_budget_enabled else ''}"
@@ -556,7 +575,10 @@ class PresetConfig:
         vrp = f"IV/RV ≥{self.vrp_min_ratio:g}" if self.vrp_min_ratio > 0 else "IV/RV off"
         return (f"{earn} • {macro} • {vrp} • "
                 f"RS {self.rs_filter_mode} ≥p{self.rs_min_percentile:.0%} • "
-                f"Pullback {self.pullback_filter_mode} ≤{self.pullback_max_atr:g}ATR")
+                f"Pullback {self.pullback_filter_mode} ≤{self.pullback_max_atr:g}ATR • "
+                f"Trend200 {self.trend200_filter_mode} • "
+                f"VolRegime {self.vol_regime_filter_mode} bull≤{self.vol_regime_bull_max_rank:g}"
+                f"/bear≤{self.vol_regime_bear_max_rank:g}")
 
     @property
     def dte_range_vertical(self) -> Tuple[int, int]:
@@ -824,6 +846,10 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("entry_timing_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid entry_timing_mode %r — using the default",
                        out.pop("entry_timing_mode"))
+    for k in ("debit_profit_target_pct_bear", "debit_stop_loss_pct_bull"):
+        v = out.get(k)
+        if v is not None and not (isinstance(v, (int, float)) and 0 < float(v) <= 1):
+            logger.warning("Invalid %s %r — using the shared value", k, out.pop(k))
     if out.get("debit_exit_price") not in (None, "natural", "mid"):
         logger.warning("Invalid debit_exit_price %r — using the default",
                        out.pop("debit_exit_price"))
@@ -839,7 +865,8 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if out.get("debit_ladder_mode") not in (None, "off", "shadow", "live"):
         logger.warning("Invalid debit_ladder_mode %r — using the default",
                        out.pop("debit_ladder_mode"))
-    for mode in ("rs_filter_mode", "pullback_filter_mode"):
+    for mode in ("rs_filter_mode", "pullback_filter_mode", "trend200_filter_mode",
+                 "vol_regime_filter_mode"):
         if out.get(mode) not in (None, "off", "shadow", "live"):
             logger.warning("Invalid %s %r — using the default", mode, out.pop(mode))
     for k in _TUPLE_FIELDS:

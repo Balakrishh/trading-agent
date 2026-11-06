@@ -79,6 +79,11 @@ IMMEDIATE_EXIT_SIGNALS = {
     ExitSignal.DTE_SAFETY,
     ExitSignal.EARNINGS_EXIT,       # a calendar fact, not a mark — nothing to debounce
 }
+# Calendar facts (2026-11-06): skip the debounce but still wait for the
+# ``no_exit_before_et`` window — no urgency that the opening quotes are
+# worth. Nothing at all closes before the regular open.
+CALENDAR_EXIT_SIGNALS = frozenset({ExitSignal.DTE_SAFETY, ExitSignal.EARNINGS_EXIT})
+REGULAR_OPEN_ET = "09:30"
 
 # Which regime each strategy is compatible with
 STRATEGY_REGIME_MAP = {
@@ -314,7 +319,9 @@ class PositionMonitor:
                  earnings_exit_enabled: bool = False,
                  earnings_exit_sessions: int = 1,
                  debit_exit_price: str = "natural",
-                 debit_exit_max_giveback: float = 0.50):
+                 debit_exit_max_giveback: float = 0.50,
+                 debit_profit_target_pct_bear: Optional[float] = None,
+                 debit_stop_loss_pct_bull: Optional[float] = None):
         """
         Additional parameter
         --------------------
@@ -354,6 +361,44 @@ class PositionMonitor:
         # then ladders from mid, giving back at most this share of it.
         self.debit_exit_price = str(debit_exit_price)
         self.debit_exit_max_giveback = float(debit_exit_max_giveback)
+        # Exits by direction (2026-11-06, skill 59 §4): None = shared value.
+        self.debit_profit_target_pct_bear = debit_profit_target_pct_bear
+        self.debit_stop_loss_pct_bull = debit_stop_loss_pct_bull
+
+    def _debit_target_pct(self, spread: "SpreadPosition") -> float:
+        if spread.strategy_name == PUT_DEBIT_STRATEGY and self.debit_profit_target_pct_bear:
+            return float(self.debit_profit_target_pct_bear)
+        return self.debit_profit_target_pct
+
+    def _debit_stop_pct(self, spread: "SpreadPosition") -> float:
+        if spread.strategy_name == CALL_DEBIT_STRATEGY and self.debit_stop_loss_pct_bull:
+            return float(self.debit_stop_loss_pct_bull)
+        return self.debit_stop_loss_pct
+
+    @staticmethod
+    def debit_mark_plausible(spread: "SpreadPosition") -> bool:
+        """False when a debit spread's mark is outside what it can be worth:
+        a loss beyond the debit, or (verticals) a gain beyond max profit,
+        each with 5 % + $5 of slack for rounding. Pre-open and opening
+        quotes produced −$1,275 on a $460 AMZN spread (2026-10-20 09:25)
+        and −$838 on a $246 IWM spread (2026-10-26 09:25). Other
+        structures → True (no bound checked)."""
+        if spread.strategy_name not in DEBIT_STRATEGIES:
+            return True
+        contracts = max(1, spread.contracts_open)
+        debit = -spread.original_credit * 100 * contracts
+        if debit <= 0:
+            return True
+        marks = [spread.net_unrealized_pl]
+        if spread.net_natural_pl is not None:
+            marks.append(spread.net_natural_pl)
+        if any(m < -(debit * 1.05 + 5) for m in marks):
+            return False
+        if spread.strategy_name in DEBIT_VERTICALS and spread.spread_width > 0:
+            top = (spread.spread_width + spread.original_credit) * 100 * contracts
+            if any(m > top * 1.05 + 5 for m in marks):
+                return False
+        return True
 
     def _debit_at_mid(self, spread: "SpreadPosition") -> bool:
         """Debit spread / calendar valued at mid: the mode is on and every
@@ -873,7 +918,7 @@ class PositionMonitor:
             basis = (spread.spread_width + spread.original_credit) * 100 * contracts
             measure = (-spread.original_credit * 100 * contracts
                        if self.debit_profit_target_basis == "debit" else basis)
-            return "debit_vertical", basis, measure * self.debit_profit_target_pct
+            return "debit_vertical", basis, measure * self._debit_target_pct(spread)
         if spread.strategy_name in DEBIT_STRATEGIES:
             basis = -spread.original_credit * 100 * contracts
             return "calendar", basis, basis * self.calendar_profit_target_pct
@@ -930,17 +975,23 @@ class PositionMonitor:
         debit_position = -spread.original_credit * 100 * contracts
         if debit_position <= 0:
             return (ExitSignal.HOLD, "Debit: no recorded debit — holding")
+        if not self.debit_mark_plausible(spread):
+            return (ExitSignal.HOLD,
+                    f"Debit: mark ${spread.net_unrealized_pl:.2f} outside the spread's possible "
+                    f"range (debit ${debit_position:.2f}) — bad quote, holding")
         loss = -spread.net_unrealized_pl
-        stop = debit_position * self.debit_stop_loss_pct
+        stop_pct = self._debit_stop_pct(spread)
+        stop = debit_position * stop_pct
         if loss >= stop > 0:
             return (ExitSignal.STOP_LOSS,
-                    f"Debit: loss ${loss:.2f} ≥ {self.debit_stop_loss_pct:.0%} of "
+                    f"Debit: loss ${loss:.2f} ≥ {stop_pct:.0%} of "
                     f"debit ${debit_position:.2f}")
         kind, basis, target = self.profit_basis(spread)
+        tp_pct = self._debit_target_pct(spread)
         if kind == "debit_vertical" and self.debit_profit_target_basis == "debit":
-            label = f"{self.debit_profit_target_pct:.0%} of debit ${debit_position:.2f}"
+            label = f"{tp_pct:.0%} of debit ${debit_position:.2f}"
         elif kind == "debit_vertical":
-            label = f"{self.debit_profit_target_pct:.0%} of max profit ${basis:.2f}"
+            label = f"{tp_pct:.0%} of max profit ${basis:.2f}"
         else:
             label = f"{self.calendar_profit_target_pct:.0%} of debit ${basis:.2f}"
         profit_pl = self._profit_pl(spread)

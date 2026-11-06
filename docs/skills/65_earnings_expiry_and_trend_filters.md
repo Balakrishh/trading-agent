@@ -14,6 +14,8 @@
 
 **Relative strength.** The old `leadership_zscore` compares the last 5-minute bar with an anchor ETF — intraday noise. Traders mean multi-week outperformance: the ticker's 20- and 60-day returns minus SPY's, ranked across the watchlist. Bullish trades go to leaders, bearish trades to laggards.
 
+**200-day trend and volatility regime for debit verticals (2026-11-06).** A 2008–2026 simulation of the live exits on 16 ETFs (`docs/plans/research_debit_exits.md`) found that the paper account's losing pattern — bearish debits bought on pullbacks in long-term uptrends, during volatile markets (TLT, XLU) — is the simulation's worst bucket too: bear debits above the 200-day SMA lost −0.138 per $ risked vs −0.056 below it, and bear debits in the top volatility tercile −0.131 vs −0.027 in the bottom. Call debits mirror it (above the 200-day +0.022 vs −0.040). Two checks for call / put debit spreads only — credit spreads sell the volatility and are not filtered.
+
 **Pullback.** The regime classifier looks at price vs the 200-day SMA and the 50-day *slope* only. A bullish entry after a run-up is the worst-priced entry in an uptrend: the QQQ call debit opened 2026-10-05 after a rally was stopped on the first dip (−$420). The filter asks for price above the 50-day SMA (the trend's support holds) and within `pullback_max_atr` × ATR(14) of the 20-day SMA (not extended); bearish is the mirror.
 
 ## 2. Mathematical Formula
@@ -188,7 +190,20 @@ def _check_earnings_exit(self, spread, today=None):
     return (ExitSignal.EARNINGS_EXIT, f"Earnings {report}: position runs to {last} — closing {n} session(s) before the report")
 ```
 
-`ExitSignal.EARNINGS_EXIT` is in `IMMEDIATE_EXIT_SIGNALS` (a calendar fact — no mark to debounce). `TradingAgent.__init__` passes `earnings_exit_enabled` / `earnings_exit_sessions` and sets `position_monitor.earnings_lookup = next_earnings_date`. Preset: `earnings_exit_enabled` (True), `earnings_exit_sessions` (1); dashboard "Close before earnings"; summary ` • Earnings exit 1 sess before`. `calendar_utils.sessions_before(today, day)`.
+### 200-day trend and volatility regime (2026-11-06)
+
+```python
+# trading_agent/entry_filters.py — evaluate(..., sma200=analysis.sma_200, iv_rank=analysis.iv_rank)
+if strategy_name in (CALL_DEBIT_STRATEGY, PUT_DEBIT_STRATEGY):
+    trend200_verdict(direction, price, sma200, preset.trend200_filter_mode)
+        # bull: price > SMA200, bear: price < SMA200; no SMA → ok None
+    vol_regime_verdict(direction, iv_rank, cap, preset.vol_regime_filter_mode)
+        # iv_rank ≤ vol_regime_bull_max_rank (80) / vol_regime_bear_max_rank (50); none → ok None
+```
+
+`iv_rank` is the regime classifier's realized-vol percentile (`RegimeClassifier._compute_iv_rank`: today's 20-day RV against every 5th 20-day window of the fetched ~220 bars, 0–100) — the same number the HighIV block (> 95) uses, so there is one source. `sma_200` is the regime's. Verdicts land in `raw_signal.trend_filters.checks` with names `trend200` / `vol_regime`; live blocks read `risk: trend: trend200 — price 735.29 above the 200-day SMA 730.38 — bearish debit needs below` / `risk: trend: vol_regime — realized-vol rank 92 — bearish debit needs ≤ 50 (calmer market)`. Preset: `trend200_filter_mode`, `vol_regime_filter_mode` (default "shadow"; "live" on the paper preset from 2026-11-06), `vol_regime_bull_max_rank` 80, `vol_regime_bear_max_rank` 50; dashboard "200-day trend filter (debit spreads)", "Volatility-regime filter (debit spreads)" and the two caps; summary ` • Trend200 live • VolRegime live bull≤80/bear≤50`.
+
+`ExitSignal.EARNINGS_EXIT` is in `IMMEDIATE_EXIT_SIGNALS` (a calendar fact — no mark to debounce; since 2026-11-06 it is also in `CALENDAR_EXIT_SIGNALS`, so it waits for the 09:45 exit window — skill 30 §4). `TradingAgent.__init__` passes `earnings_exit_enabled` / `earnings_exit_sessions` and sets `position_monitor.earnings_lookup = next_earnings_date`. Preset: `earnings_exit_enabled` (True), `earnings_exit_sessions` (1); dashboard "Close before earnings"; summary ` • Earnings exit 1 sess before`. `calendar_utils.sessions_before(today, day)`.
 
 ## 4. Edge Cases / Guardrails
 
@@ -204,6 +219,7 @@ def _check_earnings_exit(self, spread, today=None):
 - **One ticker / ties** — a single ranked ticker is percentile 0.5; equal scores share the mean rank.
 - **SPY itself (changed 2026-11-02)** — its score vs itself is 0 by construction, so its percentile only said how many watchlist names beat the index that day, not anything about SPY. On 2026-11-02 that blocked a valid SPY put debit in all 233 cycles ("percentile 59% (strong vs SPY, +0.0%)"). `_relative_strength_map` now leaves SPY out of the ranking and marks it `{"score": None, "percentile": None, "benchmark": True}`; `rs_verdict(..., benchmark=True)` returns `ok: null` with reason "SPY is the benchmark — not applicable" (never blocks). The pullback filter still applies to SPY.
 
+- **200-day trend / volatility regime (2026-11-06).** Debit verticals only: Bull Put / Bear Call credit spreads, condors, butterflies, calendars and the bounce are not filtered by either. Missing data never blocks: no 200-day SMA (fewer than 200 bars, NaN or 0) → `ok: null`; `iv_rank` missing → `ok: null` (a real 0 passes). The caps sit on a smooth part of the curve, not its best point: bear cap 33 scored +0.097 per $ but kept a third fewer trades; 67 fell to +0.003. A 1-year RV lookback scored slightly higher than the classifier's ~200 bars but needs more history than the agent fetches. With the filters live on 2026-11-06 closes, most tickers had a vol rank of 92–100 and only a GLD put debit qualified: in a volatile market the agent opens few or no debit spreads — the intended effect (bear debits in high vol lost −0.13 per $). Rejected ideas: the SPY-below-SMA50 gate for bear trades (unstable between halves: +0.305 / +0.029) and narrower widths (a selection effect — on the same entries 2 % beat 1 % for bears).
 - **Filters live on the paper account (2026-10-27).** `rs_filter_mode` and `pullback_filter_mode` = "live" in the Pi's custom preset (backlog §14). Shadow evidence: relative strength 0 failures in 28 verdicts; pullback failed on two trades that were opened — XLU 10-16 (back above its 50-day) and GLD 10-22 (2.1 ATR below its 20-day) — both under water on 10-27. Small sample; the defaults stay "shadow".
 
 ## 5. Cross-References
@@ -215,4 +231,4 @@ def _check_earnings_exit(self, spread, today=None):
 
 ---
 
-*Last verified against repo HEAD on 2026-11-02.*
+*Last verified against repo HEAD on 2026-11-06.*

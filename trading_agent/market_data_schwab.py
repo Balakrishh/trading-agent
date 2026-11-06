@@ -564,7 +564,7 @@ class SchwabMarketDataProvider(MarketDataProvider):
                     sample = (first_map[first_strike] or [None])[0]
                     if isinstance(sample, dict):
                         keys_present = sorted(sample.keys())
-                        logger.warning(
+                        logger.debug(
                             "[%s] Schwab chain DIAGNOSTIC DUMP — first contract: "
                             "exp=%s strike=%s delta=%s gamma=%s theta=%s "
                             "vega=%s rho=%s vol=%s bid=%s ask=%s mark=%s "

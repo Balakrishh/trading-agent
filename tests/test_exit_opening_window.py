@@ -12,14 +12,14 @@ from trading_agent.position_monitor import ExitSignal
 from trading_agent.strategy_presets import PRESETS
 
 
-def _agent(monkeypatch, *, votes, before_window, not_before="09:45"):
+def _agent(monkeypatch, *, votes, before_window, not_before="09:45", before_bell=False):
     a = TradingAgent.__new__(TradingAgent)
     a.preset = SimpleNamespace(no_exit_before_et=not_before)
     a.daily_state = object()
     monkeypatch.setattr(agent_mod, "tally_exit_vote", lambda *a, **k: votes)
     monkeypatch.setattr(agent_mod, "reset_exit_vote", lambda *a, **k: None)
     monkeypatch.setattr("trading_agent.entry_confirmation.before_entry_window",
-                        lambda now, nb: before_window)
+                        lambda now, nb: before_bell if nb == "09:30" else before_window)
     return a
 
 
@@ -38,10 +38,24 @@ def test_confirmed_exit_goes_out_after_the_window(monkeypatch):
     assert a._should_exit_spread(spread(ExitSignal.DELTA_STOP)) is True
 
 
-@pytest.mark.parametrize("sig", [ExitSignal.HARD_STOP, ExitSignal.STRIKE_PROXIMITY,
-                                 ExitSignal.DTE_SAFETY])
-def test_immediate_exits_never_wait(monkeypatch, sig):
+@pytest.mark.parametrize("sig", [ExitSignal.HARD_STOP, ExitSignal.STRIKE_PROXIMITY])
+def test_mark_emergencies_skip_the_window(monkeypatch, sig):
     assert _agent(monkeypatch, votes=0, before_window=True)._should_exit_spread(spread(sig)) is True
+
+
+@pytest.mark.parametrize("sig", [ExitSignal.DTE_SAFETY, ExitSignal.EARNINGS_EXIT])
+def test_calendar_exits_wait_for_the_window_then_skip_the_debounce(monkeypatch, sig):
+    assert _agent(monkeypatch, votes=0, before_window=True)._should_exit_spread(spread(sig)) is False
+    assert _agent(monkeypatch, votes=0, before_window=False)._should_exit_spread(spread(sig)) is True
+
+
+# The agent runs from 09:25 ET; AMZN read -$1,275 on a $460 spread at 09:25 on 10-20.
+@pytest.mark.parametrize("sig", [ExitSignal.HARD_STOP, ExitSignal.STRIKE_PROXIMITY,
+                                 ExitSignal.DTE_SAFETY, ExitSignal.EARNINGS_EXIT,
+                                 ExitSignal.STOP_LOSS, ExitSignal.PROFIT_TARGET])
+def test_nothing_closes_before_the_bell(monkeypatch, sig):
+    a = _agent(monkeypatch, votes=3, before_window=True, not_before="", before_bell=True)
+    assert a._should_exit_spread(spread(sig)) is False
 
 
 def test_empty_window_disables_the_hold(monkeypatch):
