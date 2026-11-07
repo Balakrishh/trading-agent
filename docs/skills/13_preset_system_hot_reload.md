@@ -301,6 +301,8 @@ self.risk_manager = RiskManager(
 - **Debit ladder fields (2026-10-16, backlog C1, skill 59 §3).** `debit_ladder_mode` ("shadow"; only "off" / "shadow" are accepted — "live" is not built and falls back with a warning in `_coerce_overrides`), `debit_ladder_steps` (4), `debit_ladder_step_cycles` (1). Read from `self.preset` in `_begin_entry_gates` and by `decide_debit_spread`; summary token inside `_debit_tag()`.
 - **`stop_cooldown_sessions` (2026-10-16, skill 37).** Default 1, 0 = off; read by `TradingAgent._stop_cooldown_block` from `self.preset` (hot reload applies next cycle). Summary token `Stop cool-down N sess`; dashboard number input beside the ladder controls.
 
+- **Intraday chain log fields (2026-11-06, skill 69).** `intraday_chain_log_mode` ("off" default; only "off" / "on" — anything else falls back with a warning in `_coerce_overrides`), `intraday_chain_log_tickers` (("SPY",), a `_TUPLE_FIELDS` member), `intraday_chain_log_max_dte` (1), `intraday_chain_log_band_pct` (0.04), `intraday_chain_log_interval_s` (60). Read from `self.preset` by `TradingAgent._maybe_log_intraday_chains`; summary token `Intraday chain log SPY ≤1DTE ±4%` (only when on, via `_intraday_log_tag()`); Strategy-Profile block "Intraday option-chain log". Research data only — no decision reads it.
+
 ## 5. Cross-References
 
 - [03 Credit/Width floor](03_credit_to_width_floor.md) — the `min_credit_ratio` knob in static mode; `edge_buffer` in adaptive mode.

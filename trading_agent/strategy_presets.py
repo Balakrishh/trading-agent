@@ -532,6 +532,16 @@ class PresetConfig:
     vol_regime_filter_mode:            str   = "shadow"
     vol_regime_bull_max_rank:          float = 80.0
     vol_regime_bear_max_rank:          float = 50.0
+    # Intraday option-chain log (2026-11-06, skill 69): research data for
+    # same-day (0DTE / 1DTE) ideas — the free history is end-of-day only.
+    # "on" appends each cycle's near-expiry chain (strikes within
+    # band_pct of spot) for these tickers to ~/data/intraday_chains; no
+    # orders, no effect on trading.
+    intraday_chain_log_mode:           str   = "off"
+    intraday_chain_log_tickers:        Tuple[str, ...] = ("SPY",)
+    intraday_chain_log_max_dte:        int   = 1
+    intraday_chain_log_band_pct:       float = 0.04
+    intraday_chain_log_interval_s:     float = 60.0
 
     # ------------------------------------------------------------------
     # Convenience
@@ -584,7 +594,14 @@ class PresetConfig:
                 f"Pullback {self.pullback_filter_mode} ≤{self.pullback_max_atr:g}ATR • "
                 f"Trend200 {self.trend200_filter_mode} • "
                 f"VolRegime {self.vol_regime_filter_mode} bull≤{self.vol_regime_bull_max_rank:g}"
-                f"/bear≤{self.vol_regime_bear_max_rank:g}")
+                f"/bear≤{self.vol_regime_bear_max_rank:g}"
+                f"{self._intraday_log_tag()}")
+
+    def _intraday_log_tag(self) -> str:
+        if self.intraday_chain_log_mode != "on":
+            return ""
+        return (f" • Intraday chain log {','.join(self.intraday_chain_log_tickers)} "
+                f"≤{self.intraday_chain_log_max_dte}DTE ±{self.intraday_chain_log_band_pct:.0%}")
 
     @property
     def dte_range_vertical(self) -> Tuple[int, int]:
@@ -839,7 +856,7 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 # ---------------------------------------------------------------------------
 
 _TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct", "put_debit_excluded_tickers",
-                 "debit_excluded_tickers",
+                 "debit_excluded_tickers", "intraday_chain_log_tickers",
                  "macro_event_kinds",
                  "iron_butterfly_dte_grid", "iron_butterfly_wing_width_pct",
                  "cc_dte_band", "csp_dte_band", "csp_strike_band"}
@@ -877,6 +894,9 @@ def _coerce_overrides(overrides: Dict) -> Dict:
                  "vol_regime_filter_mode"):
         if out.get(mode) not in (None, "off", "shadow", "live"):
             logger.warning("Invalid %s %r — using the default", mode, out.pop(mode))
+    if out.get("intraday_chain_log_mode") not in (None, "off", "on"):
+        logger.warning("Invalid intraday_chain_log_mode %r — using the default",
+                       out.pop("intraday_chain_log_mode"))
     for k in _TUPLE_FIELDS:
         if k in out and isinstance(out[k], list):
             out[k] = tuple(out[k])

@@ -54,6 +54,12 @@ def is_trading_day(d: date) -> bool:
     return bool(_valid_days(d, d))
 
 
+def next_sessions(today: date, n: int) -> List[date]:
+    """The next *n* NYSE trading days from *today* (inclusive) — the daily
+    expirations SPY / QQQ list."""
+    return _valid_days(today, today + timedelta(days=3 * n + 7))[:n]
+
+
 def last_trading_day_of_week(ref: date) -> Optional[date]:
     """Last NYSE trading day of the Monday–Friday week containing *ref* —
     the weekly expiry of that week (Thursday when Friday is a holiday),

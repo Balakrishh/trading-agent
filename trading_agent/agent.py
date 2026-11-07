@@ -740,6 +740,14 @@ class TradingAgent:
     # Cycle implementation
     # ==================================================================
 
+    def _maybe_log_intraday_chains(self) -> None:
+        """Skill 69 — append the near-expiry chain snapshot when due."""
+        try:
+            from trading_agent import intraday_chain_log
+            intraday_chain_log.maybe_log(self.preset, self.data_provider, datetime.now(EASTERN))
+        except Exception as exc:                                # noqa: BLE001, skill-34-exempt — research logging must never break a cycle
+            logger.warning("Intraday chain log failed: %s", exc)
+
     def _run_cycle_impl(self) -> Dict:
         """Core cycle logic — called inside run_cycle()'s timeout guard."""
         # --- After-hours shutdown guard -----------------------------------
@@ -872,6 +880,7 @@ class TradingAgent:
         # inside run_scheduler so the in-cycle invocation behaves
         # IDENTICALLY to the standalone CLI.
         self._maybe_run_portfolio_review()
+        self._maybe_log_intraday_chains()          # skill 69 — research data, no orders
 
         # ------------------------------------------------------------------
         # Stage 1: MONITOR existing positions

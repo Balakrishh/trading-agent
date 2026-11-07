@@ -2968,6 +2968,30 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 "Bearish needs vol rank ≤", 10.0, 100.0,
                 float(getattr(seed, "vol_regime_bear_max_rank", 50.0)), 5.0, key="cust_vol_bear_max")
 
+        # ── Intraday chain log (skill 69) — research data, no orders ─
+        st.markdown("**Intraday option-chain log** *(skill 69 — research data, no orders)*")
+        il1, il2, il3, il4 = st.columns(4)
+        with il1:
+            intraday_log_mode = st.selectbox(
+                "Log near-expiry chains", ["off", "on"],
+                index=["off", "on"].index(getattr(seed, "intraday_chain_log_mode", "off")),
+                key="cust_intraday_log_mode",
+                help="Appends each cycle's 0–1 DTE chain to ~/data/intraday_chains "
+                     "for same-day backtests (INTRADAY_CHAIN_DIR overrides).")
+        with il2:
+            intraday_log_tickers = st.text_input(
+                "Tickers", ",".join(getattr(seed, "intraday_chain_log_tickers", ("SPY",))),
+                key="cust_intraday_log_tickers")
+        with il3:
+            intraday_log_dte = st.number_input(
+                "Max DTE", 0, 5, int(getattr(seed, "intraday_chain_log_max_dte", 1)),
+                key="cust_intraday_log_dte")
+        with il4:
+            intraday_log_band = st.slider(
+                "Strikes within ± of spot", 0.01, 0.10,
+                float(getattr(seed, "intraday_chain_log_band_pct", 0.04)), 0.01,
+                key="cust_intraday_log_band")
+
         # ── Macro events + implied vs realized (skill 68) ─────────────
         st.markdown("**Macro events & implied vs realized** *(skill 68 — short premium only)*")
         mv1, mv2, mv3 = st.columns(3)
@@ -3241,6 +3265,11 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "vol_regime_filter_mode":       vol_regime_mode,
         "vol_regime_bull_max_rank":     float(vol_bull_max),
         "vol_regime_bear_max_rank":     float(vol_bear_max),
+        "intraday_chain_log_mode":      intraday_log_mode,
+        "intraday_chain_log_tickers":   [t.strip().upper() for t in intraday_log_tickers.split(",")
+                                         if t.strip()] or ["SPY"],
+        "intraday_chain_log_max_dte":   int(intraday_log_dte),
+        "intraday_chain_log_band_pct":  float(intraday_log_band),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to
