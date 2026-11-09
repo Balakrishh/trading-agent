@@ -88,6 +88,8 @@ A condor loses if price finishes past **either** short, so P(loss) ≈ |Δput| +
 
 - **Credit is priced at natural by default (2026-10-05, backlog §6.1).** `PresetConfig.fill_model` selects how `_quote_credit` / `_quote_credit_single` estimate credit: `"natural"` (default) = short bid − long ask, no haircut; `"mid"` = legacy NBBO mid − `DEFAULT_FILL_HAIRCUT`. The C/W floor formula `|Δ| × (1 + edge_buffer)` is unchanged (invariant #1); only its credit input is honest now. Week 1 evidence: 3/3 paper fills at natural. Example: a 95/90 put spread at 2.00/2.10 and 0.70/0.80 passes at mid (1.28/5 = 0.256 ≥ 0.25) and is rejected at natural (1.20/5 = 0.24). The helpers' own default stays `"mid"` so callers without a preset (backtest fixtures, doctests) are unchanged; `decide()` passes the preset's value.
 
+- **Plan-specific floor (2026-11-09, skill 70).** A plan with `min_cw` set (the vol-band bull put, `playbook == "vol_band_put"`) is judged against `min_cw` instead of `|Δ| × (1 + edge_buffer)` in both `RiskManager.evaluate` Check 2 and `OrderExecutor._recheck_live_economics`. The formula itself is unchanged in all three files; the scanner never sets `min_cw`.
+
 ## 5. Cross-References
 
 - [01 POP from short delta](01_pop_from_delta.md) — the math derivation depends on `POP ≈ 1 − |Δ|`.
@@ -96,4 +98,4 @@ A condor loses if price finishes past **either** short, so P(loss) ≈ |Δput| +
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-11-09.*

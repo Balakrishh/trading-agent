@@ -479,6 +479,9 @@ class OrderExecutor:
         else:
             cw_floor = self.min_credit_ratio
             floor_label = f"{self.min_credit_ratio}"
+        if getattr(plan, "min_cw", None) is not None:     # mirrors RiskManager Check 2
+            cw_floor = float(plan.min_cw)
+            floor_label = f"{cw_floor:g} ({plan.playbook} floor)"
 
         live_ratio = live_credit / width
         if live_ratio < cw_floor:

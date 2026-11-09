@@ -136,6 +136,11 @@ class RiskManager:
         else:
             cw_floor = self.min_credit_ratio
             floor_label = f"{self.min_credit_ratio}"
+        # A playbook with its own tested floor (vol-band bull put,
+        # research_credit_vol.md §5) replaces the delta-aware one.
+        if getattr(plan, "min_cw", None) is not None:
+            cw_floor = float(plan.min_cw)
+            floor_label = f"{cw_floor:g} ({plan.playbook} floor)"
 
         if plan.credit_to_width_ratio >= cw_floor:
             passed.append(

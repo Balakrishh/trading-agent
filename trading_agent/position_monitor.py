@@ -85,6 +85,11 @@ IMMEDIATE_EXIT_SIGNALS = {
 CALENDAR_EXIT_SIGNALS = frozenset({ExitSignal.DTE_SAFETY, ExitSignal.EARNINGS_EXIT})
 REGULAR_OPEN_ET = "09:30"
 
+# Credit verticals the ``credit_strike_proximity_exit`` switch covers, and
+# the vol-band bull put's playbook tag (2026-11-09, research_credit_vol.md).
+CREDIT_VERTICALS = frozenset({"Bull Put Spread", "Bear Call Spread"})
+VOL_BAND_PUT_PLAYBOOK = "vol_band_put"
+
 # Which regime each strategy is compatible with
 STRATEGY_REGIME_MAP = {
     "Bull Put Spread":      Regime.BULLISH,
@@ -221,6 +226,9 @@ class SpreadPosition:
     # (``PositionMonitor.debit_close_floor``); the executor then ladders
     # mid → that price and holds when nothing fills. None = usual close.
     close_min_profit: Optional[float] = None
+    # Playbook tag from the trade plan (2026-11-09): "vol_band_put" skips
+    # the regime-shift exit (the playbook enters in any trend).
+    playbook: str = ""
 
 
 def _contracts_of(legs) -> int:
@@ -321,7 +329,8 @@ class PositionMonitor:
                  debit_exit_price: str = "natural",
                  debit_exit_max_giveback: float = 0.50,
                  debit_profit_target_pct_bear: Optional[float] = None,
-                 debit_stop_loss_pct_bull: Optional[float] = None):
+                 debit_stop_loss_pct_bull: Optional[float] = None,
+                 credit_strike_proximity_exit: bool = True):
         """
         Additional parameter
         --------------------
@@ -364,6 +373,9 @@ class PositionMonitor:
         # Exits by direction (2026-11-06, skill 59 §4): None = shared value.
         self.debit_profit_target_pct_bear = debit_profit_target_pct_bear
         self.debit_stop_loss_pct_bull = debit_stop_loss_pct_bull
+        # 2026-11-09 (research_credit_vol.md): False skips the strike-
+        # proximity close for credit verticals; condors keep it.
+        self.credit_strike_proximity_exit = bool(credit_strike_proximity_exit)
 
     def _debit_target_pct(self, spread: "SpreadPosition") -> float:
         if spread.strategy_name == PUT_DEBIT_STRATEGY and self.debit_profit_target_pct_bear:
@@ -674,6 +686,7 @@ class PositionMonitor:
                 origin="trade_plan",
                 contracts_open=contracts_open,
                 opened_at=opened_at,
+                playbook=str(tp.get("playbook", "") or ""),
             )
             spreads.append(spread)
             matched_symbols.update(p.symbol for p in matched_legs)
@@ -1166,7 +1179,9 @@ class PositionMonitor:
             )
 
         # --- 4. Strike proximity guard (IMMEDIATE) ---
-        if underlying_price > 0 and spread.short_strikes:
+        prox_on = (self.credit_strike_proximity_exit
+                   or spread.strategy_name not in CREDIT_VERTICALS)
+        if prox_on and underlying_price > 0 and spread.short_strikes:
             for strike in spread.short_strikes:
                 proximity = abs(underlying_price - strike) / strike
                 if proximity <= self.strike_proximity_pct:
@@ -1184,7 +1199,7 @@ class PositionMonitor:
 
         # --- 6. Regime shift ---
         ticker = spread.underlying
-        if ticker in current_regimes:
+        if ticker in current_regimes and spread.playbook != VOL_BAND_PUT_PLAYBOOK:
             current_regime = current_regimes[ticker]
             expected_regime = STRATEGY_REGIME_MAP.get(spread.strategy_name)
             if expected_regime and current_regime != expected_regime:

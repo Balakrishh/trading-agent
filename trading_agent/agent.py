@@ -399,6 +399,8 @@ class TradingAgent:
             # 2026-11-06: put debits take profit earlier, call debits stop wider.
             debit_profit_target_pct_bear=self.preset.debit_profit_target_pct_bear,
             debit_stop_loss_pct_bull=self.preset.debit_stop_loss_pct_bull,
+            # 2026-11-09: optional skip of the 1 % strike-proximity close.
+            credit_strike_proximity_exit=self.preset.credit_strike_proximity_exit,
         )
         if hasattr(self.position_monitor, "earnings_lookup"):
             from trading_agent.earnings_calendar import next_earnings_date as _ned
@@ -2586,6 +2588,8 @@ class TradingAgent:
         if ev is None:
             return None
         self._trend_eval[ticker] = ev.to_journal_dict()
+        if getattr(plan, "playbook", "") == "vol_band_put":
+            return None      # journaled only — the playbook was tested without these filters
         return ev.block
 
     # ── Cool-down after a stop (2026-10-16) ─────────────────────────────

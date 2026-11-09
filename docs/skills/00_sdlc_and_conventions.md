@@ -267,6 +267,7 @@ Read this list as "if you're about to touch X, you must understand Y first."
 | Revenue growth / analyst revisions, the quality-at-lows long-option shadow scan, the Claude "why did it drop" label | [67 Quality-at-lows sleeve](67_quality_at_lows_sleeve.md) |
 | FOMC / CPI / jobs-report guard, implied-vs-realized floor, credit stress, dealer gamma | [68 Macro events, VRP, credit, gamma](68_macro_events_vrp_credit_gamma.md) |
 | Recording 0–1 DTE chains intraday for same-day research | [69 Intraday chain log](69_intraday_chain_log.md) |
+| Vol-band bull put playbook, turning off the credit strike-proximity close | [70 Vol-band bull put](70_vol_band_bull_put.md) |
 | Trailing profit-taking | [30 Profit-target management](30_profit_target_management.md) §3.1b |
 
 ## 8. Edge Cases / Guardrails
@@ -312,4 +313,4 @@ External documents:
 
 ---
 
-*Last verified against repo HEAD on 2026-11-06.*
+*Last verified against repo HEAD on 2026-11-09.*

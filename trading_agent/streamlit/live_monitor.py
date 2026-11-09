@@ -2992,6 +2992,43 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 float(getattr(seed, "intraday_chain_log_band_pct", 0.04)), 0.01,
                 key="cust_intraday_log_band")
 
+        # ── Vol-band bull put + credit proximity exit (research_credit_vol.md) ─
+        st.markdown("**Vol-band bull put** *(2026-11-09 — when no other plan is valid)*")
+        vb1, vb2, vb3, vb4 = st.columns(4)
+        with vb1:
+            vol_band_on = st.checkbox(
+                "Sell vol-band bull puts", bool(getattr(seed, "vol_band_put_enabled", False)),
+                key="cust_vol_band_on",
+                help="0.25Δ / ~21 DTE put spread while the vol rank is inside the band; "
+                     "no delta-aware C/W floor, no regime-shift exit.")
+            credit_prox = st.checkbox(
+                "Close credit verticals within 1 % of a short strike",
+                bool(getattr(seed, "credit_strike_proximity_exit", True)),
+                key="cust_credit_prox",
+                help="Off: bull puts / bear calls rely on the max-loss and 3× credit stops "
+                     "(also turns off defensive rolls for them). Condors keep the rule.")
+        with vb2:
+            vol_band_tickers = st.text_input(
+                "Tickers", ",".join(getattr(seed, "vol_band_put_tickers", ("SPY", "QQQ", "IWM"))),
+                key="cust_vol_band_tickers")
+            vol_band_dte = st.number_input(
+                "Target DTE", 7, 45, int(getattr(seed, "vol_band_put_dte", 21)), key="cust_vol_band_dte")
+        with vb3:
+            vol_band_rank = st.slider(
+                "Vol rank band", 0.0, 100.0,
+                (float(getattr(seed, "vol_band_put_min_rank", 50.0)),
+                 float(getattr(seed, "vol_band_put_max_rank", 80.0))), 5.0, key="cust_vol_band_rank")
+            vol_band_delta = st.slider(
+                "Short |Δ|", 0.10, 0.35, float(getattr(seed, "vol_band_put_short_delta", 0.25)), 0.01,
+                key="cust_vol_band_delta")
+        with vb4:
+            vol_band_width = st.slider(
+                "Max width (share of spot)", 0.005, 0.05,
+                float(getattr(seed, "vol_band_put_width_pct", 0.02)), 0.005, key="cust_vol_band_width")
+            vol_band_min_cw = st.slider(
+                "Min credit / width", 0.0, 0.40, float(getattr(seed, "vol_band_put_min_cw", 0.10)), 0.01,
+                key="cust_vol_band_min_cw")
+
         # ── Macro events + implied vs realized (skill 68) ─────────────
         st.markdown("**Macro events & implied vs realized** *(skill 68 — short premium only)*")
         mv1, mv2, mv3 = st.columns(3)
@@ -3270,6 +3307,16 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                                          if t.strip()] or ["SPY"],
         "intraday_chain_log_max_dte":   int(intraday_log_dte),
         "intraday_chain_log_band_pct":  float(intraday_log_band),
+        "credit_strike_proximity_exit": bool(credit_prox),
+        "vol_band_put_enabled":         bool(vol_band_on),
+        "vol_band_put_tickers":         [t.strip().upper() for t in vol_band_tickers.split(",")
+                                         if t.strip()],
+        "vol_band_put_min_rank":        float(vol_band_rank[0]),
+        "vol_band_put_max_rank":        float(vol_band_rank[1]),
+        "vol_band_put_dte":             int(vol_band_dte),
+        "vol_band_put_short_delta":     float(vol_band_delta),
+        "vol_band_put_width_pct":       float(vol_band_width),
+        "vol_band_put_min_cw":          float(vol_band_min_cw),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

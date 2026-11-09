@@ -90,6 +90,14 @@ def _spread(natural_pl, exp=None):
     return s
 
 
+@pytest.fixture(autouse=True)
+def _inside_exit_window(monkeypatch):
+    """The trail skips cycles before the exit window on the real clock
+    (2026-11-06); pin it open so these tests pass at any hour."""
+    from trading_agent import entry_confirmation
+    monkeypatch.setattr(entry_confirmation, "before_entry_window", lambda *a, **k: False)
+
+
 def _agent(mode, quotes=None):
     from trading_agent.agent import TradingAgent
     a = TradingAgent.__new__(TradingAgent)
