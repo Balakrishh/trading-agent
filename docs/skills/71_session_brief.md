@@ -15,7 +15,7 @@ The agent's own messages are reactive (opens, closes, the end-of-day recap). Bef
 ## 2. Mathematical Formula
 
 ```text
-change_pct      = (extended-hours last  or  regular last) / previous close − 1
+change_pct      = (the more recently traded of extended-hours last / regular last) / previous close − 1
 mover           ⇔ |change_pct| ≥ 1.5 %           (indexes SPY / QQQ / IWM / DIA always shown)
 debit target    = tp × debit $      tp = debit_profit_target_pct (bear: …_bear when set)
 debit stop      = −sl × debit $     sl = debit_stop_loss_pct (bull: …_bull when set)
@@ -100,6 +100,7 @@ def due(kind: str, now_et: datetime, sentinel_dir: Path = SENTINEL_DIR) -> Optio
 - **Holidays and late runs** — `Persistent=true` can start a missed timer after a reboot; `due()` skips non-trading days and anything outside 06:00–09:30 (pre-market) / 16:00–23:59 (tomorrow) ET.
 - **Twice in a day** — a `.session_brief_<kind>_<date>` sentinel in `trade_journal/` (atomic temp + rename), written only after Telegram accepted the message; a failed send retries on the next manual run.
 - **Pre-market quotes** — thin and indicative (the agent ignores anything before 09:30 as a mark); a ticker with no close or no trade shows nothing rather than 0 %. `/price` returned 0.0 for SPY at 07:20 ET on 2026-11-09, which is why the brief uses the close / extended fields instead.
+- **Stale extended block** — Schwab's `extended` fields can still hold the previous evening's after-hours trade (2026-11-09 07:30 ET: SPY extended 738.27 vs last 740.07); the price with the newer `tradeTime` wins.
 - **Stale market state** — the state comes from the last cycle (Friday's close on a Monday); the header says when.
 - **Allowed list vs preset** — the state's allowed list can name a structure the preset has switched off (bear calls); it is shown "(off)". A vol-band bull put (skill 70) is reported blocked when the state does not allow "Bull Put Spread".
 - **Tomorrow's flags** — judged on the next NYSE session (`next_sessions`), so Wednesday-before-Thanksgiving looks at Friday.

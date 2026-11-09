@@ -169,5 +169,18 @@ def test_session_quotes_parsing(monkeypatch):
         "BAD": "x"})
     out = md.fetch_session_quotes(["SPY", "QQQ", "BAD"])
     assert out["SPY"]["change_pct"] == pytest.approx(740 / 735.82 - 1)
-    assert out["QQQ"] == {"close": 650.0, "last": None, "extended": None, "change_pct": None}
+    assert out["QQQ"]["change_pct"] is None and out["QQQ"]["last"] is None
     assert "BAD" not in out
+
+
+def test_session_quotes_use_the_most_recent_trade(monkeypatch):
+    from trading_agent.market_data_schwab import SchwabMarketDataProvider
+    md = object.__new__(SchwabMarketDataProvider)
+    monkeypatch.setattr(md, "_get", lambda path, params=None, **k: {
+        "SPY": {"quote": {"closePrice": 700.0, "lastPrice": 707.0, "tradeTime": 2_000},
+                "extended": {"lastPrice": 701.0, "tradeTime": 1_000}},      # Friday after-hours
+        "QQQ": {"quote": {"closePrice": 600.0, "lastPrice": 600.0, "tradeTime": 1_000},
+                "extended": {"lastPrice": 606.0, "tradeTime": 2_000}}})     # this morning
+    out = md.fetch_session_quotes(["SPY", "QQQ"])
+    assert out["SPY"]["change_pct"] == pytest.approx(0.01)
+    assert out["QQQ"]["change_pct"] == pytest.approx(0.01)

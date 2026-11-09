@@ -336,8 +336,15 @@ class SchwabMarketDataProvider(MarketDataProvider):
                     return None
             close, last = num(q.get("closePrice")), num(q.get("lastPrice"))
             extended = num(ext.get("lastPrice")) or num(ext.get("mark"))
-            ref = extended or last
+            t_last, t_ext = num(q.get("tradeTime")), num(ext.get("tradeTime"))
+            # The extended block can still hold the previous evening's
+            # after-hours trade: use whichever price traded last.
+            if extended and last and t_ext and t_last:
+                ref = extended if t_ext > t_last else last
+            else:
+                ref = extended or last
             out[sym] = {"close": close, "last": last, "extended": extended,
+                        "last_time": t_last, "extended_time": t_ext,
                         "change_pct": (ref / close - 1) if ref and close else None}
         return out
 
