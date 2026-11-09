@@ -170,3 +170,45 @@ Options (none built):
    the max-loss and 3× credit stops) — the one finding that holds in
    every variant; affects the few credit spreads the agent does place.
 3. **Do nothing** — the edge is within noise and the return small.
+
+## 6. Bear calls with an implied-vs-realized gate (2026-11-09)
+
+Script: `scripts/research/bear_call_backtest.py` (backlog §15: "re-test
+bear calls on index ETFs with the IV/RV floor"). Bear call spreads on
+SPY / QQQ / IWM, one position per ticker at a time, real quotes, fills
+halfway; "bear" = close below a falling SMA50; IV/RV = ATM implied vol of
+the chosen expiry ÷ RV20; HighIV (rank > 95) blocks. Default shape 21
+DTE, 0.20Δ, 1 % wide, agent exits.
+
+| Variant | n | win | avg / $ | 2008–16 | 2017–25 | yearly | max DD | losing years | 95 % CI |
+|---|---|---|---|---|---|---|---|---|---|
+| bear, any IV/RV | 386 | 59 % | −0.059 | −0.102 | −0.025 | −2.5 % | 40.7 % | 15 / 18 | [−0.099, −0.022] |
+| bear, IV/RV ≥ 1.0 (live floor) | 253 | 56 % | −0.074 | −0.106 | −0.047 | −2.1 % | 34.1 % | 14 / 17 | [−0.120, −0.031] |
+| bear, IV/RV ≥ 1.2 | 145 | 57 % | −0.079 | −0.125 | −0.040 | −1.4 % | 23.6 % | 14 / 16 | [−0.142, −0.022] |
+| bear, IV/RV ≥ 1.3 | 101 | 55 % | −0.080 | −0.120 | −0.047 | −1.0 % | 17.2 % | 12 / 15 | [−0.151, −0.012] |
+| … no proximity exit | 141 | 70 % | −0.069 | −0.131 | −0.017 | −1.2 % | 21.0 % | 13 / 16 | [−0.148, +0.005] |
+| … 0.15Δ | 143 | 64 % | −0.074 | | | −1.3 % | | 14 / 16 | [−0.128, −0.024] |
+| … 14 DTE | 167 | 57 % | −0.070 | | | −1.3 % | | 15 / 17 | [−0.129, −0.015] |
+| … 2 % wide | 151 | 58 % | −0.064 | | | −1.1 % | | 14 / 17 | [−0.112, −0.016] |
+| … vol rank ≤ 80 | 120 | 58 % | −0.067 | | | −1.0 % | | 12 / 16 | [−0.134, −0.005] |
+| any trend, IV/RV ≥ 1.2 | 935 | 57 % | −0.049 | −0.058 | −0.043 | −5.3 % | 60.2 % | 16 / 17 | [−0.066, −0.032] |
+
+All entries by IV/RV (21d 0.20Δ 1 %, agent exits): every bucket loses,
+in and out of down-trends (−0.02 to −0.13 per $); the richest calls
+(IV/RV ≥ 1.5 in a down-trend) lose most, −0.134.
+
+What it shows:
+
+- **Bear calls lose on index ETFs under every gate, shape and exit
+  tested** — every 95 % interval but one lies below zero, and losing
+  years are 12–16 of 15–18. B6's finding holds on real quotes.
+- **A high implied-vs-realized ratio does not rescue them**: losses get
+  no smaller from ≥ 1.0 to ≥ 1.3. Rich call premium in a sell-off is
+  the market pricing the sharp short-covering rallies that hit sold
+  calls, not free premium.
+- Same pattern as the condors in §2 (their call side is what loses).
+
+Recommendation: **keep `bear_call_enabled` False**; close backlog §15
+"re-test bear calls" as tested-negative. On index ETFs in a down-trend
+the agent stays with put debits where allowed (DIA, sector ETFs) or no
+trade.

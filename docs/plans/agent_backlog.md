@@ -289,7 +289,7 @@ From the week's learnings (`docs/plans/journal_learnings.md`, −$760 on 6 close
 | Earnings exit for open positions | AMZN held through 10-29: −$403 of $460 | **built, live on paper** — `earnings_exit_enabled`, 1 session before (skill 65) |
 | Dealer-gamma net vs flip disagreed (SPY 10-28) | Net used Schwab's 3-decimal Γ, flip used BS | **fixed** — one BS Γ for both, rows tagged `gamma_source` (skill 68) |
 | Market state reads yesterday's SPY close | 10-30: state 769.36 vs SPY 756 | **option built, off** — `market_state_live_prices` (skill 58 §4); prior close was a deliberate choice (E5). Operator to decide |
-| Re-test bear calls on index ETFs with the IV/RV floor | B6 found short calls under-survived; IV/RV 1.2–1.3 on SPY/DIA | open — backtest first |
+| Re-test bear calls on index ETFs with the IV/RV floor | B6 found short calls under-survived; IV/RV 1.2–1.3 on SPY/DIA | tested 2026-11-09, negative — bear calls lose at every IV/RV gate on real SPY / QQQ / IWM quotes; keep `bear_call_enabled` False (research_credit_vol.md §6) |
 | Total-spread liquidity test instead of per-leg | ~5,300 put-debit `leg_spread_wide` rejects | open — measure ladder fills vs mid first |
 | Debit profit target judged at natural missed GLD (2026-11-06) | GLD 371/365 +$210 mid / +$130 natural vs $132.50 target, now −$50 | **built, live on paper** — `debit_exit_price="mid"`, capped mid-first close ladder (skill 59 §4) |
 | Fit to budget blocked by the fair-price check by a few cents (2026-11-06) | GLD 6-wide natural $2.75 vs cap $2.70, mid $2.575 under a $2.87 budget; 186 GLD + 48 QQQ size rejects | **built, live on paper** — `fit_to_budget_ladder`: ladder mid → cap, never natural (skill 59 §4) |
