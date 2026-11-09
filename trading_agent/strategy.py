@@ -68,6 +68,12 @@ class SpreadPlan:
     # Ladder fit (2026-11-06, skill 59 §3): priced at its fair-price cap;
     # the executor ladders mid → cap and never sends it at natural.
     ladder_only: bool = False
+    # Playbook tag (2026-11-09): "vol_band_put" marks the vol-band bull put
+    # (research_credit_vol.md §5); carried to the trade plan JSON so the
+    # monitor can find it. ``min_cw`` is a plan-specific C/W floor that
+    # RiskManager / the executor use instead of the delta-aware floor.
+    playbook: str = ""
+    min_cw: Optional[float] = None
 
     def to_dict(self) -> Dict:
         return {
@@ -94,6 +100,8 @@ class SpreadPlan:
             "max_debit": self.max_debit,
             "far_expiration": self.far_expiration,
             "ladder_only": self.ladder_only,
+            "playbook": self.playbook,
+            "min_cw": self.min_cw,
         }
 
 
@@ -463,6 +471,11 @@ class StrategyPlanner:
         #     the debit structure is the fallback when it finds nothing.
         #     When both fail the credit plan is returned (stable journal
         #     strategy names) with the fallback's reason appended.
+        return self._with_vol_band_put(ticker, analysis, self._plan_by_playbook(ticker, analysis))
+
+    def _plan_by_playbook(self, ticker: str, analysis: RegimeAnalysis) -> SpreadPlan:
+        """Priority 4 of ``_plan_body``: the regime's credit plan, else the
+        playbook's debit / calendar / bounce structure."""
         playbook = self._playbook_name(analysis)
         if playbook == "bear_call" and not self._bear_calls_enabled():
             playbook = "put_debit"      # B6: buy the put spread, never sell calls
@@ -497,6 +510,85 @@ class StrategyPlanner:
         credit_plan.rejection_reason = (
             f"{credit_plan.rejection_reason}; fallback {fallback.rejection_reason}")
         return credit_plan
+
+    # ------------------------------------------------------------------
+    # Vol-band bull put — 2026-11-09, docs/plans/research_credit_vol.md §5
+    # ------------------------------------------------------------------
+
+    def _with_vol_band_put(self, ticker: str, analysis: RegimeAnalysis,
+                           plan: SpreadPlan) -> SpreadPlan:
+        """Return ``plan`` when valid or a deliberate no-trade (empty
+        strategy name); otherwise try the vol-band bull put, appending
+        its reason to the original rejection when it finds nothing."""
+        if plan.valid or not plan.strategy_name:
+            return plan
+        vb = self._plan_vol_band_put(ticker, analysis)
+        if vb is None:
+            return plan
+        if vb.valid:
+            return vb
+        plan.rejection_reason = f"{plan.rejection_reason}; vol-band put {vb.rejection_reason}"
+        return plan
+
+    def _plan_vol_band_put(self, ticker: str, analysis: RegimeAnalysis) -> Optional[SpreadPlan]:
+        """A |Δ| ``vol_band_put_short_delta`` put spread ~``vol_band_put_dte``
+        out, widest listed width ≤ ``vol_band_put_width_pct`` of spot whose
+        natural max loss fits the per-trade budget. None when the playbook
+        is off, the ticker is not listed, or the vol rank is outside the band."""
+        from trading_agent.chain_scanner import _leg_spread_too_wide
+        pre = getattr(self, "preset", None)
+        if pre is None or not getattr(pre, "vol_band_put_enabled", False):
+            return None
+        if ticker not in tuple(pre.vol_band_put_tickers):
+            return None
+        rank = getattr(analysis, "iv_rank", None)
+        if rank is None or not (pre.vol_band_put_min_rank <= float(rank) < pre.vol_band_put_max_rank):
+            return None
+        name = "Bull Put Spread"
+        expiration = self._expiration_near(int(pre.vol_band_put_dte))
+        spot = float(getattr(analysis, "current_price", 0.0) or 0.0)
+        puts = [c for c in (self.data.fetch_option_chain(ticker, expiration, "put") or [])
+                if c.get("bid", 0) > 0 and c.get("ask", 0) > 0 and c.get("delta") is not None]
+        if not puts or spot <= 0:
+            return self._empty_plan(ticker, name, analysis, expiration, "no put chain")
+
+        def wide(c):
+            return _leg_spread_too_wide(c["bid"], c["ask"], pre.max_leg_spread_cents,
+                                        pre.max_leg_spread_pct_mid)
+
+        sold = min(puts, key=lambda c: abs(abs(c["delta"]) - pre.vol_band_put_short_delta))
+        if wide(sold):
+            return self._empty_plan(ticker, name, analysis, expiration,
+                                    f"short {sold['strike']:g} leg quotes too wide")
+        budget = self.max_loss_budget
+        max_width = pre.vol_band_put_width_pct * spot
+        best = None
+        for bought in sorted((c for c in puts if c["strike"] < sold["strike"]),
+                             key=lambda c: c["strike"]):
+            width = sold["strike"] - bought["strike"]
+            if width > max_width + 1e-9 or wide(bought):
+                continue
+            credit = sold["bid"] - bought["ask"]
+            if credit <= 0 or credit / width < pre.vol_band_put_min_cw:
+                continue
+            if budget and budget > 0 and (width - credit) * 100 > budget:
+                continue
+            best = bought
+            break                     # strikes ascend → the first fit is the widest
+        if best is None:
+            return self._empty_plan(
+                ticker, name, analysis, expiration,
+                f"no width ≤ {pre.vol_band_put_width_pct:.0%} of spot with C/W ≥ "
+                f"{pre.vol_band_put_min_cw:g} within the ${budget or 0:,.0f} risk cap")
+        plan = self._assemble_plan(ticker, name, analysis, expiration, sold, best, "put")
+        plan.playbook, plan.min_cw = "vol_band_put", float(pre.vol_band_put_min_cw)
+        plan.valid, plan.rejection_reason = True, ""     # min_cw replaces min_credit_ratio
+        plan.reasoning = (f"Vol-band bull put (vol rank {float(rank):.0f} in "
+                          f"[{pre.vol_band_put_min_rank:g}, {pre.vol_band_put_max_rank:g})). "
+                          + plan.reasoning)
+        logger.info("[%s] Vol-band bull put: %s/%s %s, credit $%.2f, width $%g",
+                    ticker, sold["strike"], best["strike"], expiration, plan.net_credit, plan.spread_width)
+        return plan
 
     def _plan_credit_by_regime(self, ticker: str,
                                analysis: RegimeAnalysis) -> SpreadPlan:

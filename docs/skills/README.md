@@ -89,6 +89,7 @@ Skills 40–65: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 67 | [Quality-at-Lows Sleeve](67_quality_at_lows_sleeve.md) | strategy / data_quality | `trading_agent/quality_lows.py`, `trading_agent/analyst_estimates.py`, `trading_agent/drop_cause_llm.py`, `trading_agent/news_aggregator.py`, `trading_agent/market_data_schwab.py`, `scripts/research/quality_lows_backtest.py`, `deploy/systemd/trading-agent-quality-lows.*` |
 | 68 | [Macro Events, Implied vs Realized, Credit Stress, Dealer Gamma](68_macro_events_vrp_credit_gamma.md) | risk / data_quality | `trading_agent/macro_vol_gates.py`, `trading_agent/macro_calendar.py`, `trading_agent/market_state.py`, `trading_agent/gamma_exposure.py`, `trading_agent/data_server/market_context.py`, `scripts/research/macro_vrp_credit_study.py`, `deploy/systemd/trading-agent-gamma.*` |
 | 69 | [Intraday Option-Chain Log](69_intraday_chain_log.md) | data_quality | `trading_agent/intraday_chain_log.py`, `trading_agent/calendar_utils.py`, `trading_agent/agent.py` |
+| 70 | [Vol-Band Bull Put and the Credit Proximity Switch](70_vol_band_bull_put.md) | strategy / risk | `trading_agent/strategy.py`, `trading_agent/position_monitor.py`, `trading_agent/risk_manager.py`, `trading_agent/executor.py`, `scripts/research/put_spread_playbook_backtest.py` |
 
 ## Phase 2 (planned, not yet written)
 

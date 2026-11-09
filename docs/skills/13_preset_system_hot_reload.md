@@ -303,6 +303,8 @@ self.risk_manager = RiskManager(
 
 - **Intraday chain log fields (2026-11-06, skill 69).** `intraday_chain_log_mode` ("off" default; only "off" / "on" — anything else falls back with a warning in `_coerce_overrides`), `intraday_chain_log_tickers` (("SPY",), a `_TUPLE_FIELDS` member), `intraday_chain_log_max_dte` (1), `intraday_chain_log_band_pct` (0.04), `intraday_chain_log_interval_s` (60). Read from `self.preset` by `TradingAgent._maybe_log_intraday_chains`; summary token `Intraday chain log SPY ≤1DTE ±4%` (only when on, via `_intraday_log_tag()`); Strategy-Profile block "Intraday option-chain log". Research data only — no decision reads it.
 
+- **Vol-band bull put fields (2026-11-09, skill 70).** `vol_band_put_enabled` (False), `vol_band_put_tickers` (SPY, QQQ, IWM; a `_TUPLE_FIELDS` member), `vol_band_put_min_rank` / `_max_rank` (50 / 80; an inverted or out-of-range band is warned and dropped in `_coerce_overrides`), `vol_band_put_dte` (21), `vol_band_put_short_delta` (0.25), `vol_band_put_width_pct` (0.02), `vol_band_put_min_cw` (0.10), `credit_strike_proximity_exit` (True, threaded to `PositionMonitor`). Summary tokens via `_vol_band_tag()`: `VolBandPut … C/W≥0.1`, `Credit prox exit off`.
+
 ## 5. Cross-References
 
 - [03 Credit/Width floor](03_credit_to_width_floor.md) — the `min_credit_ratio` knob in static mode; `edge_buffer` in adaptive mode.
@@ -312,4 +314,4 @@ self.risk_manager = RiskManager(
 
 ---
 
-*Last verified against repo HEAD on 2026-11-06.*
+*Last verified against repo HEAD on 2026-11-09.*

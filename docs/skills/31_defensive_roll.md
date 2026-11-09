@@ -139,6 +139,8 @@ if (spread.exit_signal == ExitSignal.STRIKE_PROXIMITY
 - **Per-leg liquidity gate still applies.** The new candidate's chain has the same skill-29 leg-spread floor — a roll into an illiquid leg is rejected at risk-evaluate time, falling through to the normal close.
 - **Close half uses `close_spread` (2026-10-14).** When its per-leg fallback runs, each leg DELETE now waits for the previous leg's fill, and a close that only partly fills is remembered in `partial_close_legs.json` (skill 17 §4). An unfinished close still aborts the roll's open half, as before.
 
+- **Proximity close off (2026-11-09, skill 70).** Rolls are evaluated on the STRIKE_PROXIMITY signal; with `credit_strike_proximity_exit` False that signal no longer fires for credit verticals, so they are never rolled — they stop out on max loss instead. Condors can still roll.
+
 ## 5. Cross-References
 
 - `03_credit_to_width_floor.md` — `|Δshort|×(1+edge_buffer)` floor reused by predicate P4. A roll must clear the same floor as a fresh open; no defensive-discount.
@@ -149,4 +151,4 @@ if (spread.exit_signal == ExitSignal.STRIKE_PROXIMITY
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-11-09.*

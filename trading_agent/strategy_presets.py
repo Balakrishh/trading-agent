@@ -542,6 +542,26 @@ class PresetConfig:
     intraday_chain_log_max_dte:        int   = 1
     intraday_chain_log_band_pct:       float = 0.04
     intraday_chain_log_interval_s:     float = 60.0
+    # Credit-vertical strike-proximity exit (2026-11-09,
+    # docs/plans/research_credit_vol.md §2/§5): False skips the "underlying
+    # within 1 % of a short strike" close for bull puts / bear calls — on
+    # real quotes it cut 0.25Δ put spreads from 86 % to 66 % winners and
+    # cost ~0.008 per $ risked. The max-loss and 3× credit stops still run.
+    credit_strike_proximity_exit:      bool  = True
+    # Vol-band bull put playbook (2026-11-09, research_credit_vol.md §5):
+    # when no other plan is valid, sell a 0.25Δ / ~21 DTE put spread on
+    # these tickers while the vol rank (regime iv_rank, 0–100) is in
+    # [min_rank, max_rank). Width: up to width_pct of spot, narrowed to fit
+    # the per-trade risk cap. Skips the delta-aware C/W floor (min_cw
+    # instead), the RS / pullback filters and the regime-shift exit.
+    vol_band_put_enabled:              bool  = False
+    vol_band_put_tickers:              Tuple[str, ...] = ("SPY", "QQQ", "IWM")
+    vol_band_put_min_rank:             float = 50.0
+    vol_band_put_max_rank:             float = 80.0
+    vol_band_put_dte:                  int   = 21
+    vol_band_put_short_delta:          float = 0.25
+    vol_band_put_width_pct:            float = 0.02
+    vol_band_put_min_cw:               float = 0.10
 
     # ------------------------------------------------------------------
     # Convenience
@@ -595,7 +615,16 @@ class PresetConfig:
                 f"Trend200 {self.trend200_filter_mode} • "
                 f"VolRegime {self.vol_regime_filter_mode} bull≤{self.vol_regime_bull_max_rank:g}"
                 f"/bear≤{self.vol_regime_bear_max_rank:g}"
-                f"{self._intraday_log_tag()}")
+                f"{self._intraday_log_tag()}{self._vol_band_tag()}")
+
+    def _vol_band_tag(self) -> str:
+        tag = "" if self.credit_strike_proximity_exit else " • Credit prox exit off"
+        if self.vol_band_put_enabled:
+            tag += (f" • VolBandPut {','.join(self.vol_band_put_tickers)} "
+                    f"rank {self.vol_band_put_min_rank:g}–{self.vol_band_put_max_rank:g} "
+                    f"Δ{self.vol_band_put_short_delta:.2f} {self.vol_band_put_dte}d "
+                    f"≤{self.vol_band_put_width_pct:.0%} C/W≥{self.vol_band_put_min_cw:g}")
+        return tag
 
     def _intraday_log_tag(self) -> str:
         if self.intraday_chain_log_mode != "on":
@@ -856,7 +885,7 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 # ---------------------------------------------------------------------------
 
 _TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct", "put_debit_excluded_tickers",
-                 "debit_excluded_tickers", "intraday_chain_log_tickers",
+                 "debit_excluded_tickers", "intraday_chain_log_tickers", "vol_band_put_tickers",
                  "macro_event_kinds",
                  "iron_butterfly_dte_grid", "iron_butterfly_wing_width_pct",
                  "cc_dte_band", "csp_dte_band", "csp_strike_band"}
@@ -894,6 +923,10 @@ def _coerce_overrides(overrides: Dict) -> Dict:
                  "vol_regime_filter_mode"):
         if out.get(mode) not in (None, "off", "shadow", "live"):
             logger.warning("Invalid %s %r — using the default", mode, out.pop(mode))
+    lo, hi = out.get("vol_band_put_min_rank"), out.get("vol_band_put_max_rank")
+    if lo is not None and hi is not None and not (0 <= float(lo) < float(hi) <= 100):
+        logger.warning("Invalid vol_band_put rank band %r–%r — using the defaults", lo, hi)
+        out.pop("vol_band_put_min_rank"), out.pop("vol_band_put_max_rank")
     if out.get("intraday_chain_log_mode") not in (None, "off", "on"):
         logger.warning("Invalid intraday_chain_log_mode %r — using the default",
                        out.pop("intraday_chain_log_mode"))
