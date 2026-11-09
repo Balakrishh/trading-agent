@@ -1,0 +1,14 @@
+# Session brief — one shot, started by trading-agent-brief-tomorrow.timer
+# (skill 71). Reads the data server and the agent's own files; sends one
+# Telegram message; never places or stages an order.
+[Unit]
+Description=Trading agent plan-for-tomorrow brief
+After=trading-agent-data-server.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/trading-agent
+ExecStart=%h/Documents/trading-agent/myenv/bin/python -m trading_agent.session_brief tomorrow
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/tmp/trading-agent.brief-tomorrow.out.log
+StandardError=append:/tmp/trading-agent.brief-tomorrow.err.log

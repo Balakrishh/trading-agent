@@ -268,6 +268,7 @@ Read this list as "if you're about to touch X, you must understand Y first."
 | FOMC / CPI / jobs-report guard, implied-vs-realized floor, credit stress, dealer gamma | [68 Macro events, VRP, credit, gamma](68_macro_events_vrp_credit_gamma.md) |
 | Recording 0–1 DTE chains intraday for same-day research | [69 Intraday chain log](69_intraday_chain_log.md) |
 | Vol-band bull put playbook, turning off the credit strike-proximity close | [70 Vol-band bull put](70_vol_band_bull_put.md) |
+| The 09:00 pre-market brief and 16:20 plan-for-tomorrow Telegram messages | [71 Session brief](71_session_brief.md) |
 | Trailing profit-taking | [30 Profit-target management](30_profit_target_management.md) §3.1b |
 
 ## 8. Edge Cases / Guardrails

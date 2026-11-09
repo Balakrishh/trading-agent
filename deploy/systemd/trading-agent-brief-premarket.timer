@@ -1,0 +1,11 @@
+# 09:00 ET on weekdays, whatever the Pi's own timezone is. Holidays, late
+# (Persistent) runs outside the window and repeats exit without sending.
+[Unit]
+Description=Send the trading agent pre-market brief at 09:00 ET on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri 09:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -231,6 +231,8 @@ Same thresholds and functions as the agent (`credit_stress_pct`, `iv_rv_ratio`, 
 - **Market-context routes read local snapshots (2026-10-27).** `/market-context` returns the agent's last `market_state.json` (with `age_seconds`), `/vol` the newest vol-surface row ≤ 4 days old, `/gamma` the newest gamma row — none of them call Schwab. A failed piece of `/market-context` becomes `null` plus a `notes` entry; `/credit-stress` alone returns 502 `context_upstream` when the history fetch raises. `/credit-stress` and `/vol` are cached 15 minutes (their inputs are daily).
 - **Gamma rows need the restarted server.** `open_interest` appears on `/chain` only after the data server restarts on the 2026-10-27 code; the recorder refuses to write rows without it.
 
+- **`GET /session-quotes?tickers=…` (2026-11-09, skill 71).** Previous close, last regular trade, last extended-hours trade and the change vs the close per ticker (≤ 40 tickers, uncached) from `SchwabMarketDataProvider.fetch_session_quotes` (`/quotes?fields=quote,extended`); 501 when the provider lacks it. Used by the pre-market brief because `/price` can read 0 before the open.
+
 ## 5. Cross-References
 
 - `16_market_data_provider_routing.md` — the underlying provider this server wraps. When the surface routing picks Schwab, we're calling the same code path this server exposes.
@@ -243,4 +245,4 @@ Same thresholds and functions as the agent (`credit_stress_pct`, `iv_rv_ratio`, 
 
 ---
 
-*Last verified against repo HEAD on 2026-10-27.*
+*Last verified against repo HEAD on 2026-11-09.*

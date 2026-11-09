@@ -197,6 +197,19 @@ def build_app(
             raise _upstream_error(exc)
         return {"ticker": t, "price": value}
 
+    @app.get("/session-quotes", dependencies=[Depends(auth_dep)])
+    async def session_quotes(tickers: str) -> Dict[str, Any]:
+        """Close / last / extended-hours price per ticker (skill 71)."""
+        syms = [_validate_ticker(t) for t in tickers.split(",") if t.strip()][:40]
+        fetch = getattr(provider, "fetch_session_quotes", None)
+        if fetch is None:
+            raise HTTPException(status_code=501, detail={"error": "not_supported"})
+        try:
+            data = fetch(syms)
+        except Exception as exc:                                # noqa: BLE001
+            raise _upstream_error(exc)
+        return {"count": len(data), "quotes": data}
+
     @app.get("/chain/{underlying}", dependencies=[Depends(auth_dep)])
     async def chain(
         underlying: str,
