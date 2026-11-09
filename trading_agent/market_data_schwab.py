@@ -311,6 +311,36 @@ class SchwabMarketDataProvider(MarketDataProvider):
         # back keyed differently; we only return what Schwab actually sent.
         return out
 
+    def fetch_session_quotes(self, tickers: List[str]) -> Dict[str, Dict[str, Optional[float]]]:
+        """Pre-/post-market view per ticker (skill 71, uncached):
+        ``close`` = last regular-session close, ``last`` = last regular
+        trade, ``extended`` = last extended-hours trade (or mark), and
+        ``change_pct`` = (extended or last) ÷ close − 1. Missing values
+        are None; the brief shows only what Schwab sent."""
+        if not tickers:
+            return {}
+        body = self._get("/quotes", params={"symbols": ",".join(tickers),
+                                            "fields": "quote,extended"})
+        if not isinstance(body, dict):
+            return {}
+        out: Dict[str, Dict[str, Optional[float]]] = {}
+        for sym, payload in body.items():
+            if not isinstance(payload, dict):
+                continue
+            q, ext = payload.get("quote") or {}, payload.get("extended") or {}
+
+            def num(v):
+                try:
+                    return float(v) if v not in (None, 0, 0.0) else None
+                except (TypeError, ValueError):
+                    return None
+            close, last = num(q.get("closePrice")), num(q.get("lastPrice"))
+            extended = num(ext.get("lastPrice")) or num(ext.get("mark"))
+            ref = extended or last
+            out[sym] = {"close": close, "last": last, "extended": extended,
+                        "change_pct": (ref / close - 1) if ref and close else None}
+        return out
+
     def get_current_price(self, ticker: str) -> float:
         """Single-ticker spot price.  Delegates to batch with one symbol."""
         prices = self.fetch_batch_snapshots([ticker])

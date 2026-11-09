@@ -90,6 +90,7 @@ Skills 40–65: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 68 | [Macro Events, Implied vs Realized, Credit Stress, Dealer Gamma](68_macro_events_vrp_credit_gamma.md) | risk / data_quality | `trading_agent/macro_vol_gates.py`, `trading_agent/macro_calendar.py`, `trading_agent/market_state.py`, `trading_agent/gamma_exposure.py`, `trading_agent/data_server/market_context.py`, `scripts/research/macro_vrp_credit_study.py`, `deploy/systemd/trading-agent-gamma.*` |
 | 69 | [Intraday Option-Chain Log](69_intraday_chain_log.md) | data_quality | `trading_agent/intraday_chain_log.py`, `trading_agent/calendar_utils.py`, `trading_agent/agent.py` |
 | 70 | [Vol-Band Bull Put and the Credit Proximity Switch](70_vol_band_bull_put.md) | strategy / risk | `trading_agent/strategy.py`, `trading_agent/position_monitor.py`, `trading_agent/risk_manager.py`, `trading_agent/executor.py`, `scripts/research/put_spread_playbook_backtest.py` |
+| 71 | [Pre-Market Brief and Plan for Tomorrow](71_session_brief.md) | ops | `trading_agent/session_brief.py`, `trading_agent/market_data_schwab.py`, `trading_agent/data_server/app.py`, `deploy/systemd/trading-agent-brief-*` |
 
 ## Phase 2 (planned, not yet written)
 

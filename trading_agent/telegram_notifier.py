@@ -422,6 +422,13 @@ class TelegramNotifier:
         )
         return self._send(text, channel="info")
 
+    def notify_session_brief(self, text: str) -> bool:
+        """Pre-market brief / plan for tomorrow (skill 71), pre-rendered
+        HTML. Info channel; Telegram caps a message at 4,096 characters."""
+        if len(text) > 4000:
+            text = text[:3990] + "\n…"
+        return self._send(text, channel="info")
+
     def notify_eod_summary(self, *,
                            date_label: str,
                            account_balance: float,

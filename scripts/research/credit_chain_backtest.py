@@ -126,7 +126,7 @@ def select(day: pd.DataFrame, shape, spot: float) -> Optional[dict]:
         return None
     exp = near.iloc[(near["dte"] - dte).abs().argsort().iloc[0]]["expiration"]
     d = day[day["expiration"] == exp]
-    legs = [vertical(d, "put", delta, width, spot)]
+    legs = [vertical(d, "call" if kind == "call" else "put", delta, width, spot)]
     if kind == "condor":
         legs.append(vertical(d, "call", delta, width, spot))
     if any(v is None for v in legs):
