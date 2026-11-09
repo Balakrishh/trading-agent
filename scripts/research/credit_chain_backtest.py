@@ -76,13 +76,13 @@ SHAPES = [  # (structure, dte, |Δ|, width % of spot)
 ENTRY_FRAC = 0.5
 
 
-def load(data: Path, tk: str):
+def load(data: Path, tk: str, max_dte: int = 26):
     t = pq.read_table(data / f"{tk}_options.parquet",
                       columns=["date", "expiration", "strike", "type", "bid", "ask",
                                "delta", "implied_volatility"]).to_pandas()
     t["type"] = t["type"].astype(str)
     t["dte"] = (t["expiration"] - t["date"]).dt.days
-    t = t[(t["dte"] >= 0) & (t["dte"] <= 26) & (t["ask"] > 0)]
+    t = t[(t["dte"] >= 0) & (t["dte"] <= max_dte) & (t["ask"] > 0)]
     t["date"] = t["date"].dt.date
     t["expiration"] = t["expiration"].dt.date
     u = pd.read_parquet(data / f"{tk}_underlying.parquet", columns=["date", "close"])
@@ -138,8 +138,8 @@ def select(day: pd.DataFrame, shape, spot: float) -> Optional[dict]:
                 floor=all(v["mid"] / v["w"] >= v["d"] for v in legs), atm_iv=float(atm))
 
 
-def simulate(tr: dict, by_leg, closes: Dict[date, float], start: date, ex: Exits) -> Optional[Tuple[float, str]]:
-    """Return (P&L per $ risked, exit reason)."""
+def simulate(tr: dict, by_leg, closes: Dict[date, float], start: date, ex: Exits) -> Optional[Tuple[float, str, date]]:
+    """Return (P&L per $ risked, exit reason, exit session)."""
     frames = []
     for v in tr["legs"]:
         a, b = by_leg.get((tr["exp"], v["ks"], v["opt"])), by_leg.get((tr["exp"], v["kl"], v["opt"]))
@@ -177,13 +177,13 @@ def simulate(tr: dict, by_leg, closes: Dict[date, float], start: date, ex: Exits
         elif last:
             reason = "dte"
         if reason:
-            return max(-risk, min(credit, pl_fill)) / risk, reason
+            return max(-risk, min(credit, pl_fill)) / risk, reason, r.Index
     spot = closes.get(tr["exp"])
     if spot is None:
         return None
     intr = sum(max(0.0, min(v["w"], (v["ks"] - spot) if v["opt"] == "put" else (spot - v["ks"])))
                for v in tr["legs"])
-    return (credit - intr) / risk, "expiry"
+    return (credit - intr) / risk, "expiry", tr["exp"]
 
 
 def labels(c: List[float], i: int) -> dict:
