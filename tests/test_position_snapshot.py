@@ -55,3 +55,39 @@ def test_mcp_tool_reads_snapshot(tmp_path, monkeypatch):
     write_snapshot(build_snapshot([_spread()], {}), fp)
     out = get_position_valuations()
     assert out["source"] == "agent_monitor" and out["positions"][0]["mid_pl"] == -112.0
+
+
+# ── flat book (2026-11-12) ──────────────────────────────────────────────
+
+def _monitor_self(positions, fp, monkeypatch):
+    import trading_agent.position_snapshot as ps
+    from trading_agent.agent import TradingAgent
+    monkeypatch.setattr(ps, "SNAPSHOT_PATH", fp)
+    monkeypatch.setattr(ps.write_snapshot, "__defaults__", (fp,))
+    return SimpleNamespace(
+        _reconcile_wheel_expirations=lambda: None,
+        position_monitor=SimpleNamespace(fetch_open_positions=lambda: positions),
+        _apply_profit_trail=lambda spreads: spreads,
+        _publish_valuations=TradingAgent._publish_valuations,
+        journal_kb=SimpleNamespace(log_warning=lambda **k: None)), TradingAgent
+
+
+def test_flat_book_clears_the_previous_snapshot(tmp_path, monkeypatch):
+    """A closed position must not linger as broker_only once the broker is flat."""
+    from trading_agent.book_view import merge_rows
+    fp = tmp_path / "v.json"
+    write_snapshot(build_snapshot([_spread()], {}), fp)
+    me, agent_cls = _monitor_self([], fp, monkeypatch)
+    out = agent_cls._stage_monitor(me, 28_000.0)
+    snap = read_snapshot(fp)
+    assert out["fetch_failed"] is False and snap["positions"] == []
+    assert merge_rows([], snap) == []
+
+
+def test_failed_fetch_keeps_the_last_snapshot(tmp_path, monkeypatch):
+    """Unknown broker state (RPC failed) must not erase what we last saw."""
+    fp = tmp_path / "v.json"
+    write_snapshot(build_snapshot([_spread()], {}), fp)
+    me, agent_cls = _monitor_self(None, fp, monkeypatch)
+    assert agent_cls._stage_monitor(me, 28_000.0)["fetch_failed"] is True
+    assert read_snapshot(fp)["positions"][0]["ticker"] == "SPY"

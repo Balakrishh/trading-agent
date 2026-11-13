@@ -147,6 +147,7 @@ Preset fields (Strategy-Profile block "Vol-band bull put"): `vol_band_put_enable
 - **Proximity off** — bull puts / bear calls rely on the 50 %-of-max-loss and 3× credit stops and DTE safety; iron condors and the bounce bull put keep the proximity close. Defensive rolls (skill 31) trigger on the proximity signal, so they stop for credit verticals too.
 - **Trade plan rotated out** — an inferred position has no playbook tag and gets the regime-shift exit again (conservative).
 - **Rank band misconfigured** (min ≥ max or outside 0–100) — warned in `_coerce_overrides`, defaults used.
+- **CAUTION above SMA-200 (2026-11-12, `vol_band_put_in_caution`, live on paper).** The skill-58 gate blocks "Bull Put Spread" in CAUTION, which is where the playbook backtested best: SPY < SMA-50 with the ticker above its SMA-200 gave +0.037/$, 90 % wins (n=154); below SMA-200 −0.025/$, 77 % (n=114). `TradingAgent._market_gate_block` lets a `playbook == "vol_band_put"` plan through only in CAUTION (not RISK_OFF) and only when `current_price > sma_200`; a missing price or SMA fails closed. The CAUTION size multiplier (×0.5) still sets the budget. Account effect 2008–2025: CAGR +0.9 % → +1.1 %, max DD 8.6 % → 8.2 %; CI still spans 0 (`research_credit_vol.md` §8).
 - **Review point** — after ~30 closes compare the journal's realized P&L per $ risked with the backtest (+0.024); turn it off if it is negative by then.
 
 ## 5. Cross-References
@@ -159,4 +160,4 @@ Preset fields (Strategy-Profile block "Vol-band bull put"): `vol_band_put_enable
 
 ---
 
-*Last verified against repo HEAD on 2026-11-09.*
+*Last verified against repo HEAD on 2026-11-12.*

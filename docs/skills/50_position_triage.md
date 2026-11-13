@@ -57,6 +57,7 @@ Claude then applies the three predicates in priority order (profit target → st
 - **Position fields (2026-09-29)** — `get_position` now searches all open positions (not just today's) and returns `short_strikes` (list), `width`, `max_loss`, `opened_at`. Use `short_strikes` for the proximity predicate; if null (trade plan aged out), read strikes from the broker legs.
 
 - **One valuation source (2026-10-05).** Triage reads `get_position_valuations()` — the monitor's own mid P&L / exit signal written each cycle to `trade_journal/position_valuations.json` (`trading_agent/position_snapshot.py`) — instead of pricing legs itself. Mixing feeds produced a −$392 vs −$112 disagreement and a wrong "close now" verdict on 2026-09-30.
+- **Flat book clears the snapshot (2026-11-12).** The snapshot was only written when the monitor had spreads to value, so after the last close (IWM put debit, 2026-11-09 18:50 UTC) the old file stayed and `list_positions` / the session briefs showed a "broker_only" IWM row with $260 of bear risk for three days. `_stage_monitor` now calls `_publish_valuations([], {})` when the broker confirms no positions. A failed broker fetch (`None`) keeps the last snapshot — unknown state is not "flat". Unmatched positions (no trade plan) also keep it.
 
 ## 5. Cross-References
 
@@ -67,4 +68,4 @@ Claude then applies the three predicates in priority order (profit target → st
 
 ---
 
-*Last verified against repo HEAD on 2026-10-05.*
+*Last verified against repo HEAD on 2026-11-12.*

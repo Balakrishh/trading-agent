@@ -1174,6 +1174,16 @@ class TradingAgent:
         except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — reconcile is best-effort; retried next cycle
             logger.warning("Wheel expiry reconcile failed: %s", exc)
 
+    @staticmethod
+    def _publish_valuations(spreads, underlying_prices: Dict[str, float]) -> None:
+        """Skill 50 — publish the monitor's own valuation so /triage reads
+        the same mid P&L the exit rules just used (not a second feed)."""
+        try:
+            from trading_agent.position_snapshot import build_snapshot, write_snapshot
+            write_snapshot(build_snapshot(spreads, underlying_prices))
+        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — snapshot is a read-side convenience
+            logger.warning("Position valuation snapshot not written: %s", exc)
+
     def _stage_monitor(self, account_balance: float) -> Dict:
         """
         Fetch positions, classify regimes, evaluate exit signals,
@@ -1223,6 +1233,9 @@ class TradingAgent:
         if not positions:
             logger.info("No open option positions found.")
             self._apply_profit_trail([])   # broker confirms none: settle tracked positions
+            # Broker confirms a flat book: publish an empty snapshot so the
+            # last cycle's rows don't linger as "broker_only" (2026-11-09).
+            self._publish_valuations([], {})
             return {"total_spreads": 0, "positions": [], "closed": [],
                     "fetch_failed": False}
 
@@ -1270,13 +1283,7 @@ class TradingAgent:
             spreads, current_regimes, underlying_prices)
         spreads = self._apply_profit_trail(spreads)
 
-        # Skill 50 — publish the monitor's own valuation so /triage reads
-        # the same mid P&L the exit rules just used (not a second feed).
-        try:
-            from trading_agent.position_snapshot import build_snapshot, write_snapshot
-            write_snapshot(build_snapshot(spreads, underlying_prices))
-        except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — snapshot is a read-side convenience
-            logger.warning("Position valuation snapshot not written: %s", exc)
+        self._publish_valuations(spreads, underlying_prices)
 
         # ── PDT same-day-open detection ─────────────────────────────────
         # Build the set of tickers with action="submitted" today (UTC).
@@ -2569,6 +2576,23 @@ class TradingAgent:
             out[RS_BENCHMARK]["benchmark"] = True
         return out
 
+    def _market_gate_block(self, plan, analysis) -> Optional[str]:
+        """Skill 58 gate, except a vol-band put in CAUTION on a ticker above
+        its SMA-200 when ``vol_band_put_in_caution`` is on (2026-11-12)."""
+        block = market_state.gate_failure(
+            self._market_state, plan.strategy_name,
+            [l.option_type for l in plan.legs if l.action == "sell"])
+        if (block and getattr(plan, "playbook", "") == "vol_band_put"
+                and bool(getattr(self.preset, "vol_band_put_in_caution", False))
+                and getattr(self._market_state, "state", None) == "CAUTION"):
+            price = float(getattr(analysis, "current_price", 0.0) or 0.0)
+            sma200 = float(getattr(analysis, "sma_200", 0.0) or 0.0)
+            if price > 0 and sma200 > 0 and price > sma200:
+                logger.info("[%s] vol-band put allowed in CAUTION (%.2f > SMA-200 %.2f)",
+                            plan.ticker, price, sma200)
+                return None
+        return block
+
     def _trend_filter_block(self, ticker: str, plan, analysis) -> Optional[str]:
         """Evaluate the trend filters for a valid, approved plan; journal
         the verdict and return a failed-check text only in live mode."""
@@ -3097,9 +3121,7 @@ class TradingAgent:
         # (e.g. no new bull puts in CAUTION). Recorded as a failed check so
         # the journal reason reads "risk: market_state_<STATE>_blocks_…".
         if plan.valid and verdict.approved:
-            block = (market_state.gate_failure(
-                         self._market_state, plan.strategy_name,
-                         [l.option_type for l in plan.legs if l.action == "sell"])
+            block = (self._market_gate_block(plan, analysis)
                      or self._ladder_block(ticker, plan.expiration)
                      or self._stop_cooldown_block(ticker, plan)
                      or self._direction_risk_block(ticker, plan, balance)

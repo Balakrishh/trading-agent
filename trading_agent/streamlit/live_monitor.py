@@ -3001,6 +3001,12 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 key="cust_vol_band_on",
                 help="0.25Δ / ~21 DTE put spread while the vol rank is inside the band; "
                      "no delta-aware C/W floor, no regime-shift exit.")
+            vol_band_caution = st.checkbox(
+                "…also in CAUTION when above SMA-200",
+                bool(getattr(seed, "vol_band_put_in_caution", False)),
+                key="cust_vol_band_caution",
+                help="The market-state gate otherwise blocks bull puts in CAUTION. "
+                     "Half size (the CAUTION multiplier) still applies.")
             credit_prox = st.checkbox(
                 "Close credit verticals within 1 % of a short strike",
                 bool(getattr(seed, "credit_strike_proximity_exit", True)),
@@ -3317,6 +3323,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "vol_band_put_short_delta":     float(vol_band_delta),
         "vol_band_put_width_pct":       float(vol_band_width),
         "vol_band_put_min_cw":          float(vol_band_min_cw),
+        "vol_band_put_in_caution":      bool(vol_band_caution),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to
