@@ -179,9 +179,12 @@ def _entry_lines(ctx: Dict[str, Any]) -> List[str]:
     if getattr(pre, "vol_band_put_enabled", False):
         allowed = (ctx.get("market_state") or {}).get("gate", {}).get("allowed_strategies")
         blocked = allowed is not None and "Bull Put Spread" not in allowed
+        state = (ctx.get("market_state") or {}).get("state")
+        caution_ok = blocked and state == "CAUTION" and getattr(pre, "vol_band_put_in_caution", False)
         out.append(f"  Vol-band bull put ({_e(','.join(pre.vol_band_put_tickers))}, rank "
                    f"{pre.vol_band_put_min_rank:g}–{pre.vol_band_put_max_rank:g})"
-                   + (": blocked by the market state" if blocked else ": eligible"))
+                   + (": CAUTION — only above SMA-200, half size" if caution_ok
+                      else ": blocked by the market state" if blocked else ": eligible"))
     return out or ["  no ticker-level blocks"]
 
 

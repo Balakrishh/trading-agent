@@ -562,6 +562,9 @@ class PresetConfig:
     vol_band_put_short_delta:          float = 0.25
     vol_band_put_width_pct:            float = 0.02
     vol_band_put_min_cw:               float = 0.10
+    # 2026-11-12: also trade it under CAUTION when the ticker is above its
+    # SMA-200 (research_credit_vol.md §8: +0.037/$ vs −0.025/$ below it).
+    vol_band_put_in_caution:           bool  = False
 
     # ------------------------------------------------------------------
     # Convenience
@@ -623,7 +626,8 @@ class PresetConfig:
             tag += (f" • VolBandPut {','.join(self.vol_band_put_tickers)} "
                     f"rank {self.vol_band_put_min_rank:g}–{self.vol_band_put_max_rank:g} "
                     f"Δ{self.vol_band_put_short_delta:.2f} {self.vol_band_put_dte}d "
-                    f"≤{self.vol_band_put_width_pct:.0%} C/W≥{self.vol_band_put_min_cw:g}")
+                    f"≤{self.vol_band_put_width_pct:.0%} C/W≥{self.vol_band_put_min_cw:g}"
+                    + (" CAUTION>SMA200" if self.vol_band_put_in_caution else ""))
         return tag
 
     def _intraday_log_tag(self) -> str:

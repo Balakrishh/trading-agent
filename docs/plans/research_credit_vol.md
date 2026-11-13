@@ -212,3 +212,38 @@ Recommendation: **keep `bear_call_enabled` False**; close backlog §15
 "re-test bear calls" as tested-negative. On index ETFs in a down-trend
 the agent stays with put debits where allowed (DIA, sector ETFs) or no
 trade.
+
+
+## 7. Selling puts after a big up day (2026-11-10)
+
+`scripts/research/upday_put_study.py` — the vol-band shape (21 DTE, 0.25Δ, 2 % wide, no proximity exit), entered at the close, one position per ticker. Prompted by 2026-11-09: SPY +2.5 %, QQQ +3.6 %, IWM +3.1 % on news, SPY still under SMA-20 / SMA-50 and above SMA-200, RV rank 97–100.
+
+| setup | RV rank | n | win | avg/$ | CI95 | target ≤ 1 / 2 / 5 sessions |
+|---|---|---|---|---|---|---|
+| all days | ≤ 95 | 1,397 | 86 % | +0.014 | [−0.005, +0.032] | 1 / 10 / 44 % |
+| all days | > 95 | 152 | 83 % | −0.003 | [−0.062, +0.052] | 3 / 15 / 56 % |
+| up ≥ 1.5 % | ≤ 95 | 455 | 84 % | +0.008 | [−0.030, +0.042] | 2 / 14 / 45 % |
+| up ≥ 1.5 % | > 95 | 81 | 80 % | −0.032 | [−0.142, +0.066] | 1 / 14 / 43 % |
+| < SMA-20 & SMA-50, > SMA-200 | ≤ 95 | 278 | 90 % | +0.039 | [+0.001, +0.072] | 2 / 15 / 53 % |
+| today-like (up ≥ 1.5 % and the above) | ≤ 95 | 50 | 88 % | +0.038 | [−0.047, +0.108] | 6 / 18 / 44 % |
+| today-like | > 95 | 15 | 73 % | −0.089 | [−0.353, +0.119] | 0 / 13 / 40 % |
+
+- The up day adds nothing; the edge is the dip inside an up-trend.
+- The HighIV block (RV rank > 95) is worse in every setup — keep it. Losers in the today-like / high-RV cell: 2020-03-02, 03-10, 2024-07-31.
+- A 50 % target by the next close is rare (0–6 %); median hold 5–6 sessions. End-of-day data understates intraday touches (the intraday chain log, skill 69, will measure those).
+- Winners ≈ +0.10/$, losers ≈ −0.60/$.
+
+## 8. Vol-band put under CAUTION (2026-11-12)
+
+`scripts/research/vol_band_caution_backtest.py`, on the §7 rows. CAUTION proxy: SPY < its SMA-50 (VIX-term and breadth triggers are not in this data). Rank band 50–80, RV rank > 95 blocked.
+
+| variant | n | win | avg/$ | CAGR | max DD | CI95 |
+|---|---|---|---|---|---|---|
+| live: not in CAUTION | 475 | 87 % | +0.017 | +0.9 % | 8.6 % | [−0.012, +0.046] |
+| + CAUTION when > SMA-200, ½ size | 556 | 88 % | +0.019 | +1.1 % | 8.2 % | [−0.006, +0.043] |
+| + CAUTION when > SMA-200, full size | 556 | 88 % | +0.023 | +1.4 % | 9.1 % | [−0.005, +0.048] |
+| CAUTION trades only, > SMA-200 | 154 | 90 % | +0.037 | +0.7 % | 4.2 % | [−0.007, +0.074] |
+| CAUTION trades only, < SMA-200 | 114 | 77 % | −0.025 | −0.3 % | 8.6 % | [−0.097, +0.045] |
+| no market-state gate | 631 | 87 % | +0.020 | +1.3 % | 9.2 % | [−0.008, +0.045] |
+
+Decision: `vol_band_put_in_caution` (skill 70), on for paper, half size kept. The SMA-200 condition carries the result — without it CAUTION trades lose. Small improvement, CI spans zero; review with the skill-70 30-close check.
