@@ -64,6 +64,7 @@ def merge_rows(journal_rows: List[Dict[str, Any]],
             "broker_legs": (p or {}).get("legs"),
             "underlying_price": (p or {}).get("underlying_price"),
             "exit_signal": (p or {}).get("exit_signal"),
+            "playbook": (p or {}).get("playbook") or "",
             "in_broker_snapshot": p is not None,
         })
         out.append(row)
@@ -78,7 +79,8 @@ def merge_rows(journal_rows: List[Dict[str, Any]],
                 "total_max_loss": round(per * n, 2) if per else None,
                 "mid_pl": p.get("mid_pl"), "broker_legs": p.get("legs"),
                 "underlying_price": p.get("underlying_price"),
-                "exit_signal": p.get("exit_signal"), "in_broker_snapshot": True,
+                "exit_signal": p.get("exit_signal"), "playbook": p.get("playbook") or "",
+                "in_broker_snapshot": True,
             })
     return out
 

@@ -3034,6 +3034,12 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
             vol_band_min_cw = st.slider(
                 "Min credit / width", 0.0, 0.40, float(getattr(seed, "vol_band_put_min_cw", 0.10)), 0.01,
                 key="cust_vol_band_min_cw")
+            vol_band_tp = st.slider(
+                "Profit target (share of credit; 0 = shared target)", 0.0, 0.9,
+                float(getattr(seed, "vol_band_put_profit_target_pct", None) or 0.0), 0.05,
+                key="cust_vol_band_tp",
+                help="2026-11-15: 14 DTE + 30 % beat 21 DTE + 50 % on normal-vol days "
+                     "(research_credit_vol.md §9).")
 
         # ── Macro events + implied vs realized (skill 68) ─────────────
         st.markdown("**Macro events & implied vs realized** *(skill 68 — short premium only)*")
@@ -3324,6 +3330,7 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "vol_band_put_width_pct":       float(vol_band_width),
         "vol_band_put_min_cw":          float(vol_band_min_cw),
         "vol_band_put_in_caution":      bool(vol_band_caution),
+        "vol_band_put_profit_target_pct": float(vol_band_tp) or None,
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

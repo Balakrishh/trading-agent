@@ -247,3 +247,19 @@ trade.
 | no market-state gate | 631 | 87 % | +0.020 | +1.3 % | 9.2 % | [−0.008, +0.045] |
 
 Decision: `vol_band_put_in_caution` (skill 70), on for paper, half size kept. The SMA-200 condition carries the result — without it CAUTION trades lose. Small improvement, CI spans zero; review with the skill-70 30-close check.
+
+## 9. Quicker profit targets, and trading high-vol days (2026-11-13)
+
+`scripts/research/hiv_quick_target_study.py` — vol-band put spread (0.25Δ, 2 % wide), targets 20–50 % of credit, agent stops without proximity, one position per ticker.
+
+| days | shape | tp20 | tp30 | tp40 | tp50 |
+|---|---|---|---|---|---|
+| RV rank > 95 | 21 d | −0.016 | −0.010 | −0.008 | −0.003 |
+| RV rank > 95 | 14 d | −0.025 | −0.031 | −0.038 | −0.037 |
+| rank 50–80 | 21 d | +0.005 | +0.008 | +0.013 | +0.020 |
+| rank 50–80 | 14 d | +0.011 | **+0.018** | +0.020 | +0.018 |
+
+(avg P&L per $ risked; rank 50–80 / 14 d / tp30: n=940, 90 % wins, CAGR +1.9 %, max DD 7.9 %, CI [+0.001, +0.034]; 21 d / tp50: n=637, CAGR +1.4 %, max DD 9.2 %, CI [−0.008, +0.043].)
+
+- High-vol days lose under every target; splitting by SMA-200 does not rescue them. Quicker targets raise the win rate but the hard-stop losers (5–6 %) do not pass through +20–30 % first. Keep the HighIV block.
+- On normal days a 14-day spread with a 30–40 % target trades ~50 % more often with a better account curve. Adopted: `vol_band_put_dte` 14, `vol_band_put_profit_target_pct` 0.30 (skill 70 §4). Selected from ~10 variants — expect some shrinkage.

@@ -148,6 +148,7 @@ Preset fields (Strategy-Profile block "Vol-band bull put"): `vol_band_put_enable
 - **Trade plan rotated out** — an inferred position has no playbook tag and gets the regime-shift exit again (conservative).
 - **Rank band misconfigured** (min ≥ max or outside 0–100) — warned in `_coerce_overrides`, defaults used.
 - **CAUTION above SMA-200 (2026-11-12, `vol_band_put_in_caution`, live on paper).** The skill-58 gate blocks "Bull Put Spread" in CAUTION, which is where the playbook backtested best: SPY < SMA-50 with the ticker above its SMA-200 gave +0.037/$, 90 % wins (n=154); below SMA-200 −0.025/$, 77 % (n=114). `TradingAgent._market_gate_block` lets a `playbook == "vol_band_put"` plan through only in CAUTION (not RISK_OFF) and only when `current_price > sma_200`; a missing price or SMA fails closed. The CAUTION size multiplier (×0.5) still sets the budget. Account effect 2008–2025: CAGR +0.9 % → +1.1 %, max DD 8.6 % → 8.2 %; CI still spans 0 (`research_credit_vol.md` §8).
+- **14 DTE, 30 % target (2026-11-15, live on paper).** `vol_band_put_dte` 14 and `vol_band_put_profit_target_pct` 0.30 (skill 30 §4). Backtest on rank 50–80 days: +0.018/$, 90 % wins, n=940, CAGR +1.9 %, max DD 7.9 %, CI [+0.001, +0.034], vs 21 DTE / 50 %: +0.020/$, n=637, CAGR +1.4 %, CI [−0.008, +0.043]; median hold 3 sessions. Chosen among ~10 variants, so part of the edge is selection luck. The live target is judged on the natural close price (`profit_target_basis`), the backtest on mid with a halfway fill — live exits will come a little later. On RV-rank > 95 days no target was positive, so the HighIV block stays (`research_credit_vol.md` §9).
 - **Review point** — after ~30 closes compare the journal's realized P&L per $ risked with the backtest (+0.024); turn it off if it is negative by then.
 
 ## 5. Cross-References
@@ -160,4 +161,4 @@ Preset fields (Strategy-Profile block "Vol-band bull put"): `vol_band_put_enable
 
 ---
 
-*Last verified against repo HEAD on 2026-11-12.*
+*Last verified against repo HEAD on 2026-11-15.*

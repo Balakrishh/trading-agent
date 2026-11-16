@@ -330,7 +330,8 @@ class PositionMonitor:
                  debit_exit_max_giveback: float = 0.50,
                  debit_profit_target_pct_bear: Optional[float] = None,
                  debit_stop_loss_pct_bull: Optional[float] = None,
-                 credit_strike_proximity_exit: bool = True):
+                 credit_strike_proximity_exit: bool = True,
+                 vol_band_profit_target_pct: Optional[float] = None):
         """
         Additional parameter
         --------------------
@@ -376,6 +377,13 @@ class PositionMonitor:
         # 2026-11-09 (research_credit_vol.md): False skips the strike-
         # proximity close for credit verticals; condors keep it.
         self.credit_strike_proximity_exit = bool(credit_strike_proximity_exit)
+        # 2026-11-15: vol-band puts take profit at their own share of credit.
+        self.vol_band_profit_target_pct = vol_band_profit_target_pct
+
+    def _credit_target_pct(self, spread: "SpreadPosition") -> float:
+        if spread.playbook == VOL_BAND_PUT_PLAYBOOK and self.vol_band_profit_target_pct:
+            return float(self.vol_band_profit_target_pct)
+        return self.profit_target_pct
 
     def _debit_target_pct(self, spread: "SpreadPosition") -> float:
         if spread.strategy_name == PUT_DEBIT_STRATEGY and self.debit_profit_target_pct_bear:
@@ -936,7 +944,7 @@ class PositionMonitor:
             basis = -spread.original_credit * 100 * contracts
             return "calendar", basis, basis * self.calendar_profit_target_pct
         basis = spread.original_credit * 100 * contracts
-        return "credit", basis, basis * self.profit_target_pct
+        return "credit", basis, basis * self._credit_target_pct(spread)
 
     @staticmethod
     def _last_expiry(spread: "SpreadPosition") -> Optional[date]:
@@ -1167,14 +1175,14 @@ class PositionMonitor:
                 f"max loss ${max_loss_position:.2f} ({contracts}×${spread.max_loss:.2f})"
             )
 
-        # --- 3. Profit target: 50% of credit captured ---
+        # --- 3. Profit target: 50% of credit captured (vol-band: its own share) ---
         _, _, profit_threshold = self.profit_basis(spread)
         profit_pl = self._profit_pl(spread)
         if profit_pl >= profit_threshold > 0:
             return (
                 ExitSignal.PROFIT_TARGET,
                 f"Profit ${profit_pl:.2f} ({self.profit_target_basis}) ≥ "
-                f"{self.profit_target_pct*100:.0f}% of credit "
+                f"{self._credit_target_pct(spread)*100:.0f}% of credit "
                 f"${credit_position:.2f} ({contracts}×${credit_per_contract:.2f})"
             )
 
