@@ -138,6 +138,7 @@ signal, reason = pos.evaluate_exit(
 
 ## 4. Edge Cases / Guardrails
 
+- **Vol-band put target (2026-11-15).** `PositionMonitor._credit_target_pct` returns `vol_band_profit_target_pct` (preset `vol_band_put_profit_target_pct`, live 0.30) for positions tagged `playbook == "vol_band_put"`, else `profit_target_pct`. `profit_basis` uses it, so the profit trail arms there too; with a 30 % target below the trail's 40 %-of-credit floor the trail closes on the arming cycle (giveback ≤ floor) unless the profit has already jumped past ~53 % (peak × 0.75 > floor). Positions without the tag (trade plan rotated out) fall back to the shared target. The 3-cycle exit debounce still applies.
 - **Natural peak beside the mid peak (2026-11-06).** `track_excursion(..., natural=net_natural_pl)` keeps `max_natural_pl` in `profit_trail.json` and the `position_excursion` row; `max_pl` is whatever `_profit_pl` measures (mid for mid-judged debits). The state file loads with `TrailState(**v)`, so code older than this field would fail to load a file that has it (the trail skips that cycle with a warning) — keep that in mind before rolling back.
 - **Excursion from entry (2026-10-13, backlog D2).** `profit_trail.track_excursion` records every position's best and worst P&L (and when) on every cycle — armed or not, Wheel included, trail mode on or off — in `profit_trail.json` (`max_pl`, `min_pl`, `*_at`, `first_seen_at`). When the position leaves the book, `_advance_trail_ghosts` journals one `position_excursion` row (skill 19). Before this `peak_pl` existed only after arming, so the IWM question (+$444 peak, closed +$288, 2026-10-08) had to be answered from memory. When the broker reports no positions at all, the trail still runs once so the last positions settle.
 - **Opening window for debounced exits (2026-10-13, backlog D1).** `TradingAgent._should_exit_spread` holds a *confirmed* debounced exit — profit target, regime shift, Wheel delta stop, debit stop, calendar strike drift — while the ET clock is before `preset.no_exit_before_et` (default 09:45; empty = off). Votes keep counting, so the exit goes out on the first cycle after 09:45. Immediate exits (hard stop, strike proximity, DTE safety) never wait. Why: 2026-10-09 the VZ CSP delta stop filled at 09:36 for $1.18 against a $1.045 mark in the open's wide quotes (−$97 on a $21 credit).
@@ -166,4 +167,4 @@ signal, reason = pos.evaluate_exit(
 
 ---
 
-*Last verified against repo HEAD on 2026-11-09.*
+*Last verified against repo HEAD on 2026-11-15.*

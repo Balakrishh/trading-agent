@@ -64,7 +64,9 @@ def exit_view(pos: Dict[str, Any], preset, today: date) -> Dict[str, Any]:
         target, stop = tp * basis, -sl * basis
     else:                                            # credit: target on credit, stop on max loss
         basis = credit * 100 * n
-        target = preset.profit_target_pct * basis
+        tp = (getattr(preset, "vol_band_put_profit_target_pct", None)
+              if pos.get("playbook") == "vol_band_put" else None) or preset.profit_target_pct
+        target = tp * basis
         stop = -0.5 * float(pos.get("total_max_loss") or pos.get("max_loss") or 0.0)
     flags: List[str] = []
     exp = None

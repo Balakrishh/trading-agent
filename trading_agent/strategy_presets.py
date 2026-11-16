@@ -565,6 +565,9 @@ class PresetConfig:
     # 2026-11-12: also trade it under CAUTION when the ticker is above its
     # SMA-200 (research_credit_vol.md §8: +0.037/$ vs −0.025/$ below it).
     vol_band_put_in_caution:           bool  = False
+    # 2026-11-15: profit target for vol-band puts only (share of credit);
+    # None = the shared profit_target_pct (research_credit_vol.md §9).
+    vol_band_put_profit_target_pct:    Optional[float] = None
 
     # ------------------------------------------------------------------
     # Convenience
@@ -627,6 +630,8 @@ class PresetConfig:
                     f"rank {self.vol_band_put_min_rank:g}–{self.vol_band_put_max_rank:g} "
                     f"Δ{self.vol_band_put_short_delta:.2f} {self.vol_band_put_dte}d "
                     f"≤{self.vol_band_put_width_pct:.0%} C/W≥{self.vol_band_put_min_cw:g}"
+                    + (f" TP{self.vol_band_put_profit_target_pct:.0%}"
+                       if self.vol_band_put_profit_target_pct else "")
                     + (" CAUTION>SMA200" if self.vol_band_put_in_caution else ""))
         return tag
 
@@ -927,6 +932,10 @@ def _coerce_overrides(overrides: Dict) -> Dict:
                  "vol_regime_filter_mode"):
         if out.get(mode) not in (None, "off", "shadow", "live"):
             logger.warning("Invalid %s %r — using the default", mode, out.pop(mode))
+    tp = out.get("vol_band_put_profit_target_pct")
+    if tp is not None and not (0 < float(tp) < 1):
+        logger.warning("Invalid vol_band_put_profit_target_pct %r — using profit_target_pct", tp)
+        out.pop("vol_band_put_profit_target_pct")
     lo, hi = out.get("vol_band_put_min_rank"), out.get("vol_band_put_max_rank")
     if lo is not None and hi is not None and not (0 <= float(lo) < float(hi) <= 100):
         logger.warning("Invalid vol_band_put rank band %r–%r — using the defaults", lo, hi)

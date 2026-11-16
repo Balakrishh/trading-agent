@@ -44,6 +44,7 @@ def build_snapshot(spreads: Iterable[Any],
             "underlying_price": underlying_prices.get(s.underlying),
             "exit_signal": getattr(sig, "value", str(sig)) if sig is not None else None,
             "exit_reason": getattr(s, "exit_reason", ""),
+            "playbook": getattr(s, "playbook", "") or "",
         })
     return {"as_of_utc": datetime.now(timezone.utc).isoformat(), "positions": rows}
 

@@ -401,6 +401,8 @@ class TradingAgent:
             debit_stop_loss_pct_bull=self.preset.debit_stop_loss_pct_bull,
             # 2026-11-09: optional skip of the 1 % strike-proximity close.
             credit_strike_proximity_exit=self.preset.credit_strike_proximity_exit,
+            # 2026-11-15: vol-band puts take profit at their own target.
+            vol_band_profit_target_pct=self.preset.vol_band_put_profit_target_pct,
         )
         if hasattr(self.position_monitor, "earnings_lookup"):
             from trading_agent.earnings_calendar import next_earnings_date as _ned
