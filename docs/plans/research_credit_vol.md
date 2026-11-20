@@ -263,3 +263,19 @@ Decision: `vol_band_put_in_caution` (skill 70), on for paper, half size kept. Th
 
 - High-vol days lose under every target; splitting by SMA-200 does not rescue them. Quicker targets raise the win rate but the hard-stop losers (5–6 %) do not pass through +20–30 % first. Keep the HighIV block.
 - On normal days a 14-day spread with a 30–40 % target trades ~50 % more often with a better account curve. Adopted: `vol_band_put_dte` 14, `vol_band_put_profit_target_pct` 0.30 (skill 70 §4). Selected from ~10 variants — expect some shrinkage.
+
+## 10. Put debit spreads on high-vol days (2026-11-19)
+
+`scripts/research/hiv_put_debit_study.py` — bearish put debits on real SPY / QQQ / IWM quotes, selection and exits from `debit_chain_backtest.py` (0.50Δ long, 25–35 DTE, 1–2.5 % wide, entry mid + ½, live trail), bear trend + pullback ≤ 1 ATR, every 5th session. DEFENSIVE proxy: SPY < its SMA-200.
+
+| entries | n | win | live exits | arm 25 | arm 25, stop 35 |
+|---|---|---|---|---|---|
+| RV rank ≤ 50 (live-allowed) | 31 | 42 % | −0.189 | −0.168 | −0.113 |
+| RV rank 50–95 | 70 | 53 % | +0.014 | +0.027 | −0.060 |
+| RV rank > 95 | 29 | 34 % | −0.224 | −0.218 | −0.156 |
+| RV rank > 95, SPY < SMA-200 | 22 | 32 % | −0.265 | −0.203 | −0.149 |
+
+(avg P&L per $ risked; win % for live exits. Rank > 95, live exits: CI [−0.545, +0.083]; SPY −0.117, QQQ −0.239, IWM −0.385.)
+
+- High-vol put debits lose on every ticker and under every exit; buying puts at a vol peak pays the most for them just before the usual bounce. Keep the HighIV block for debits too. Small samples, but consistent with §2 of `research_debit_stress.md` (put debits lose on index ETFs).
+- With §7–§9, no defined-risk trade tested pays in a high-vol sell-off on these ETFs; staying flat is the right result. No preset change.
