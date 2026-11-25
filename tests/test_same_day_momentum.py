@@ -123,28 +123,34 @@ def _pos(pl, playbook=sdm.PLAYBOOK, strategy="Call Debit Spread"):
                           expiration="2099-01-01", playbook=playbook)
 
 
-def _mon(close_et="23:59"):
+def _mon(close_et="15:25"):
     return PositionMonitor(api_key="x", secret_key="x", post_fill_grace_seconds=0,
                            debit_exit_price="mid", same_day_close_et=close_et)
+
+
+@pytest.fixture
+def before_close(monkeypatch):
+    monkeypatch.setattr(sdm, "past_close", lambda now, close_et: False)
 
 
 @pytest.mark.parametrize("pl, want", [
     (130.0, ExitSignal.PROFIT_TARGET), (-130.0, ExitSignal.STOP_LOSS), (40.0, ExitSignal.HOLD),
 ])
-def test_same_day_target_and_stop(pl, want):
-    if datetime.now().strftime("%H:%M") >= "23:59":
-        pytest.skip("clock at the forced-close minute")
+def test_same_day_target_and_stop(pl, want, before_close):
     assert _mon()._check_exit(_pos(pl), {}, 720.0)[0] == want
 
 
-def test_forced_close_and_no_regime_exit():
-    sig, why = _mon("00:00")._check_exit(_pos(40.0), {}, 720.0)
+def test_no_regime_exit(before_close):
+    """A call debit opened against a bearish daily regime holds."""
+    assert _mon()._check_exit(_pos(10.0), {"SPY": Regime.BEARISH}, 720.0)[0] == ExitSignal.HOLD
+
+
+def test_forced_close(monkeypatch):
+    monkeypatch.setattr(sdm, "past_close", lambda now, close_et: True)
+    sig, why = _mon()._check_exit(_pos(40.0), {}, 720.0)
     assert sig == ExitSignal.DTE_SAFETY and "Same-day close" in why
-    # A call debit opened against a bearish regime: no regime-shift exit.
-    if datetime.now().strftime("%H:%M") < "23:59":
-        assert _mon()._check_exit(_pos(10.0), {"SPY": Regime.BEARISH}, 720.0)[0] == ExitSignal.HOLD
     # An ordinary call debit is unaffected by the same-day rules.
-    assert _mon("00:00")._check_exit(_pos(40.0, playbook=""), {}, 720.0)[0] != ExitSignal.DTE_SAFETY
+    assert _mon()._check_exit(_pos(40.0, playbook=""), {}, 720.0)[0] != ExitSignal.DTE_SAFETY
 
 
 def test_same_day_stop_does_not_start_a_cooldown():
@@ -294,3 +300,35 @@ def test_premarket_brief_line():
     calm = sb.build_premarket(dict(base, market_state={"state": "NORMAL", "inputs": {"vix": 17.0},
                                                        "gate": {"allowed_strategies": []}}))
     assert "VIX 17.0 < 25 — no trades" in calm
+
+
+@pytest.mark.parametrize("day, want", [
+    (date(2026, 11, 25), "15:25"),     # full session: the configured time
+    (date(2026, 11, 27), "12:25"),     # Friday after Thanksgiving closes 13:00
+    (date(2026, 11, 26), "15:25"),     # holiday: no session, keep the configured time
+])
+def test_effective_close_follows_early_closes(day, want):
+    assert sdm.effective_close(day, "15:25").strftime("%H:%M") == want
+
+
+def test_half_day_blocks_late_entries_and_forces_the_close():
+    assert sdm.past_close(datetime(2026, 11, 27, 12, 26), "15:25")
+    assert not sdm.past_close(datetime(2026, 11, 27, 12, 24), "15:25")
+    assert not sdm.past_close(datetime(2026, 11, 25, 14, 30), "15:25")
+
+
+def test_effective_close_survives_a_calendar_failure(monkeypatch):
+    from trading_agent import calendar_utils
+
+    def boom(d):
+        raise RuntimeError("calendar down")
+    monkeypatch.setattr(calendar_utils, "session_close_et", boom)
+    assert sdm.effective_close(date(2026, 11, 27), "15:25").strftime("%H:%M") == "15:25"
+
+
+def test_brief_shows_the_half_day_close():
+    from trading_agent import session_brief as sb
+    txt = sb.build_premarket(dict(today=date(2026, 11, 27), preset=PRE,
+                                  market_state={"state": "DEFENSIVE", "inputs": {"vix": 26.4},
+                                                "gate": {"allowed_strategies": []}}))
+    assert "closes by 12:25" in txt
