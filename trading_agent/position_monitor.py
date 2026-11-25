@@ -1258,7 +1258,7 @@ class PositionMonitor:
         return (ExitSignal.HOLD, "")
 
     @staticmethod
-    def _check_dte_safety(expiration: str) -> str:
+    def _check_dte_safety(expiration: str, now: Optional[datetime] = None) -> str:
         """
         Return a non-empty reason string if the DTE safety rule triggers.
 
@@ -1275,16 +1275,15 @@ class PositionMonitor:
         if not expiration:
             return ""
         try:
+            from zoneinfo import ZoneInfo
             exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
-            # Convert to ET for the time check
-            now_utc = datetime.now(timezone.utc)
-            # ET = UTC-4 (EDT) or UTC-5 (EST); use UTC-4 (market hours)
-            now_et_hour = (now_utc.hour - 4) % 24
-            now_et_minute = now_utc.minute
-            today = now_utc.date()
+            # 2026-11-24: real ET (DST-aware) for both the clock and the
+            # date. A fixed UTC−4 fired at 14:30 ET all winter, and the UTC
+            # date is already tomorrow after 19:00 ET.
+            now_et = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
+            today = now_et.date()
 
-            after_cutoff = (now_et_hour > 15 or
-                            (now_et_hour == 15 and now_et_minute >= 30))
+            after_cutoff = (now_et.hour, now_et.minute) >= (15, 30)
             last_day = is_last_trading_day_before(today, exp_date)
 
             if last_day and after_cutoff:
