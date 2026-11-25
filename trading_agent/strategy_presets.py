@@ -568,6 +568,25 @@ class PresetConfig:
     # 2026-11-15: profit target for vol-band puts only (share of credit);
     # None = the shared profit_target_pct (research_credit_vol.md §9).
     vol_band_put_profit_target_pct:    Optional[float] = None
+    # Same-day momentum debit (2026-11-24, skill 72; research_credit_vol.md
+    # §11): on days whose PRIOR VIX close ≥ min_vix, buy a 0DTE ≈ATM
+    # vertical ``width`` dollars wide on ``same_day_ticker`` in the
+    # direction of the move since 09:35, at each entry time (first cycle
+    # within ``entry_window_min``), and close it the same day: target /
+    # stop at a share of the debit, forced close from ``close_et``. Runs
+    # outside the market-state gate and the HighIV block (nothing is held
+    # overnight); the trading halt still applies. "off" | "live".
+    same_day_mode:                     str   = "off"
+    same_day_ticker:                   str   = "SPY"
+    same_day_min_vix:                  float = 25.0
+    same_day_entry_times_et:           Tuple[str, ...] = ("10:00", "11:00", "12:30", "14:00")
+    same_day_entry_window_min:         int   = 20
+    same_day_width:                    float = 5.0
+    same_day_target_pct:               float = 0.50
+    same_day_stop_pct:                 float = 0.50
+    same_day_close_et:                 str   = "15:25"   # Alpaca: SPY 0DTE opens stop 15:30, auto-liquidation ~15:45
+    same_day_max_risk_pct:             float = 0.01
+    same_day_max_contracts:            int   = 1
 
     # ------------------------------------------------------------------
     # Convenience
@@ -621,7 +640,16 @@ class PresetConfig:
                 f"Trend200 {self.trend200_filter_mode} • "
                 f"VolRegime {self.vol_regime_filter_mode} bull≤{self.vol_regime_bull_max_rank:g}"
                 f"/bear≤{self.vol_regime_bear_max_rank:g}"
-                f"{self._intraday_log_tag()}{self._vol_band_tag()}")
+                f"{self._intraday_log_tag()}{self._vol_band_tag()}{self._same_day_tag()}")
+
+    def _same_day_tag(self) -> str:
+        if self.same_day_mode != "live":
+            return ""
+        return (f" • SameDay {self.same_day_ticker} VIX≥{self.same_day_min_vix:g} "
+                f"@{','.join(self.same_day_entry_times_et)} ${self.same_day_width:g} "
+                f"TP{self.same_day_target_pct:.0%}/SL{self.same_day_stop_pct:.0%} "
+                f"close {self.same_day_close_et} ≤{self.same_day_max_contracts}c "
+                f"{self.same_day_max_risk_pct:.1%}")
 
     def _vol_band_tag(self) -> str:
         tag = "" if self.credit_strike_proximity_exit else " • Credit prox exit off"
@@ -895,6 +923,7 @@ DEFAULT_PROFILE: ProfileName = "balanced"
 
 _TUPLE_FIELDS = {"dte_grid", "delta_grid", "width_grid_pct", "put_debit_excluded_tickers",
                  "debit_excluded_tickers", "intraday_chain_log_tickers", "vol_band_put_tickers",
+                 "same_day_entry_times_et",
                  "macro_event_kinds",
                  "iron_butterfly_dte_grid", "iron_butterfly_wing_width_pct",
                  "cc_dte_band", "csp_dte_band", "csp_strike_band"}
@@ -940,6 +969,20 @@ def _coerce_overrides(overrides: Dict) -> Dict:
     if lo is not None and hi is not None and not (0 <= float(lo) < float(hi) <= 100):
         logger.warning("Invalid vol_band_put rank band %r–%r — using the defaults", lo, hi)
         out.pop("vol_band_put_min_rank"), out.pop("vol_band_put_max_rank")
+    if out.get("same_day_mode") not in (None, "off", "live"):
+        logger.warning("Invalid same_day_mode %r — using the default", out.pop("same_day_mode"))
+    for k in ("same_day_target_pct", "same_day_stop_pct", "same_day_max_risk_pct"):
+        v = out.get(k)
+        if v is not None and not (isinstance(v, (int, float)) and 0 < float(v) <= 1):
+            logger.warning("Invalid %s %r — using the default", k, out.pop(k))
+    from trading_agent.same_day_momentum import valid_hhmm
+    times = out.get("same_day_entry_times_et")
+    if times is not None and not all(valid_hhmm(t) for t in times):
+        logger.warning("Invalid same_day_entry_times_et %r — using the default",
+                       out.pop("same_day_entry_times_et"))
+    if out.get("same_day_close_et") is not None and not valid_hhmm(out["same_day_close_et"]):
+        logger.warning("Invalid same_day_close_et %r — using the default",
+                       out.pop("same_day_close_et"))
     if out.get("intraday_chain_log_mode") not in (None, "off", "on"):
         logger.warning("Invalid intraday_chain_log_mode %r — using the default",
                        out.pop("intraday_chain_log_mode"))

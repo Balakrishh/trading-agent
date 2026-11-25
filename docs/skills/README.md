@@ -91,6 +91,7 @@ Skills 40–65: the long-term / Wheel evaluator, the Claude Code MCP surface and
 | 69 | [Intraday Option-Chain Log](69_intraday_chain_log.md) | data_quality | `trading_agent/intraday_chain_log.py`, `trading_agent/calendar_utils.py`, `trading_agent/agent.py` |
 | 70 | [Vol-Band Bull Put and the Credit Proximity Switch](70_vol_band_bull_put.md) | strategy / risk | `trading_agent/strategy.py`, `trading_agent/position_monitor.py`, `trading_agent/risk_manager.py`, `trading_agent/executor.py`, `scripts/research/put_spread_playbook_backtest.py` |
 | 71 | [Pre-Market Brief and Plan for Tomorrow](71_session_brief.md) | ops | `trading_agent/session_brief.py`, `trading_agent/market_data_schwab.py`, `trading_agent/data_server/app.py`, `deploy/systemd/trading-agent-brief-*` |
+| 72 | [Same-Day Momentum Debit](72_same_day_momentum.md) | strategy / risk | `trading_agent/same_day_momentum.py`, `trading_agent/agent.py`, `trading_agent/position_monitor.py`, `scripts/research/same_day_replay.py`, `scripts/research/same_day_momentum_model.py` |
 
 ## Phase 2 (planned, not yet written)
 

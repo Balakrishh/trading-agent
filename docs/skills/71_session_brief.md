@@ -105,6 +105,7 @@ def due(kind: str, now_et: datetime, sentinel_dir: Path = SENTINEL_DIR) -> Optio
 - **Allowed list vs preset** — the state's allowed list can name a structure the preset has switched off (bear calls); it is shown "(off)". A vol-band bull put (skill 70) is reported blocked when the state does not allow "Bull Put Spread".
 - **Tomorrow's flags** — judged on the next NYSE session (`next_sessions`), so Wednesday-before-Thanksgiving looks at Friday.
 - **No Telegram configured** — logs a warning, sends nothing, writes no sentinel.
+- **Same-day momentum line (2026-11-24, skill 72)** — when `same_day_mode` is live the pre-market brief adds `Same-day momentum (SPY 0DTE, closes by 15:25): VIX x ≥ 25 — trades at …` or `… < 25 — no trades`, read from the market-state snapshot's VIX (the prior close before the open).
 
 ## 5. Cross-References
 
@@ -115,4 +116,4 @@ def due(kind: str, now_et: datetime, sentinel_dir: Path = SENTINEL_DIR) -> Optio
 
 ---
 
-*Last verified against repo HEAD on 2026-11-09.*
+*Last verified against repo HEAD on 2026-11-24.*

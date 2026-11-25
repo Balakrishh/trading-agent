@@ -89,6 +89,7 @@ REGULAR_OPEN_ET = "09:30"
 # the vol-band bull put's playbook tag (2026-11-09, research_credit_vol.md).
 CREDIT_VERTICALS = frozenset({"Bull Put Spread", "Bear Call Spread"})
 VOL_BAND_PUT_PLAYBOOK = "vol_band_put"
+SAME_DAY_PLAYBOOK = "same_day_momentum"       # skill 72; same string as same_day_momentum.PLAYBOOK
 
 # Which regime each strategy is compatible with
 STRATEGY_REGIME_MAP = {
@@ -331,7 +332,10 @@ class PositionMonitor:
                  debit_profit_target_pct_bear: Optional[float] = None,
                  debit_stop_loss_pct_bull: Optional[float] = None,
                  credit_strike_proximity_exit: bool = True,
-                 vol_band_profit_target_pct: Optional[float] = None):
+                 vol_band_profit_target_pct: Optional[float] = None,
+                 same_day_target_pct: float = 0.50,
+                 same_day_stop_pct: float = 0.50,
+                 same_day_close_et: str = "15:25"):
         """
         Additional parameter
         --------------------
@@ -379,6 +383,11 @@ class PositionMonitor:
         self.credit_strike_proximity_exit = bool(credit_strike_proximity_exit)
         # 2026-11-15: vol-band puts take profit at their own share of credit.
         self.vol_band_profit_target_pct = vol_band_profit_target_pct
+        # 2026-11-24 (skill 72): same-day momentum debits — target / stop as
+        # a share of the debit, forced close from ``same_day_close_et``.
+        self.same_day_target_pct = float(same_day_target_pct)
+        self.same_day_stop_pct = float(same_day_stop_pct)
+        self.same_day_close_et = str(same_day_close_et)
 
     def _credit_target_pct(self, spread: "SpreadPosition") -> float:
         if spread.playbook == VOL_BAND_PUT_PLAYBOOK and self.vol_band_profit_target_pct:
@@ -1000,6 +1009,8 @@ class PositionMonitor:
             return (ExitSignal.HOLD,
                     f"Debit: mark ${spread.net_unrealized_pl:.2f} outside the spread's possible "
                     f"range (debit ${debit_position:.2f}) — bad quote, holding")
+        if spread.playbook == SAME_DAY_PLAYBOOK:
+            return self._check_same_day_exit(spread, debit_position)
         loss = -spread.net_unrealized_pl
         stop_pct = self._debit_stop_pct(spread)
         stop = debit_position * stop_pct
@@ -1044,6 +1055,33 @@ class PositionMonitor:
             return (ExitSignal.REGIME_SHIFT,
                     f"Regime shifted to {current.value} but holding "
                     f"{spread.strategy_name} (expects {expected.value})")
+        return (ExitSignal.HOLD, "")
+
+    def _check_same_day_exit(self, spread: SpreadPosition, debit_position: float):
+        """Skill 72: forced close from ``same_day_close_et`` ET (or once the
+        expiry is today-or-past and the clock says so), else stop / target
+        as a share of the debit. No DTE / regime / trail logic — the
+        position never outlives the session."""
+        from zoneinfo import ZoneInfo
+        from trading_agent.same_day_momentum import past_close
+        now_et = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        if past_close(now_et, self.same_day_close_et) or (
+                spread.expiration and spread.expiration < now_et.date().isoformat()):
+            return (ExitSignal.DTE_SAFETY,
+                    f"Same-day close: {now_et:%H:%M} ET ≥ {self.same_day_close_et} — "
+                    f"closing the {spread.expiration} position before the end of the session")
+        loss = -spread.net_unrealized_pl
+        stop = debit_position * self.same_day_stop_pct
+        if loss >= stop > 0:
+            return (ExitSignal.STOP_LOSS,
+                    f"Same-day: loss ${loss:.2f} ≥ {self.same_day_stop_pct:.0%} of "
+                    f"debit ${debit_position:.2f}")
+        profit = self._profit_pl(spread)
+        target = debit_position * self.same_day_target_pct
+        if profit >= target > 0:
+            return (ExitSignal.PROFIT_TARGET,
+                    f"Same-day: profit ${profit:.2f} ({self._profit_label(spread)}) ≥ "
+                    f"{self.same_day_target_pct:.0%} of debit ${debit_position:.2f}")
         return (ExitSignal.HOLD, "")
 
     def evaluate(self, spreads: List[SpreadPosition],
@@ -1220,7 +1258,7 @@ class PositionMonitor:
         return (ExitSignal.HOLD, "")
 
     @staticmethod
-    def _check_dte_safety(expiration: str) -> str:
+    def _check_dte_safety(expiration: str, now: Optional[datetime] = None) -> str:
         """
         Return a non-empty reason string if the DTE safety rule triggers.
 
@@ -1237,16 +1275,15 @@ class PositionMonitor:
         if not expiration:
             return ""
         try:
+            from zoneinfo import ZoneInfo
             exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
-            # Convert to ET for the time check
-            now_utc = datetime.now(timezone.utc)
-            # ET = UTC-4 (EDT) or UTC-5 (EST); use UTC-4 (market hours)
-            now_et_hour = (now_utc.hour - 4) % 24
-            now_et_minute = now_utc.minute
-            today = now_utc.date()
+            # 2026-11-24: real ET (DST-aware) for both the clock and the
+            # date. A fixed UTC−4 fired at 14:30 ET all winter, and the UTC
+            # date is already tomorrow after 19:00 ET.
+            now_et = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
+            today = now_et.date()
 
-            after_cutoff = (now_et_hour > 15 or
-                            (now_et_hour == 15 and now_et_minute >= 30))
+            after_cutoff = (now_et.hour, now_et.minute) >= (15, 30)
             last_day = is_last_trading_day_before(today, exp_date)
 
             if last_day and after_cutoff:

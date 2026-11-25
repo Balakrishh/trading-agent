@@ -108,8 +108,10 @@ def _line_appears_in(source_text: str, line: str) -> bool:
     """
     # Drop the line's trailing comment so we don't require comment-text
     # to be byte-identical with source.
-    line_no_comment = line.split("#", 1)[0].rstrip().rstrip(":,)")
-    # Re-add the colon/paren since they're meaningful syntactically.
+    # Only a trailing ":" / "," goes: stripping ")" too turned "def f(x):"
+    # into "def f(x:" and failed every one-line signature (2026-11-24).
+    line_no_comment = line.split("#", 1)[0].rstrip().rstrip(":,")
+    # Re-add the colon since it's meaningful syntactically.
     line_canon = line_no_comment + ":" if line.rstrip().endswith(":") else line_no_comment
     if not line_canon.strip():
         return True

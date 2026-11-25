@@ -263,3 +263,48 @@ Decision: `vol_band_put_in_caution` (skill 70), on for paper, half size kept. Th
 
 - High-vol days lose under every target; splitting by SMA-200 does not rescue them. Quicker targets raise the win rate but the hard-stop losers (5–6 %) do not pass through +20–30 % first. Keep the HighIV block.
 - On normal days a 14-day spread with a 30–40 % target trades ~50 % more often with a better account curve. Adopted: `vol_band_put_dte` 14, `vol_band_put_profit_target_pct` 0.30 (skill 70 §4). Selected from ~10 variants — expect some shrinkage.
+
+## 10. Put debit spreads on high-vol days (2026-11-19)
+
+`scripts/research/hiv_put_debit_study.py` — bearish put debits on real SPY / QQQ / IWM quotes, selection and exits from `debit_chain_backtest.py` (0.50Δ long, 25–35 DTE, 1–2.5 % wide, entry mid + ½, live trail), bear trend + pullback ≤ 1 ATR, every 5th session. DEFENSIVE proxy: SPY < its SMA-200.
+
+| entries | n | win | live exits | arm 25 | arm 25, stop 35 |
+|---|---|---|---|---|---|
+| RV rank ≤ 50 (live-allowed) | 31 | 42 % | −0.189 | −0.168 | −0.113 |
+| RV rank 50–95 | 70 | 53 % | +0.014 | +0.027 | −0.060 |
+| RV rank > 95 | 29 | 34 % | −0.224 | −0.218 | −0.156 |
+| RV rank > 95, SPY < SMA-200 | 22 | 32 % | −0.265 | −0.203 | −0.149 |
+
+(avg P&L per $ risked; win % for live exits. Rank > 95, live exits: CI [−0.545, +0.083]; SPY −0.117, QQQ −0.239, IWM −0.385.)
+
+- High-vol put debits lose on every ticker and under every exit; buying puts at a vol peak pays the most for them just before the usual bounce. Keep the HighIV block for debits too. Small samples, but consistent with §2 of `research_debit_stress.md` (put debits lose on index ETFs).
+- With §7–§9, no defined-risk trade tested pays in a high-vol sell-off on these ETFs; staying flat is the right result. No preset change.
+
+## 11. After a capitulation, and same-day (0DTE) trades (2026-11-20 … 11-24)
+
+**Post-capitulation bull puts** (`scripts/research/post_capitulation_study.py`, real SPY / QQQ / IWM chains, 25 capitulation episodes 2007–2025 by the skill-58 rule, entries in the 30 sessions after). 21 d 0.15Δ 2 % put spread, 50 % target:
+
+| trigger | n | win | avg/$ | max DD | CI95 |
+|---|---|---|---|---|---|
+| on the CAPITULATION day | 127 | 86 % | −0.013 | 12.1 % | [−0.090, +0.054] |
+| VIX/VIX3M back < 1.00 | 317 | 89 % | +0.018 | 8.0 % | [−0.003, +0.037] |
+| VIX ≥ 25 % off its peak | 270 | 87 % | +0.003 | 8.0 % | [−0.028, +0.027] |
+| live RECOVERY (SPY > SMA-20) | 240 | 90 % | +0.015 | 4.0 % | [−0.012, +0.038] |
+
+No earlier trigger beats the live rule by more than noise (best of 36 cells), and the early ones double the drawdown (2018: −7.7 % vs −2.9 %). 0.15Δ beat 0.25Δ after a panic; 30 % targets were worse than 50 %. No change.
+
+**Same-day momentum debit** — the agent's own intraday 0DTE SPY quotes (skill 69; `scripts/research/same_day_replay.py`, 11 sessions 2026-11-09 … 11-23, ~90 s snapshots, fills halfway mid → natural, entries 10:00 / 11:00 / 12:30 / 14:00, exits +50 % / −50 % of debit or the session end). Spot from put–call parity (the 11-23 09:32 snapshot carried Friday's close as spot).
+
+| rule (1 contract) | n | win | avg/$ | total |
+|---|---|---|---|---|
+| put credit 0.10Δ $5 | 43 | 72 % | −0.015 | −$294 |
+| call credit 0.10Δ $5 | 44 | 93 % | +0.013 | +$280 |
+| iron condor | 43 | 77 % | −0.009 | −$182 |
+| **debit $5 ≈ATM, with the move since 09:35** | 42 | 62 % | **+0.168** | **+$1,051** |
+| same debit, against the move (control) | 44 | 34 % | — | −$1,272 |
+
+Momentum beat the control at every entry time; 7 of 11 days positive. Two years of SPY hourly bars with a Black–Scholes 0DTE price (σ = k × prior VIX, k = 0.6 calibrated on the logged straddles, range 0.36–0.89; `scripts/research/same_day_momentum_model.py`): momentum on days with prior VIX ≥ 25 **+0.19 / $** (n = 172, CI [+0.05, +0.32]; +0.33 at k = 0.45, +0.10 at k = 0.75), every calm bucket negative, the control negative everywhere. 60 days of 5-min bars: VIX ≥ 25 ≈ flat (n = 19).
+
+Caveats: the high-VIX hourly sample is ~40 days in three episodes (2024-08, 2025-04, 2026-11); the model prices options, the replay covers 11 days. The two disagree on the VIX filter — on the real quotes the shipped rule (prior VIX ≥ 25) would have traded 5 of 12 days for about +$28, the big winners (11-16, 11-17, 11-19, +$857) came after VIX closes of 19–25. Kept at 25 (the larger sample); revisit with the QQQ / IWM logs.
+
+Built as skill 72 (`same_day_mode: live` on paper, SPY, ≤1 contract / 1 % of equity, forced close 15:25 ET — Alpaca stops SPY 0DTE opening orders at 15:30 and auto-liquidates from ~15:45). Review after 20 closes; intraday chain logging extended to QQQ and IWM.

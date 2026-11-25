@@ -132,6 +132,7 @@ class CloseJournalWriter:
 - **Public method names retained on TradingAgent.** `_close_failed_streak_within_window`, `_close_cooldown_minutes_remaining`, `_record_partial_close`, `_clear_close_cooldown`, `_pdt_blocked_today_tickers` are kept as one-line shims. External call sites in `_stage_monitor` and `streamlit/components.py` don't have to change.
 
 - **Payload fields from the close result (2026-10-01).** `CloseJournalWriter` copies the whole close context, so `signal_mark_pl`, `pl_source` and `close_fill_debit` (set by `agent.py` from `close_spread`'s `realized_pl` / `fill_debit`) land in the journal row; `net_unrealized_pl` is already the realized value when `pl_source == "fill"` (skill 17 §4).
+- **Playbook on close rows (2026-11-24)** — the payload takes `playbook` from the spread when the context lacks it, so `_stops_from` can skip same-day stops (skill 72) for the stop cool-down.
 
 ## 5. Cross-References
 
@@ -142,4 +143,4 @@ class CloseJournalWriter:
 
 ---
 
-*Last verified against repo HEAD on 2026-10-16.*
+*Last verified against repo HEAD on 2026-11-24.*
