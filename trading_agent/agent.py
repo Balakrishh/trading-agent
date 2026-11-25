@@ -403,6 +403,10 @@ class TradingAgent:
             credit_strike_proximity_exit=self.preset.credit_strike_proximity_exit,
             # 2026-11-15: vol-band puts take profit at their own target.
             vol_band_profit_target_pct=self.preset.vol_band_put_profit_target_pct,
+            # 2026-11-24 (skill 72): same-day momentum debit exits.
+            same_day_target_pct=self.preset.same_day_target_pct,
+            same_day_stop_pct=self.preset.same_day_stop_pct,
+            same_day_close_et=self.preset.same_day_close_et,
         )
         if hasattr(self.position_monitor, "earnings_lookup"):
             from trading_agent.earnings_calendar import next_earnings_date as _ned
@@ -999,8 +1003,8 @@ class TradingAgent:
         # (size multiplier 0) blocks every new entry; exits ran in Stage 1.
         # Kill switch / drawdown governor (skill 62), then the market risk
         # state (skill 58): either may skip Stage 2; exits already ran.
-        stage2_skip = (self._trading_halt_result(account_balance, monitor_results)
-                       or self._market_state_skip(tickers, account_balance, monitor_results))
+        stage2_skip = self._stage2_gates(tickers, account_balance, account_buying_power, account_type,
+                                         market_open, monitor_results, tickers_with_positions)
         if stage2_skip is not None:
             return stage2_skip
 
@@ -1017,7 +1021,7 @@ class TradingAgent:
         self._book_delta_update(account_balance)
         self._opened_today = self._tickers_opened_today()
 
-        new_trade_results = []
+        new_trade_results = list(self._same_day_results)
         for ticker in tickers:
             # Check for shutdown between tickers so a SIGTERM mid-cycle
             # stops the loop cleanly at the next safe point.
@@ -2312,6 +2316,125 @@ class TradingAgent:
                 "order_summary": {"open_orders": {"total": 0}, "recent_fills": {"total": 0},
                                   "skipped_reason": reason}}
 
+    def _stage2_gates(self, tickers, account_balance: float, buying_power: float,
+                      account_type: str, market_open: bool, monitor_results: Dict,
+                      tickers_with_positions: Set[str]) -> Optional[Dict]:
+        """Kill switch / drawdown governor (skill 62), then the same-day
+        momentum stage (skill 72 — it runs outside the market-state gate:
+        nothing is held overnight), then the market risk state (skill 58).
+        Returns the Stage 2 skip result, else None; same-day results are
+        left in ``self._same_day_results`` for the cycle's trade list."""
+        self._same_day_results: List[Dict] = []
+        halt = self._trading_halt_result(account_balance, monitor_results)
+        if halt is not None:
+            return halt
+        try:
+            res = self._stage_same_day(account_balance, buying_power, account_type,
+                                       market_open, monitor_results, tickers_with_positions)
+        except Exception as exc:
+            logger.exception("Same-day momentum stage failed: %s", exc)
+            self._exception_monitor.record(source="agent._stage_same_day", exc=exc,
+                                           message=f"same-day stage {type(exc).__name__}: {exc}")
+            res = None
+        finally:
+            self._set_trade_risk_pct(self._cycle_risk_pct)
+        if res:
+            self._same_day_results.append(res)
+        skip = self._market_state_skip(tickers, account_balance, monitor_results)
+        if skip is not None and self._same_day_results:
+            skip["new_trades"] = list(self._same_day_results)
+        return skip
+
+    def _stage_same_day(self, balance: float, buying_power: float, account_type: str,
+                        market_open: bool, monitor_results: Dict,
+                        tickers_with_positions: Set[str]) -> Optional[Dict]:
+        """Same-day momentum debit (skill 72): at most one attempt per entry
+        slot, only while the prior VIX close ≥ ``same_day_min_vix``; buys the
+        0DTE vertical in the direction of the move since 09:35 ET."""
+        pre = self.preset
+        if str(getattr(pre, "same_day_mode", "off")) != "live":
+            return None
+        from trading_agent import same_day_momentum as sdm
+        now = self._now_et()
+        tk, today = str(pre.same_day_ticker), now.date().isoformat()
+        st = sdm.load_state(now.date())
+        if sdm.past_close(now, pre.same_day_close_et) or now.time() < sdm.REF_TIME_ET:
+            return None
+        calls = self.data_provider.fetch_option_chain(tk, today, "call") or []
+        puts = self.data_provider.fetch_option_chain(tk, today, "put") or []
+        spot = sdm.implied_spot(calls, puts)
+        if spot is None:
+            logger.info("[%s] same-day: no 0DTE chain for %s — skipping", tk, today)
+            return None
+        if st.open_ref is None:
+            st.open_ref = round(spot, 2)
+            sdm.save_state(st)
+            logger.info("[%s] same-day: reference price %.2f recorded", tk, spot)
+        slot = sdm.due_slot(now, pre.same_day_entry_times_et, pre.same_day_entry_window_min,
+                            st.slots_used)
+        if slot is None:
+            return None
+        st.slots_used.append(slot)                 # one attempt per slot, whatever the outcome
+        sdm.save_state(st)
+        vix = sdm.prior_vix_close(now.date())
+        side = sdm.direction(spot, st.open_ref)
+        reason = self._same_day_skip_reason(tk, vix, side, monitor_results, balance,
+                                            tickers_with_positions)
+        ctx = {"playbook": sdm.PLAYBOOK, "slot": slot, "prior_vix": vix,
+               "open_ref": st.open_ref, "spot": round(spot, 2), "side": side}
+        if reason:
+            logger.info("[%s] same-day %s slot skipped: %s", tk, slot, reason)
+            self.journal_kb.log_signal(ticker=tk, action="skipped_same_day", price=spot,
+                                       raw_signal={**ctx, "reason": reason})
+            return {"ticker": tk, "status": "skipped", "reason": f"same-day: {reason}"}
+        plan = sdm.build_plan(ticker=tk, expiration=today, side=side, spot=spot,
+                              contracts=calls if side == "call" else puts,
+                              width=float(pre.same_day_width), regime="same_day",
+                              max_leg_cents=float(pre.max_leg_spread_cents),
+                              max_leg_pct=float(pre.max_leg_spread_pct_mid))
+        self._set_trade_risk_pct(sdm.trade_risk_pct(plan, balance, pre.same_day_max_risk_pct,
+                                                    pre.same_day_max_contracts))
+        verdict = self.risk_manager.evaluate(
+            plan, balance, account_type, market_open, self.config.trading.force_market_open,
+            underlying_bid_ask=self.data_provider.get_underlying_bid_ask(tk),
+            account_buying_power=buying_power)
+        logger.info("[%s] same-day %s slot: %s (VIX prior %.1f, %.2f vs ref %.2f)",
+                    tk, slot, plan.reasoning if plan.valid else plan.rejection_reason,
+                    vix, spot, st.open_ref)
+        exec_result = self.executor.execute(verdict)
+        self.journal_kb.log_signal(
+            ticker=tk, action=str(exec_result.get("status", "unknown")), price=spot,
+            exec_status=str(exec_result.get("status", "")),
+            raw_signal={**ctx, **plan.to_dict(), "risk_verdict": verdict.summary,
+                        "checks_failed": list(verdict.checks_failed), "execution": exec_result,
+                        "run_id": exec_result.get("run_id", ""),
+                        "order_id": exec_result.get("order_id", ""),
+                        "contracts": exec_result.get("qty") or 1})
+        if exec_result.get("status") in ("submitted", "dry_run"):
+            tickers_with_positions.add(tk)
+            self._count_entry(tk)
+        return {"ticker": tk, "strategy": plan.strategy_name, "plan_valid": plan.valid,
+                "risk_approved": verdict.approved, "max_loss": plan.max_loss,
+                "expiration": plan.expiration, "execution": exec_result, "playbook": sdm.PLAYBOOK}
+
+    def _same_day_skip_reason(self, tk: str, vix: Optional[float], side: Optional[str],
+                              monitor_results: Dict, balance: float,
+                              tickers_with_positions: Set[str]) -> str:
+        """Why this slot does not trade, or "" when it may."""
+        pre = self.preset
+        if vix is None:
+            return "prior VIX close unavailable"
+        if vix < float(pre.same_day_min_vix):
+            return f"prior VIX close {vix:.1f} < {float(pre.same_day_min_vix):g}"
+        if side is None:
+            return "no move since the 09:35 reference"
+        if tk in tickers_with_positions:
+            return "existing position or pending order"
+        used, budget = self._total_risk_state(monitor_results, balance)
+        if budget - used < balance * float(pre.same_day_max_risk_pct):
+            return f"total risk cap (${used:.0f} of ${budget:.0f} used)"
+        return ""
+
     def _market_state_skip(self, tickers, account_balance: float,
                            monitor_results: Dict) -> Optional[Dict]:
         """Classify the market (skill 58); CAPITULATION (size × 0) skips
@@ -2628,8 +2751,8 @@ class TradingAgent:
         from trading_agent.position_caps import STOP_EXIT_SIGNALS
         out = []
         for c in reader.closes_since(35):
-            if c.exit_signal not in STOP_EXIT_SIGNALS:
-                continue
+            if c.exit_signal not in STOP_EXIT_SIGNALS or c.playbook == "same_day_momentum":
+                continue      # skill 72: a same-day stop says nothing about the multi-day trade
             try:
                 ts = datetime.fromisoformat(c.timestamp_utc.replace("Z", "+00:00"))
             except (TypeError, ValueError):
@@ -2914,7 +3037,8 @@ class TradingAgent:
                             "avg_entry": float(l.avg_entry_price)} for l in s.legs]
                 pt.track_excursion(st, self.position_monitor._profit_pl(s),
                                    natural=getattr(s, "net_natural_pl", None))
-                if kind == "wheel" or not trail_on:   # excursion only (backlog D2)
+                same_day = getattr(s, "playbook", "") == "same_day_momentum"   # skill 72: no trail
+                if kind == "wheel" or not trail_on or same_day:   # excursion only (backlog D2)
                     st.last_pl = round(self.position_monitor._profit_pl(s), 2)
                     states[key] = st
                     continue
@@ -3019,6 +3143,7 @@ class TradingAgent:
         from trading_agent.position_caps import open_defined_risk
         pct = float(getattr(self.preset, "max_total_risk_pct", 1.0))
         used, budget = open_defined_risk(monitor_results), pct * account_balance
+        used += sum(self._submitted_risk(r) for r in getattr(self, "_same_day_results", []))
         logger.info("Open defined risk $%.2f of $%.2f budget (%.0f%% of equity)",
                     used, budget, 100 * pct)
         return used, budget
@@ -3567,7 +3692,11 @@ class TradingAgent:
                         spread.underlying, spread.exit_signal.value, not_before)
             return False
 
-        if spread.exit_signal in IMMEDIATE_EXIT_SIGNALS:
+        from trading_agent.position_monitor import SAME_DAY_PLAYBOOK
+        if (spread.exit_signal in IMMEDIATE_EXIT_SIGNALS
+                or getattr(spread, "playbook", "") == SAME_DAY_PLAYBOOK):
+            # Skill 72: a same-day position's target / stop act at once — a
+            # 3-cycle wait is 5–15 minutes of a 0DTE's life.
             logger.warning(
                 "[%s] IMMEDIATE exit signal %s — bypassing debounce",
                 spread.underlying, spread.exit_signal.value,

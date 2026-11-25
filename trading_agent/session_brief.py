@@ -187,6 +187,14 @@ def _entry_lines(ctx: Dict[str, Any]) -> List[str]:
                    f"{pre.vol_band_put_min_rank:g}–{pre.vol_band_put_max_rank:g})"
                    + (": CAUTION — only above SMA-200, half size" if caution_ok
                       else ": blocked by the market state" if blocked else ": eligible"))
+    if getattr(pre, "same_day_mode", "off") == "live":
+        vix = ((ctx.get("market_state") or {}).get("inputs") or {}).get("vix")
+        floor = float(pre.same_day_min_vix)
+        verdict = ("VIX n/a" if vix is None else
+                   f"VIX {vix:.1f} ≥ {floor:g} — trades at {','.join(pre.same_day_entry_times_et)}"
+                   if vix >= floor else f"VIX {vix:.1f} < {floor:g} — no trades")
+        out.append(f"  Same-day momentum ({_e(pre.same_day_ticker)} 0DTE, closes by "
+                   f"{pre.same_day_close_et}): {verdict}")
     return out or ["  no ticker-level blocks"]
 
 

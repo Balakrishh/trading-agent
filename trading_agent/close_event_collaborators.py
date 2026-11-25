@@ -579,6 +579,7 @@ class CloseJournalWriter:
             exec_status = f"close_failed_{ctx['exit_signal']}"
 
         payload: Dict[str, Any] = dict(ctx)
+        payload.setdefault("playbook", str(getattr(spread, "playbook", "") or ""))
         payload["leg_close_results"] = [
             {"symbol": leg.get("symbol", ""),
              "status": leg.get("status", "unknown")}

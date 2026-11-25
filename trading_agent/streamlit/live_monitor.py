@@ -3041,6 +3041,44 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
                 help="2026-11-15: 14 DTE + 30 % beat 21 DTE + 50 % on normal-vol days "
                      "(research_credit_vol.md §9).")
 
+        # ── Same-day momentum debit (skill 72) ────────────────────────
+        st.markdown("**Same-day momentum debit** *(2026-11-24 — 0DTE, closed the same day)*")
+        sd1, sd2, sd3, sd4 = st.columns(4)
+        with sd1:
+            same_day_on = st.checkbox(
+                "Trade same-day momentum (live)", getattr(seed, "same_day_mode", "off") == "live",
+                key="cust_same_day_on",
+                help="Prior VIX close ≥ the floor: buy a 0DTE ≈ATM vertical in the direction of "
+                     "the move since 09:35 at each entry time; outside the market-state gate "
+                     "and the HighIV block (nothing held overnight). research_credit_vol.md §11.")
+            same_day_ticker = st.text_input(
+                "Ticker", str(getattr(seed, "same_day_ticker", "SPY")), key="cust_same_day_ticker")
+        with sd2:
+            same_day_vix = st.slider(
+                "Min prior VIX close", 15.0, 40.0, float(getattr(seed, "same_day_min_vix", 25.0)), 1.0,
+                key="cust_same_day_vix")
+            same_day_times = st.text_input(
+                "Entry times ET", ",".join(getattr(seed, "same_day_entry_times_et",
+                                                   ("10:00", "11:00", "12:30", "14:00"))),
+                key="cust_same_day_times")
+        with sd3:
+            same_day_width = st.number_input(
+                "Width $", 1.0, 10.0, float(getattr(seed, "same_day_width", 5.0)), 1.0,
+                key="cust_same_day_width")
+            same_day_tp_sl = st.slider(
+                "Target / stop (share of debit)", 0.1, 1.0,
+                (float(getattr(seed, "same_day_stop_pct", 0.5)),
+                 float(getattr(seed, "same_day_target_pct", 0.5))), 0.05, key="cust_same_day_tp_sl",
+                help="Left handle: stop; right handle: target.")
+        with sd4:
+            same_day_close = st.text_input(
+                "Forced close ET", str(getattr(seed, "same_day_close_et", "15:25")),
+                key="cust_same_day_close",
+                help="Alpaca stops SPY 0DTE opening orders at 15:30 and auto-liquidates ~15:45.")
+            same_day_risk = st.slider(
+                "Max risk per trade (share of equity)", 0.0025, 0.02,
+                float(getattr(seed, "same_day_max_risk_pct", 0.01)), 0.0025, key="cust_same_day_risk")
+
         # ── Macro events + implied vs realized (skill 68) ─────────────
         st.markdown("**Macro events & implied vs realized** *(skill 68 — short premium only)*")
         mv1, mv2, mv3 = st.columns(3)
@@ -3331,6 +3369,15 @@ def _custom_inputs(seed: PresetConfig) -> Dict:
         "vol_band_put_min_cw":          float(vol_band_min_cw),
         "vol_band_put_in_caution":      bool(vol_band_caution),
         "vol_band_put_profit_target_pct": float(vol_band_tp) or None,
+        "same_day_mode":                "live" if same_day_on else "off",
+        "same_day_ticker":              same_day_ticker.strip().upper() or "SPY",
+        "same_day_min_vix":             float(same_day_vix),
+        "same_day_entry_times_et":      [t.strip() for t in same_day_times.split(",") if t.strip()],
+        "same_day_width":               float(same_day_width),
+        "same_day_stop_pct":            float(same_day_tp_sl[0]),
+        "same_day_target_pct":          float(same_day_tp_sl[1]),
+        "same_day_close_et":            same_day_close.strip(),
+        "same_day_max_risk_pct":        float(same_day_risk),
         "iron_butterfly_min_pop":       ib_min_pop,
     }
     # Only persist grids when they parse cleanly — silently fall back to

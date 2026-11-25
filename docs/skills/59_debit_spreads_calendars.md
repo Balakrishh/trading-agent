@@ -420,6 +420,7 @@ Preset `debit_profit_target_pct_bear` / `debit_stop_loss_pct_bull` (Optional, No
 - **Live ladder can never double a position.** A probe whose cancel is not confirmed (status not `filled` and not terminal after `_await_fill`'s DELETE — e.g. `pending_cancel`, or the status GET failed → `unknown`) stops the ladder: that order is returned as the submission and nothing else is sent; it may still fill at its probe price (≤ natural) and is then seen as a pending order / position like any other.
 - **Partial fills.** mleg fills keep every leg equal, so a probe that fills k of n contracts leaves n − k; the next probe and the natural order are for the remainder only. If the natural order then fails after a partial ladder fill, the result is still `submitted` with `qty` = contracts filled and `natural_error` set, so the journal matches the broker.
 - **Ladder skipped** (natural sent as before) when quotes are missing, mid ≥ natural, or the first probe POST is refused. Time cost: up to 3 × 10 s per debit entry, inside the 270 s cycle guard.
+- **Same-day debit verticals (2026-11-24, skill 72)** — 0DTE plans built by `same_day_momentum.build_plan` (tag `same_day_momentum`) reuse the debit RiskManager check, the executor's live debit recheck (cap = planned natural) and the close ladder; exits come from `_check_same_day_exit`, not `_check_debit_exit`'s DTE / regime rules.
 
 ## 5. Cross-References
 
@@ -431,4 +432,4 @@ Preset `debit_profit_target_pct_bear` / `debit_stop_loss_pct_bull` (Optional, No
 
 ---
 
-*Last verified against repo HEAD on 2026-11-06.*
+*Last verified against repo HEAD on 2026-11-24.*

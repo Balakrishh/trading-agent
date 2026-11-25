@@ -158,6 +158,7 @@ signal, reason = pos.evaluate_exit(
 - **Live on the paper account (2026-10-27).** `profit_trail_mode = "live"` in the Pi's custom preset (backlog §14): one armed winner of shadow evidence (SPY calendar, trail −$4 vs target). After arming at the target the trail closes on a 25 % giveback from the peak, the ceiling (debit 90 %) or ≤ 7 DTE — worst case vs close-at-target ≈ 37.5 % instead of 50 % of a debit after a reversal. Stops are never touched. The default stays "shadow".
 
 - **Credit-vertical proximity switch (2026-11-09, skill 70).** `credit_strike_proximity_exit` False skips the 1 % strike-proximity close for Bull Put / Bear Call spreads (`CREDIT_VERTICALS`); condors and the bounce bull put keep it. Real quotes: the close cut 0.25Δ put spreads from 86 % to 66 % winners (research_credit_vol.md §2). The vol-band bull put (`playbook == "vol_band_put"`) also skips the regime-shift exit.
+- **Same-day momentum positions (2026-11-24, skill 72)** — never trailed: `_apply_profit_trail` records excursion only, and the 50 %-of-debit target / stop act on the first cycle (no 3-cycle debounce) because a 0DTE moves too far in 10 minutes.
 
 ## 5. Cross-References
 
@@ -167,4 +168,4 @@ signal, reason = pos.evaluate_exit(
 
 ---
 
-*Last verified against repo HEAD on 2026-11-15.*
+*Last verified against repo HEAD on 2026-11-24.*

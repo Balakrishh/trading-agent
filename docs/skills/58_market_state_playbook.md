@@ -239,17 +239,26 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 ```
 
 ```python
-# trading_agent/agent.py:2438-2447
-            block = (market_state.gate_failure(
-                         self._market_state, plan.strategy_name,
-                         [l.option_type for l in plan.legs if l.action == "sell"])
-                     or self._ladder_block(ticker, plan.expiration))
-            if block:
-                logger.info("[%s] %s", ticker, block)
-                verdict = dataclasses.replace(
-                    verdict, approved=False,
-                    checks_failed=list(verdict.checks_failed) + [block],
-                    summary=f"{verdict.summary} | {block}")
+# trading_agent/agent.py:2704-2719
+    def _market_gate_block(self, plan, analysis) -> Optional[str]:
+        """Skill 58 gate, except a vol-band put in CAUTION on a ticker above
+        its SMA-200 when ``vol_band_put_in_caution`` is on (2026-11-12)."""
+        block = market_state.gate_failure(
+            self._market_state, plan.strategy_name,
+            [l.option_type for l in plan.legs if l.action == "sell"])
+        if (block and getattr(plan, "playbook", "") == "vol_band_put"
+                and bool(getattr(self.preset, "vol_band_put_in_caution", False))
+                and getattr(self._market_state, "state", None) == "CAUTION"):
+            ...                                   # allowed above SMA-200 (skill 70)
+        return block
+```
+
+```python
+# trading_agent/agent.py:3251-3265 — first in _process_ticker's gate chain
+            block = (self._market_gate_block(plan, analysis)
+                     or self._ladder_block(ticker, plan.expiration)
+                     or self._stop_cooldown_block(ticker, plan)
+                     ...)
 ```
 
 ## 4. Edge Cases / Guardrails
@@ -275,6 +284,7 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 - **Six CAUTION sessions, breadth input checked (2026-10-26, backlog E1).** CAUTION held Oct 16–23 with reasons that changed almost daily (SPY < SMA-50, VIX/VIX3M ≥ 0.95, breadth < 50 %). Breadth comes from the 14 equity tickers of `TICKERS` (`breadth_universe`). Over the same sessions the 11 Select Sector SPDRs read 36–64 % above their 50-day (45 % on 10-23 vs the watchlist's 43 %), and SPY below its 50-day and the VIX term ratio were independent CAUTION reasons — so switching breadth to the SPDRs would not have changed the state. No change made; E1 stays open only if a future CAUTION run rests on breadth alone.
 
 - **Vol-band bull put fallback (2026-11-09, skill 70).** `_plan_body` wraps the regime / playbook plan in `_with_vol_band_put`: only when that plan is invalid and not a deliberate no-trade does it try a 0.25Δ put spread at vol rank 50–80 on SPY / QQQ / IWM. Call debits keep priority.
+- **Same-day momentum stage outside the gate (2026-11-24, skill 72)** — `_stage2_gates` runs the kill switch, then the same-day stage, then this state; CAPITULATION still skips the regular pipeline but not the 0DTE stage (nothing is held overnight, risk is the debit, 1 % of equity).
 
 ## 5. Cross-References
 
@@ -287,4 +297,4 @@ def csp_pause_reason(snapshot: Optional[Dict[str, Any]],
 
 ---
 
-*Last verified against repo HEAD on 2026-11-12.*
+*Last verified against repo HEAD on 2026-11-24.*

@@ -119,6 +119,7 @@ Preset fields (`trading_agent/strategy_presets.py`, Strategy-Profile panel "Intr
 - **Disk** — a few MB a day for SPY; the directory is outside the repo (`INTRADAY_CHAIN_DIR` overrides). Prune by date when no longer needed.
 - **Schwab token** — uses the agent's own provider, so it adds no second token holder.
 - **Invalid mode in the preset file** (e.g. `"live"`) — warned and reset to the default `"off"`.
+- **Tickers (2026-11-24)** — live preset logs SPY, QQQ and IWM (was SPY only) so real 0DTE quotes for the same-day study (skill 72) accumulate three times faster; ~0.7 MB per ticker-day.
 
 ## 5. Cross-References
 
@@ -128,4 +129,4 @@ Preset fields (`trading_agent/strategy_presets.py`, Strategy-Profile panel "Intr
 
 ---
 
-*Last verified against repo HEAD on 2026-11-06.*
+*Last verified against repo HEAD on 2026-11-24.*

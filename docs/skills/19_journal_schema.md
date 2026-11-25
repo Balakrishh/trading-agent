@@ -191,6 +191,7 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 - **`trading_halt_set` / `trading_halt_cleared` (2026-10-07).** Ticker `__halt__`; raw_signal is the halt state (`paused`, `reason`, `set_by` operator / governor, day / week equity baselines). Written by the CLI and by the agent when the drawdown governor trips (skill 62).
 - **Rows without `action`** are the agent's `event` rows (`cycle_error`, `shutdown` — one per after-hours restart); readers skip them.
 - **`trend_filters`, `earnings_date`, `earnings_expiry_cap` (2026-10-15, skill 65).** `raw_signal.trend_filters` = `{direction, blocked, checks: [{name, mode, ok, reason, metrics}]}` on rows for a valid directional plan that reached the trend-filter gate (shadow or live); `ok: null` = not enough data. `earnings_date` / `earnings_expiry_cap` (ISO dates) appear on rows for a single stock with an upcoming report. Not new actions — fields on existing rows; a live-mode block reads `rejection_reason = "risk: trend: <filter> — <reason>"`.
+- **Same-day rows (2026-11-24, skill 72)** — the same-day stage writes `skipped_same_day` rows (`raw_signal.reason`, `slot`, `prior_vix`, `open_ref`, `spot`) and its submit rows carry `playbook: "same_day_momentum"` plus the plan fields; close rows now carry the position's `playbook` (`ClosedTrade.playbook`, append-only, default "").
 
 ## 5. Cross-References
 
@@ -203,4 +204,4 @@ Set via `JournalKB(journal_dir, run_mode="live")` or `"backtest"`. Live cycles a
 
 ---
 
-*Last verified against repo HEAD on 2026-11-06.*
+*Last verified against repo HEAD on 2026-11-24.*

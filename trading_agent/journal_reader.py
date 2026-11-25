@@ -91,6 +91,8 @@ class ClosedTrade:
     realized_pl: float
     expiration: str
     timestamp_utc: str  # ISO string, UTC; for display only
+    # Append-only (2026-11-24, skill 72): the position's playbook tag.
+    playbook: str = ""
 
 
 @dataclass(frozen=True)
@@ -276,6 +278,7 @@ class JournalReader:
             realized_pl=float(rs.get("net_unrealized_pl") or 0.0),
             expiration=str(rs.get("expiration", "") or ""),
             timestamp_utc=rec.get("timestamp", "") or "",
+            playbook=str(rs.get("playbook", "") or ""),
         )
 
     def realized_pl_today(self) -> float:
