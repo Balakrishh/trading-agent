@@ -208,5 +208,28 @@ def trade_risk_pct(plan, balance: float, max_risk_pct: float, max_contracts: int
     return min(float(max_risk_pct), cap)
 
 
+CLOSE_MARGIN_MIN = 35                 # 15:25 before a 16:00 close; 12:25 before a 13:00 one
+
+
+def effective_close(day: date, close_et: str) -> Optional[dtime]:
+    """The forced-close time for ``day``: ``close_et``, or
+    ``CLOSE_MARGIN_MIN`` before an earlier NYSE close (the Friday after
+    Thanksgiving closes at 13:00). A calendar failure keeps ``close_et``."""
+    if not valid_hhmm(close_et):
+        return None
+    cfg = parse_hhmm(close_et)
+    try:
+        from trading_agent.calendar_utils import session_close_et
+        sess = session_close_et(day)
+    except Exception as exc:                                  # noqa: BLE001, skill-34-exempt — fall back to the configured time
+        logger.warning("same-day: session close unavailable (%s) — using %s", exc, close_et)
+        return cfg
+    if sess is None:
+        return cfg
+    early = (datetime.combine(day, sess) - timedelta(minutes=CLOSE_MARGIN_MIN)).time()
+    return min(cfg, early)
+
+
 def past_close(now_et: datetime, close_et: str) -> bool:
-    return valid_hhmm(close_et) and now_et.time() >= parse_hhmm(close_et)
+    cut = effective_close(now_et.date(), close_et)
+    return cut is not None and now_et.time() >= cut

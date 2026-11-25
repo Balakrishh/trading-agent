@@ -22,7 +22,7 @@ side       = "call" if spot > ref, "put" if spot < ref, none if equal
 long K     = listed 0DTE strike nearest spot;  short K = nearest long ± same_day_width
 debit      = ask_long − bid_short (natural);  max_debit = debit;  max_loss = 100 × debit
 risk pct   = min(same_day_max_risk_pct, max_loss × max_contracts × 1.10 / equity)
-exits      : now ≥ same_day_close_et                → DTE_SAFETY (immediate)
+exits      : now ≥ min(same_day_close_et, NYSE close − 35 min) → DTE_SAFETY (immediate)
              −P&L_mid ≥ same_day_stop_pct × debit   → STOP_LOSS  (immediate)
              P&L ≥ same_day_target_pct × debit      → PROFIT_TARGET (immediate, no trail)
 ```
@@ -127,6 +127,7 @@ Preset fields (`strategy_presets.py`, all defaulted, `same_day_mode="off"`): `sa
 - **Exits** — target / stop act on the first cycle (no 3-cycle debounce: a 0DTE moves too far in 10 minutes); no profit trail; no regime-shift exit (a call debit is often opened against a bearish daily regime); forced close from 15:25 ET as DTE_SAFETY. Alpaca stops SPY 0DTE opening orders at 15:30 ET and auto-liquidates expiring broad-ETF positions from ~15:45 ET, which leaves several cycles to retry a failed close. The generic DTE safety never fires on the expiry day itself — only this rule closes a 0DTE.
 - **Stop cool-down** — a same-day stop does not start the 5-session cool-down for SPY (close rows carry `playbook`; `_stops_from` skips them).
 - **Stage failure** — any exception is logged, recorded with the exception monitor, and the cycle carries on with the regular pipeline.
+- **Early-close days (2026-11-24)** — `effective_close(day, close_et)` caps the forced close at `CLOSE_MARGIN_MIN` (35) minutes before the NYSE close from `calendar_utils.session_close_et`: 12:25 on the Friday after Thanksgiving (13:00 close), so the 12:30 / 14:00 slots never open and a position is closed before the bell. A calendar failure keeps `same_day_close_et`; the pre-market brief shows the day's real close time.
 
 ## 5. Cross-References
 

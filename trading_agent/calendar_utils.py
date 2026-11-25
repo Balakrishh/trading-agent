@@ -22,6 +22,7 @@ day, which silently breaks three places in the agent:
 
 from datetime import date, timedelta
 from functools import lru_cache
+from datetime import time as dtime
 from typing import List, Optional
 
 import pandas_market_calendars as mcal
@@ -52,6 +53,15 @@ def is_trading_day(d: date) -> bool:
     Labor Day, Christmas).
     """
     return bool(_valid_days(d, d))
+
+
+def session_close_et(d: date) -> Optional[dtime]:
+    """NYSE close of *d* in ET (16:00, or 13:00 on an early-close day such
+    as the Friday after Thanksgiving); None when *d* is not a session."""
+    sched = _nyse().schedule(start_date=d, end_date=d)
+    if sched.empty:
+        return None
+    return sched["market_close"].iloc[0].tz_convert("America/New_York").time()
 
 
 def next_sessions(today: date, n: int) -> List[date]:

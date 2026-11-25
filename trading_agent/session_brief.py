@@ -193,8 +193,10 @@ def _entry_lines(ctx: Dict[str, Any]) -> List[str]:
         verdict = ("VIX n/a" if vix is None else
                    f"VIX {vix:.1f} ≥ {floor:g} — trades at {','.join(pre.same_day_entry_times_et)}"
                    if vix >= floor else f"VIX {vix:.1f} < {floor:g} — no trades")
+        from trading_agent.same_day_momentum import effective_close
+        cut = effective_close(ctx["today"], pre.same_day_close_et) if ctx.get("today") else None
         out.append(f"  Same-day momentum ({_e(pre.same_day_ticker)} 0DTE, closes by "
-                   f"{pre.same_day_close_et}): {verdict}")
+                   f"{cut.strftime('%H:%M') if cut else pre.same_day_close_et}): {verdict}")
     return out or ["  no ticker-level blocks"]
 
 

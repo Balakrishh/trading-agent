@@ -1068,7 +1068,8 @@ class PositionMonitor:
         if past_close(now_et, self.same_day_close_et) or (
                 spread.expiration and spread.expiration < now_et.date().isoformat()):
             return (ExitSignal.DTE_SAFETY,
-                    f"Same-day close: {now_et:%H:%M} ET ≥ {self.same_day_close_et} — "
+                    f"Same-day close: {now_et:%H:%M} ET past the forced close ({self.same_day_close_et}, "
+                    f"earlier on a half day) — "
                     f"closing the {spread.expiration} position before the end of the session")
         loss = -spread.net_unrealized_pl
         stop = debit_position * self.same_day_stop_pct
